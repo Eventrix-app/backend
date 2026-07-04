@@ -1,0 +1,939 @@
+{
+  "info": {
+    "name": "Eventrix Backend API - With Logging",
+    "schema": "https://schema.getpostman.com/json/collection/v2.1.0/collection.json",
+    "description": "Postman collection for Eventrix backend endpoints with comprehensive logging for all API calls. 🔑 AUTO TOKEN SETUP + 📊 AUTO LOGGING on every request."
+  },
+  "variable": [
+    { "key": "baseUrl", "value": "http://localhost:3000", "type": "string" },
+    { "key": "accessToken", "value": "", "type": "string" },
+    { "key": "adminId", "value": "", "type": "string" },
+    { "key": "organizerId", "value": "", "type": "string" },
+    { "key": "participantId", "value": "", "type": "string" },
+    { "key": "eventId", "value": "", "type": "string" },
+    { "key": "lastCreatedId", "value": "", "type": "string" }
+  ],
+  "item": [
+    {
+      "name": "Root Health Check",
+      "request": {
+        "method": "GET",
+        "header": [],
+        "url": { "raw": "{{baseUrl}}/", "host": ["{{baseUrl}}"], "path": [""] }
+      },
+      "event": [
+        {
+          "listen": "test",
+          "script": {
+            "type": "text/javascript",
+            "exec": [
+              "console.log('\\n🏥 ROOT HEALTH CHECK');",
+              "console.log('━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━');",
+              "console.log('📍 Endpoint: GET /');",
+              "console.log('⏱️  Response Time: ' + pm.response.responseTime + 'ms');",
+              "console.log('📊 Status Code: ' + pm.response.code);",
+              "try { const data = pm.response.json(); console.log('✅ Response:', JSON.stringify(data, null, 2)); } catch (e) { console.log('⚠️  Response:', pm.response.text()); }",
+              "console.log('━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━\\n');"
+            ]
+          }
+        }
+      ]
+    },
+    {
+      "name": "Auth",
+      "item": [
+        {
+          "name": "Register",
+          "request": {
+            "method": "POST",
+            "header": [{ "key": "Content-Type", "value": "application/json" }],
+            "body": {
+              "mode": "raw",
+              "raw": "{\n  \"username\": \"testuser\",\n  \"email\": \"test@example.com\",\n  \"password\": \"Password123!\",\n  \"firstName\": \"Test\",\n  \"lastName\": \"User\",\n  \"role\": \"participant\"\n}",
+              "options": { "raw": { "language": "json" } }
+            },
+            "url": { "raw": "{{baseUrl}}/auth/register", "host": ["{{baseUrl}}"], "path": ["auth", "register"] }
+          },
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "console.log('\\n📝 REGISTER USER');",
+                  "console.log('━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━');",
+                  "console.log('📍 Endpoint: POST /auth/register');",
+                  "console.log('⏱️  Response Time: ' + pm.response.responseTime + 'ms');",
+                  "console.log('📊 Status Code: ' + pm.response.code);",
+                  "const registerData = pm.response.json();",
+                  "if (pm.response.code === 201 || pm.response.code === 200) {",
+                  "  console.log('✅ User Registration Successful');",
+                  "  console.log('👤 Email: ' + registerData.email);",
+                  "  console.log('🆔 User ID: ' + registerData.id);",
+                  "  console.log('🔐 Role: ' + registerData.role);",
+                  "} else {",
+                  "  console.log('❌ Registration Failed');",
+                  "  console.log('⚠️  Error: ' + registerData.message);",
+                  "}",
+                  "console.log('📋 Full Response:', JSON.stringify(registerData, null, 2));",
+                  "console.log('━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━\\n');"
+                ]
+              }
+            }
+          ]
+        },
+        {
+          "name": "Login",
+          "request": {
+            "method": "POST",
+            "header": [{ "key": "Content-Type", "value": "application/json" }],
+            "body": {
+              "mode": "raw",
+              "raw": "{\n  \"email\": \"admin@example.com\",\n  \"password\": \"Password123!\"\n}",
+              "options": { "raw": { "language": "json" } }
+            },
+            "url": { "raw": "{{baseUrl}}/auth/login", "host": ["{{baseUrl}}"], "path": ["auth", "login"] }
+          },
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "console.log('\\n🔐 LOGIN USER');",
+                  "console.log('━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━');",
+                  "console.log('📍 Endpoint: POST /auth/login');",
+                  "console.log('⏱️  Response Time: ' + pm.response.responseTime + 'ms');",
+                  "console.log('📊 Status Code: ' + pm.response.code);",
+                  "const loginData = pm.response.json();",
+                  "if (loginData && (loginData.accessToken || loginData.token)) {",
+                  "  const token = loginData.accessToken || loginData.token;",
+                  "  pm.collectionVariables.set('accessToken', token);",
+                  "  pm.environment.set('accessToken', token);",
+                  "  if (loginData.role) pm.environment.set('userRole', loginData.role);",
+                  "  console.log('✅ Login Successful');",
+                  "  console.log('👤 Email: ' + loginData.email);",
+                  "  console.log('🔐 Role: ' + (loginData.role || 'user'));",
+                  "  console.log('🆔 User ID: ' + loginData.id);",
+                  "  console.log('⏰ Token Expires In: ' + loginData.expiresIn + 's');",
+                  "  console.log('🔑 Token (First 30 chars): ' + token.substring(0, 30) + '...');",
+                  "} else {",
+                  "  console.log('❌ Login Failed');",
+                  "  console.log('⚠️  Error: ' + loginData.message);",
+                  "}",
+                  "console.log('📋 Full Response:', JSON.stringify(loginData, null, 2));",
+                  "console.log('━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━\\n');"
+                ]
+              }
+            }
+          ]
+        }
+      ]
+    },
+    {
+      "name": "Admins",
+      "item": [
+        {
+          "name": "Create Admin",
+          "request": {
+            "method": "POST",
+            "header": [
+              { "key": "Content-Type", "value": "application/json" },
+              { "key": "Authorization", "value": "Bearer {{accessToken}}" }
+            ],
+            "body": {
+              "mode": "raw",
+              "raw": "{\n  \"username\": \"adminuser\",\n  \"email\": \"admin@example.com\",\n  \"password\": \"Password123!\",\n  \"firstName\": \"Admin\",\n  \"lastName\": \"User\",\n  \"phone\": \"9876543210\",\n  \"isActive\": true\n}",
+              "options": { "raw": { "language": "json" } }
+            },
+            "url": { "raw": "{{baseUrl}}/admins", "host": ["{{baseUrl}}"], "path": ["admins"] }
+          },
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "console.log('\\n👨‍💼 CREATE ADMIN');",
+                  "console.log('━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━');",
+                  "console.log('📍 Endpoint: POST /admins');",
+                  "console.log('⏱️  Response Time: ' + pm.response.responseTime + 'ms');",
+                  "console.log('📊 Status Code: ' + pm.response.code);",
+                  "const createData = pm.response.json();",
+                  "if (pm.response.code === 201 || pm.response.code === 200) {",
+                  "  pm.environment.set('adminId', createData.id);",
+                  "  console.log('✅ Admin Created Successfully');",
+                  "  console.log('🆔 Admin ID: ' + createData.id);",
+                  "  console.log('📧 Email: ' + createData.email);",
+                  "  console.log('👤 Name: ' + createData.firstName + ' ' + createData.lastName);",
+                  "  console.log('📱 Phone: ' + createData.phone);",
+                  "} else {",
+                  "  console.log('❌ Failed to Create Admin');",
+                  "  console.log('⚠️  Status: ' + createData.statusCode);",
+                  "  console.log('⚠️  Error: ' + JSON.stringify(createData.message));",
+                  "}",
+                  "console.log('📋 Full Response:', JSON.stringify(createData, null, 2));",
+                  "console.log('━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━\\n');"
+                ]
+              }
+            }
+          ]
+        },
+        {
+          "name": "List Admins",
+          "request": {
+            "method": "GET",
+            "header": [{ "key": "Authorization", "value": "Bearer {{accessToken}}" }],
+            "url": { "raw": "{{baseUrl}}/admins", "host": ["{{baseUrl}}"], "path": ["admins"] }
+          },
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "console.log('\\n📋 LIST ADMINS');",
+                  "console.log('━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━');",
+                  "console.log('📍 Endpoint: GET /admins');",
+                  "console.log('⏱️  Response Time: ' + pm.response.responseTime + 'ms');",
+                  "console.log('📊 Status Code: ' + pm.response.code);",
+                  "const listData = pm.response.json();",
+                  "if (pm.response.code === 200) {",
+                  "  console.log('✅ Fetched ' + (Array.isArray(listData) ? listData.length : 1) + ' admin(s)');",
+                  "  if (Array.isArray(listData)) {",
+                  "    listData.forEach((admin, idx) => { console.log('  [' + (idx+1) + '] ' + admin.firstName + ' ' + admin.lastName + ' (' + admin.email + ')'); });",
+                  "  }",
+                  "} else {",
+                  "  console.log('❌ Failed to List Admins');",
+                  "  console.log('⚠️  Error: ' + listData.message);",
+                  "}",
+                  "console.log('📋 Full Response:', JSON.stringify(listData, null, 2));",
+                  "console.log('━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━\\n');"
+                ]
+              }
+            }
+          ]
+        },
+        {
+          "name": "Get Admin By ID",
+          "request": {
+            "method": "GET",
+            "header": [{ "key": "Authorization", "value": "Bearer {{accessToken}}" }],
+            "url": { "raw": "{{baseUrl}}/admins/{{adminId}}", "host": ["{{baseUrl}}"], "path": ["admins", "{{adminId}}"] }
+          },
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "console.log('\\n🔍 GET ADMIN BY ID');",
+                  "console.log('━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━');",
+                  "console.log('📍 Endpoint: GET /admins/{{adminId}}');",
+                  "console.log('⏱️  Response Time: ' + pm.response.responseTime + 'ms');",
+                  "console.log('📊 Status Code: ' + pm.response.code);",
+                  "const getData = pm.response.json();",
+                  "if (pm.response.code === 200) {",
+                  "  console.log('✅ Admin Retrieved Successfully');",
+                  "  console.log('🆔 ID: ' + getData.id);",
+                  "  console.log('👤 Name: ' + getData.firstName + ' ' + getData.lastName);",
+                  "  console.log('📧 Email: ' + getData.email);",
+                  "  console.log('📱 Phone: ' + getData.phone);",
+                  "} else {",
+                  "  console.log('❌ Failed to Get Admin');",
+                  "  console.log('⚠️  Error: ' + getData.message);",
+                  "}",
+                  "console.log('📋 Full Response:', JSON.stringify(getData, null, 2));",
+                  "console.log('━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━\\n');"
+                ]
+              }
+            }
+          ]
+        },
+        {
+          "name": "Update Admin",
+          "request": {
+            "method": "PATCH",
+            "header": [
+              { "key": "Content-Type", "value": "application/json" },
+              { "key": "Authorization", "value": "Bearer {{accessToken}}" }
+            ],
+            "body": {
+              "mode": "raw",
+              "raw": "{\n  \"firstName\": \"Admin\",\n  \"lastName\": \"Updated\",\n  \"phone\": \"9999999999\",\n  \"isActive\": true\n}",
+              "options": { "raw": { "language": "json" } }
+            },
+            "url": { "raw": "{{baseUrl}}/admins/{{adminId}}", "host": ["{{baseUrl}}"], "path": ["admins", "{{adminId}}"] }
+          },
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "console.log('\\n✏️  UPDATE ADMIN');",
+                  "console.log('━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━');",
+                  "console.log('📍 Endpoint: PATCH /admins/{{adminId}}');",
+                  "console.log('⏱️  Response Time: ' + pm.response.responseTime + 'ms');",
+                  "console.log('📊 Status Code: ' + pm.response.code);",
+                  "const updateData = pm.response.json();",
+                  "if (pm.response.code === 200) {",
+                  "  console.log('✅ Admin Updated Successfully');",
+                  "  console.log('🆔 ID: ' + updateData.id);",
+                  "  console.log('👤 Updated Name: ' + updateData.firstName + ' ' + updateData.lastName);",
+                  "  console.log('📱 Updated Phone: ' + updateData.phone);",
+                  "} else {",
+                  "  console.log('❌ Failed to Update Admin');",
+                  "  console.log('⚠️  Error: ' + updateData.message);",
+                  "}",
+                  "console.log('📋 Full Response:', JSON.stringify(updateData, null, 2));",
+                  "console.log('━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━\\n');"
+                ]
+              }
+            }
+          ]
+        },
+        {
+          "name": "Delete Admin",
+          "request": {
+            "method": "DELETE",
+            "header": [{ "key": "Authorization", "value": "Bearer {{accessToken}}" }],
+            "url": { "raw": "{{baseUrl}}/admins/{{adminId}}", "host": ["{{baseUrl}}"], "path": ["admins", "{{adminId}}"] }
+          },
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "console.log('\\n🗑️  DELETE ADMIN');",
+                  "console.log('━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━');",
+                  "console.log('📍 Endpoint: DELETE /admins/{{adminId}}');",
+                  "console.log('⏱️  Response Time: ' + pm.response.responseTime + 'ms');",
+                  "console.log('📊 Status Code: ' + pm.response.code);",
+                  "if (pm.response.code === 200) {",
+                  "  console.log('✅ Admin Deleted Successfully');",
+                  "  pm.environment.set('adminId', '');",
+                  "} else {",
+                  "  const delData = pm.response.json();",
+                  "  console.log('❌ Failed to Delete Admin');",
+                  "  console.log('⚠️  Error: ' + delData.message);",
+                  "}",
+                  "try { console.log('📋 Response:', JSON.stringify(pm.response.json(), null, 2)); } catch(e) {}",
+                  "console.log('━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━\\n');"
+                ]
+              }
+            }
+          ]
+        }
+      ]
+    },
+    {
+      "name": "Organizers",
+      "item": [
+        {
+          "name": "Create Organizer",
+          "request": {
+            "method": "POST",
+            "header": [
+              { "key": "Content-Type", "value": "application/json" },
+              { "key": "Authorization", "value": "Bearer {{accessToken}}" }
+            ],
+            "body": {
+              "mode": "raw",
+              "raw": "{\n  \"username\": \"organizeruser\",\n  \"email\": \"organizer@example.com\",\n  \"password\": \"Password123!\",\n  \"firstName\": \"Organ\",\n  \"lastName\": \"Izer\",\n  \"dateOfBirth\": \"1990-03-20\",\n  \"gender\": \"Male\",\n  \"phone\": \"9876543210\",\n  \"qualification\": \"Bachelor's\",\n  \"designation\": \"Event Manager\",\n  \"experienceYears\": 5,\n  \"city\": \"San Francisco\",\n  \"state\": \"CA\",\n  \"country\": \"USA\",\n  \"pincode\": \"94105\",\n  \"instituteName\": \"EventTech\",\n  \"establishmentYear\": 2010,\n  \"headOfInstitute\": \"John Smith\",\n  \"commissionRate\": 15.5,\n  \"settlementCycleDays\": 7,\n  \"isActive\": true\n}",
+              "options": { "raw": { "language": "json" } }
+            },
+            "url": { "raw": "{{baseUrl}}/organizers", "host": ["{{baseUrl}}"], "path": ["organizers"] }
+          },
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "console.log('\\n👨‍🎓 CREATE ORGANIZER');",
+                  "console.log('━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━');",
+                  "console.log('📍 Endpoint: POST /organizers');",
+                  "console.log('⏱️  Response Time: ' + pm.response.responseTime + 'ms');",
+                  "console.log('📊 Status Code: ' + pm.response.code);",
+                  "const createOrgData = pm.response.json();",
+                  "if (pm.response.code === 201 || pm.response.code === 200) {",
+                  "  pm.environment.set('organizerId', createOrgData.id);",
+                  "  console.log('✅ Organizer Created Successfully');",
+                  "  console.log('🆔 Organizer ID: ' + createOrgData.id);",
+                  "  console.log('📧 Email: ' + createOrgData.email);",
+                  "  console.log('👤 Name: ' + createOrgData.firstName + ' ' + createOrgData.lastName);",
+                  "  console.log('🏢 Institution: ' + createOrgData.instituteName);",
+                  "  console.log('💼 Experience: ' + createOrgData.experienceYears + ' years');",
+                  "} else {",
+                  "  console.log('❌ Failed to Create Organizer');",
+                  "  console.log('⚠️  Error: ' + JSON.stringify(createOrgData.message));",
+                  "}",
+                  "console.log('📋 Full Response:', JSON.stringify(createOrgData, null, 2));",
+                  "console.log('━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━\\n');"
+                ]
+              }
+            }
+          ]
+        },
+        {
+          "name": "List Organizers",
+          "request": {
+            "method": "GET",
+            "header": [{ "key": "Authorization", "value": "Bearer {{accessToken}}" }],
+            "url": { "raw": "{{baseUrl}}/organizers", "host": ["{{baseUrl}}"], "path": ["organizers"] }
+          },
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "console.log('\\n📋 LIST ORGANIZERS');",
+                  "console.log('━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━');",
+                  "console.log('📍 Endpoint: GET /organizers');",
+                  "console.log('⏱️  Response Time: ' + pm.response.responseTime + 'ms');",
+                  "console.log('📊 Status Code: ' + pm.response.code);",
+                  "const listOrgData = pm.response.json();",
+                  "if (pm.response.code === 200) {",
+                  "  console.log('✅ Fetched ' + (Array.isArray(listOrgData) ? listOrgData.length : 1) + ' organizer(s)');",
+                  "  if (Array.isArray(listOrgData)) {",
+                  "    listOrgData.forEach((org, idx) => { console.log('  [' + (idx+1) + '] ' + org.firstName + ' ' + org.lastName + ' (' + org.email + ') - ' + org.instituteName); });",
+                  "  }",
+                  "} else {",
+                  "  console.log('❌ Failed to List Organizers');",
+                  "  console.log('⚠️  Error: ' + listOrgData.message);",
+                  "}",
+                  "console.log('📋 Full Response:', JSON.stringify(listOrgData, null, 2));",
+                  "console.log('━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━\\n');"
+                ]
+              }
+            }
+          ]
+        },
+        {
+          "name": "Get Organizer By ID",
+          "request": {
+            "method": "GET",
+            "header": [{ "key": "Authorization", "value": "Bearer {{accessToken}}" }],
+            "url": { "raw": "{{baseUrl}}/organizers/{{organizerId}}", "host": ["{{baseUrl}}"], "path": ["organizers", "{{organizerId}}"] }
+          },
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "console.log('\\n🔍 GET ORGANIZER BY ID');",
+                  "console.log('━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━');",
+                  "console.log('📍 Endpoint: GET /organizers/{{organizerId}}');",
+                  "console.log('⏱️  Response Time: ' + pm.response.responseTime + 'ms');",
+                  "console.log('📊 Status Code: ' + pm.response.code);",
+                  "const getOrgData = pm.response.json();",
+                  "if (pm.response.code === 200) {",
+                  "  console.log('✅ Organizer Retrieved Successfully');",
+                  "  console.log('🆔 ID: ' + getOrgData.id);",
+                  "  console.log('👤 Name: ' + getOrgData.firstName + ' ' + getOrgData.lastName);",
+                  "  console.log('📧 Email: ' + getOrgData.email);",
+                  "  console.log('🏢 Institution: ' + getOrgData.instituteName);",
+                  "  console.log('💼 Experience: ' + getOrgData.experienceYears + ' years');",
+                  "} else {",
+                  "  console.log('❌ Failed to Get Organizer');",
+                  "  console.log('⚠️  Error: ' + getOrgData.message);",
+                  "}",
+                  "console.log('📋 Full Response:', JSON.stringify(getOrgData, null, 2));",
+                  "console.log('━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━\\n');"
+                ]
+              }
+            }
+          ]
+        },
+        {
+          "name": "Update Organizer",
+          "request": {
+            "method": "PATCH",
+            "header": [
+              { "key": "Content-Type", "value": "application/json" },
+              { "key": "Authorization", "value": "Bearer {{accessToken}}" }
+            ],
+            "body": {
+              "mode": "raw",
+              "raw": "{\n  \"firstName\": \"Organizer\",\n  \"lastName\": \"Updated\",\n  \"phone\": \"9999999999\",\n  \"experienceYears\": 8,\n  \"commissionRate\": 12.5,\n  \"status\": \"APPROVED\",\n  \"isActive\": true\n}",
+              "options": { "raw": { "language": "json" } }
+            },
+            "url": { "raw": "{{baseUrl}}/organizers/{{organizerId}}", "host": ["{{baseUrl}}"], "path": ["organizers", "{{organizerId}}"] }
+          },
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "console.log('\\n✏️  UPDATE ORGANIZER');",
+                  "console.log('━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━');",
+                  "console.log('📍 Endpoint: PATCH /organizers/{{organizerId}}');",
+                  "console.log('⏱️  Response Time: ' + pm.response.responseTime + 'ms');",
+                  "console.log('📊 Status Code: ' + pm.response.code);",
+                  "const updateOrgData = pm.response.json();",
+                  "if (pm.response.code === 200) {",
+                  "  console.log('✅ Organizer Updated Successfully');",
+                  "  console.log('🆔 ID: ' + updateOrgData.id);",
+                  "  console.log('👤 Updated Name: ' + updateOrgData.firstName + ' ' + updateOrgData.lastName);",
+                  "  console.log('💼 Updated Experience: ' + updateOrgData.experienceYears + ' years');",
+                  "  console.log('💰 Commission Rate: ' + updateOrgData.commissionRate + '%');",
+                  "} else {",
+                  "  console.log('❌ Failed to Update Organizer');",
+                  "  console.log('⚠️  Error: ' + updateOrgData.message);",
+                  "}",
+                  "console.log('📋 Full Response:', JSON.stringify(updateOrgData, null, 2));",
+                  "console.log('━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━\\n');"
+                ]
+              }
+            }
+          ]
+        },
+        {
+          "name": "Delete Organizer",
+          "request": {
+            "method": "DELETE",
+            "header": [{ "key": "Authorization", "value": "Bearer {{accessToken}}" }],
+            "url": { "raw": "{{baseUrl}}/organizers/{{organizerId}}", "host": ["{{baseUrl}}"], "path": ["organizers", "{{organizerId}}"] }
+          },
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "console.log('\\n🗑️  DELETE ORGANIZER');",
+                  "console.log('━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━');",
+                  "console.log('📍 Endpoint: DELETE /organizers/{{organizerId}}');",
+                  "console.log('⏱️  Response Time: ' + pm.response.responseTime + 'ms');",
+                  "console.log('📊 Status Code: ' + pm.response.code);",
+                  "if (pm.response.code === 200) {",
+                  "  console.log('✅ Organizer Deleted Successfully');",
+                  "  pm.environment.set('organizerId', '');",
+                  "} else {",
+                  "  const delOrgData = pm.response.json();",
+                  "  console.log('❌ Failed to Delete Organizer');",
+                  "  console.log('⚠️  Error: ' + delOrgData.message);",
+                  "}",
+                  "try { console.log('📋 Response:', JSON.stringify(pm.response.json(), null, 2)); } catch(e) {}",
+                  "console.log('━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━\\n');"
+                ]
+              }
+            }
+          ]
+        }
+      ]
+    },
+    {
+      "name": "Participants",
+      "item": [
+        {
+          "name": "Create Participant",
+          "request": {
+            "method": "POST",
+            "header": [
+              { "key": "Content-Type", "value": "application/json" },
+              { "key": "Authorization", "value": "Bearer {{accessToken}}" }
+            ],
+            "body": {
+              "mode": "raw",
+              "raw": "{\n  \"username\": \"participantuser\",\n  \"email\": \"participant@example.com\",\n  \"password\": \"Password123!\",\n  \"firstName\": \"Parti\",\n  \"lastName\": \"Cipant\",\n  \"gender\": \"Male\",\n  \"dateOfBirth\": \"1995-05-15\",\n  \"phone\": \"9876543210\",\n  \"addressType\": \"Residential\",\n  \"addressLine\": \"123 Main Street\",\n  \"city\": \"New York\",\n  \"state\": \"NY\",\n  \"country\": \"USA\",\n  \"pincode\": \"10001\",\n  \"isActive\": true\n}",
+              "options": { "raw": { "language": "json" } }
+            },
+            "url": { "raw": "{{baseUrl}}/participants", "host": ["{{baseUrl}}"], "path": ["participants"] }
+          },
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "console.log('\\n👥 CREATE PARTICIPANT');",
+                  "console.log('━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━');",
+                  "console.log('📍 Endpoint: POST /participants');",
+                  "console.log('⏱️  Response Time: ' + pm.response.responseTime + 'ms');",
+                  "console.log('📊 Status Code: ' + pm.response.code);",
+                  "const createPartData = pm.response.json();",
+                  "if (pm.response.code === 201 || pm.response.code === 200) {",
+                  "  pm.environment.set('participantId', createPartData.id);",
+                  "  console.log('✅ Participant Created Successfully');",
+                  "  console.log('🆔 Participant ID: ' + createPartData.id);",
+                  "  console.log('📧 Email: ' + createPartData.email);",
+                  "  console.log('👤 Name: ' + createPartData.firstName + ' ' + createPartData.lastName);",
+                  "  console.log('📱 Phone: ' + createPartData.phone);",
+                  "  console.log('📍 Location: ' + createPartData.city + ', ' + createPartData.state);",
+                  "} else {",
+                  "  console.log('❌ Failed to Create Participant');",
+                  "  console.log('⚠️  Error: ' + JSON.stringify(createPartData.message));",
+                  "}",
+                  "console.log('📋 Full Response:', JSON.stringify(createPartData, null, 2));",
+                  "console.log('━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━\\n');"
+                ]
+              }
+            }
+          ]
+        },
+        {
+          "name": "List Participants",
+          "request": {
+            "method": "GET",
+            "header": [{ "key": "Authorization", "value": "Bearer {{accessToken}}" }],
+            "url": { "raw": "{{baseUrl}}/participants", "host": ["{{baseUrl}}"], "path": ["participants"] }
+          },
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "console.log('\\n📋 LIST PARTICIPANTS');",
+                  "console.log('━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━');",
+                  "console.log('📍 Endpoint: GET /participants');",
+                  "console.log('⏱️  Response Time: ' + pm.response.responseTime + 'ms');",
+                  "console.log('📊 Status Code: ' + pm.response.code);",
+                  "const listPartData = pm.response.json();",
+                  "if (pm.response.code === 200) {",
+                  "  console.log('✅ Fetched ' + (Array.isArray(listPartData) ? listPartData.length : 1) + ' participant(s)');",
+                  "  if (Array.isArray(listPartData)) {",
+                  "    listPartData.forEach((part, idx) => { console.log('  [' + (idx+1) + '] ' + part.firstName + ' ' + part.lastName + ' (' + part.email + ') - ' + part.city); });",
+                  "  }",
+                  "} else {",
+                  "  console.log('❌ Failed to List Participants');",
+                  "  console.log('⚠️  Error: ' + listPartData.message);",
+                  "}",
+                  "console.log('📋 Full Response:', JSON.stringify(listPartData, null, 2));",
+                  "console.log('━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━\\n');"
+                ]
+              }
+            }
+          ]
+        },
+        {
+          "name": "Get Participant By ID",
+          "request": {
+            "method": "GET",
+            "header": [{ "key": "Authorization", "value": "Bearer {{accessToken}}" }],
+            "url": { "raw": "{{baseUrl}}/participants/{{participantId}}", "host": ["{{baseUrl}}"], "path": ["participants", "{{participantId}}"] }
+          },
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "console.log('\\n🔍 GET PARTICIPANT BY ID');",
+                  "console.log('━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━');",
+                  "console.log('📍 Endpoint: GET /participants/{{participantId}}');",
+                  "console.log('⏱️  Response Time: ' + pm.response.responseTime + 'ms');",
+                  "console.log('📊 Status Code: ' + pm.response.code);",
+                  "const getPartData = pm.response.json();",
+                  "if (pm.response.code === 200) {",
+                  "  console.log('✅ Participant Retrieved Successfully');",
+                  "  console.log('🆔 ID: ' + getPartData.id);",
+                  "  console.log('👤 Name: ' + getPartData.firstName + ' ' + getPartData.lastName);",
+                  "  console.log('📧 Email: ' + getPartData.email);",
+                  "  console.log('📱 Phone: ' + getPartData.phone);",
+                  "  console.log('📍 Address: ' + getPartData.addressLine + ', ' + getPartData.city + ', ' + getPartData.state);",
+                  "} else {",
+                  "  console.log('❌ Failed to Get Participant');",
+                  "  console.log('⚠️  Error: ' + getPartData.message);",
+                  "}",
+                  "console.log('📋 Full Response:', JSON.stringify(getPartData, null, 2));",
+                  "console.log('━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━\\n');"
+                ]
+              }
+            }
+          ]
+        },
+        {
+          "name": "Update Participant",
+          "request": {
+            "method": "PATCH",
+            "header": [
+              { "key": "Content-Type", "value": "application/json" },
+              { "key": "Authorization", "value": "Bearer {{accessToken}}" }
+            ],
+            "body": {
+              "mode": "raw",
+              "raw": "{\n  \"firstName\": \"Participant\",\n  \"lastName\": \"Updated\",\n  \"phone\": \"9999999999\",\n  \"city\": \"Los Angeles\",\n  \"state\": \"CA\",\n  \"isActive\": true\n}",
+              "options": { "raw": { "language": "json" } }
+            },
+            "url": { "raw": "{{baseUrl}}/participants/{{participantId}}", "host": ["{{baseUrl}}"], "path": ["participants", "{{participantId}}"] }
+          },
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "console.log('\\n✏️  UPDATE PARTICIPANT');",
+                  "console.log('━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━');",
+                  "console.log('📍 Endpoint: PATCH /participants/{{participantId}}');",
+                  "console.log('⏱️  Response Time: ' + pm.response.responseTime + 'ms');",
+                  "console.log('📊 Status Code: ' + pm.response.code);",
+                  "const updatePartData = pm.response.json();",
+                  "if (pm.response.code === 200) {",
+                  "  console.log('✅ Participant Updated Successfully');",
+                  "  console.log('🆔 ID: ' + updatePartData.id);",
+                  "  console.log('👤 Updated Name: ' + updatePartData.firstName + ' ' + updatePartData.lastName);",
+                  "  console.log('📱 Updated Phone: ' + updatePartData.phone);",
+                  "  console.log('📍 Updated Location: ' + updatePartData.city + ', ' + updatePartData.state);",
+                  "} else {",
+                  "  console.log('❌ Failed to Update Participant');",
+                  "  console.log('⚠️  Error: ' + updatePartData.message);",
+                  "}",
+                  "console.log('📋 Full Response:', JSON.stringify(updatePartData, null, 2));",
+                  "console.log('━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━\\n');"
+                ]
+              }
+            }
+          ]
+        },
+        {
+          "name": "Delete Participant",
+          "request": {
+            "method": "DELETE",
+            "header": [{ "key": "Authorization", "value": "Bearer {{accessToken}}" }],
+            "url": { "raw": "{{baseUrl}}/participants/{{participantId}}", "host": ["{{baseUrl}}"], "path": ["participants", "{{participantId}}"] }
+          },
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "console.log('\\n🗑️  DELETE PARTICIPANT');",
+                  "console.log('━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━');",
+                  "console.log('📍 Endpoint: DELETE /participants/{{participantId}}');",
+                  "console.log('⏱️  Response Time: ' + pm.response.responseTime + 'ms');",
+                  "console.log('📊 Status Code: ' + pm.response.code);",
+                  "if (pm.response.code === 200) {",
+                  "  console.log('✅ Participant Deleted Successfully');",
+                  "  pm.environment.set('participantId', '');",
+                  "} else {",
+                  "  const delPartData = pm.response.json();",
+                  "  console.log('❌ Failed to Delete Participant');",
+                  "  console.log('⚠️  Error: ' + delPartData.message);",
+                  "}",
+                  "try { console.log('📋 Response:', JSON.stringify(pm.response.json(), null, 2)); } catch(e) {}",
+                  "console.log('━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━\\n');"
+                ]
+              }
+            }
+          ]
+        }
+      ]
+    },
+    {
+      "name": "Events",
+      "item": [
+        {
+          "name": "Create Event",
+          "request": {
+            "method": "POST",
+            "header": [
+              { "key": "Content-Type", "value": "application/json" },
+              { "key": "Authorization", "value": "Bearer {{accessToken}}" }
+            ],
+            "body": {
+              "mode": "raw",
+              "raw": "{\n  \"organizerId\": \"{{organizerId}}\",\n  \"title\": \"Tech Conference 2024\",\n  \"description\": \"Annual technology conference featuring latest trends\",\n  \"categoryId\": \"<category-uuid>\",\n  \"venueName\": \"Tech Center\",\n  \"venueAddress\": \"123 Innovation Street, San Francisco, CA\",\n  \"eventDate\": \"2024-12-15\",\n  \"startTime\": \"09:00:00\",\n  \"endTime\": \"17:00:00\",\n  \"pricePerTicket\": 99.99,\n  \"totalCapacity\": 500,\n  \"availableTickets\": 500,\n  \"status\": \"active\"\n}",
+              "options": { "raw": { "language": "json" } }
+            },
+            "url": { "raw": "{{baseUrl}}/events", "host": ["{{baseUrl}}"], "path": ["events"] }
+          },
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "console.log('\\n🎪 CREATE EVENT');",
+                  "console.log('━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━');",
+                  "console.log('📍 Endpoint: POST /events');",
+                  "console.log('⏱️  Response Time: ' + pm.response.responseTime + 'ms');",
+                  "console.log('📊 Status Code: ' + pm.response.code);",
+                  "const eventData = pm.response.json();",
+                  "if (pm.response.code === 201 || pm.response.code === 200) {",
+                  "  pm.environment.set('eventId', eventData.id);",
+                  "  console.log('✅ Event Created Successfully');",
+                  "  console.log('🆔 Event ID: ' + eventData.id);",
+                  "  console.log('🎪 Title: ' + eventData.title);",
+                  "  console.log('📅 Date: ' + eventData.eventDate);",
+                  "  console.log('🏢 Venue: ' + eventData.venueName);",
+                  "  console.log('💰 Price: $' + eventData.pricePerTicket);",
+                  "  console.log('🎟️  Capacity: ' + eventData.totalCapacity);",
+                  "} else {",
+                  "  console.log('❌ Failed to Create Event');",
+                  "  console.log('⚠️  Error: ' + JSON.stringify(eventData.message));",
+                  "}",
+                  "console.log('📋 Full Response:', JSON.stringify(eventData, null, 2));",
+                  "console.log('━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━\\n');"
+                ]
+              }
+            }
+          ]
+        },
+        {
+          "name": "List All Events",
+          "request": {
+            "method": "GET",
+            "header": [],
+            "url": { "raw": "{{baseUrl}}/events", "host": ["{{baseUrl}}"], "path": ["events"] }
+          },
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "console.log('\\n📋 LIST ALL EVENTS');",
+                  "console.log('━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━');",
+                  "console.log('📍 Endpoint: GET /events');",
+                  "console.log('⏱️  Response Time: ' + pm.response.responseTime + 'ms');",
+                  "console.log('📊 Status Code: ' + pm.response.code);",
+                  "const eventsData = pm.response.json();",
+                  "if (pm.response.code === 200) {",
+                  "  console.log('✅ Fetched ' + (Array.isArray(eventsData) ? eventsData.length : 1) + ' event(s)');",
+                  "  if (Array.isArray(eventsData)) {",
+                  "    eventsData.forEach((evt, idx) => { console.log('  [' + (idx+1) + '] ' + evt.title + ' - ' + evt.eventDate + ' at ' + evt.venueName); });",
+                  "  }",
+                  "} else {",
+                  "  console.log('❌ Failed to List Events');",
+                  "  console.log('⚠️  Error: ' + eventsData.message);",
+                  "}",
+                  "console.log('📋 Response Summary: ' + (Array.isArray(eventsData) ? eventsData.length + ' events' : 'Single event'));",
+                  "console.log('━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━\\n');"
+                ]
+              }
+            }
+          ]
+        },
+        {
+          "name": "Get Event By ID",
+          "request": {
+            "method": "GET",
+            "header": [],
+            "url": { "raw": "{{baseUrl}}/events/{{eventId}}", "host": ["{{baseUrl}}"], "path": ["events", "{{eventId}}"] }
+          },
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "console.log('\\n🔍 GET EVENT BY ID');",
+                  "console.log('━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━');",
+                  "console.log('📍 Endpoint: GET /events/{{eventId}}');",
+                  "console.log('⏱️  Response Time: ' + pm.response.responseTime + 'ms');",
+                  "console.log('📊 Status Code: ' + pm.response.code);",
+                  "const eventData = pm.response.json();",
+                  "if (pm.response.code === 200) {",
+                  "  console.log('✅ Event Retrieved Successfully');",
+                  "  console.log('🆔 ID: ' + eventData.id);",
+                  "  console.log('🎪 Title: ' + eventData.title);",
+                  "  console.log('📅 Date: ' + eventData.eventDate);",
+                  "  console.log('⏰ Time: ' + eventData.startTime + ' - ' + eventData.endTime);",
+                  "  console.log('🏢 Venue: ' + eventData.venueName);",
+                  "  console.log('📍 Address: ' + eventData.venueAddress);",
+                  "  console.log('💰 Price: $' + eventData.pricePerTicket);",
+                  "  console.log('🎟️  Available: ' + eventData.availableTickets + '/' + eventData.totalCapacity);",
+                  "} else {",
+                  "  console.log('❌ Failed to Get Event');",
+                  "  console.log('⚠️  Error: ' + eventData.message);",
+                  "}",
+                  "console.log('📋 Full Response:', JSON.stringify(eventData, null, 2));",
+                  "console.log('━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━\\n');"
+                ]
+              }
+            }
+          ]
+        },
+        {
+          "name": "Update Event",
+          "request": {
+            "method": "PATCH",
+            "header": [
+              { "key": "Content-Type", "value": "application/json" },
+              { "key": "Authorization", "value": "Bearer {{accessToken}}" }
+            ],
+            "body": {
+              "mode": "raw",
+              "raw": "{\n  \"title\": \"Tech Conference 2024 - Updated\",\n  \"description\": \"Updated description with more details\",\n  \"pricePerTicket\": 89.99,\n  \"availableTickets\": 450\n}",
+              "options": { "raw": { "language": "json" } }
+            },
+            "url": { "raw": "{{baseUrl}}/events/{{eventId}}", "host": ["{{baseUrl}}"], "path": ["events", "{{eventId}}"] }
+          },
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "console.log('\\n✏️  UPDATE EVENT');",
+                  "console.log('━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━');",
+                  "console.log('📍 Endpoint: PATCH /events/{{eventId}}');",
+                  "console.log('⏱️  Response Time: ' + pm.response.responseTime + 'ms');",
+                  "console.log('📊 Status Code: ' + pm.response.code);",
+                  "const updateEventData = pm.response.json();",
+                  "if (pm.response.code === 200) {",
+                  "  console.log('✅ Event Updated Successfully');",
+                  "  console.log('🆔 ID: ' + updateEventData.id);",
+                  "  console.log('🎪 Updated Title: ' + updateEventData.title);",
+                  "  console.log('💰 Updated Price: $' + updateEventData.pricePerTicket);",
+                  "  console.log('🎟️  Updated Available: ' + updateEventData.availableTickets);",
+                  "} else {",
+                  "  console.log('❌ Failed to Update Event');",
+                  "  console.log('⚠️  Error: ' + updateEventData.message);",
+                  "}",
+                  "console.log('📋 Full Response:', JSON.stringify(updateEventData, null, 2));",
+                  "console.log('━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━\\n');"
+                ]
+              }
+            }
+          ]
+        },
+        {
+          "name": "Delete Event (Soft Delete)",
+          "request": {
+            "method": "DELETE",
+            "header": [
+              { "key": "Authorization", "value": "Bearer {{accessToken}}" }
+            ],
+            "url": { "raw": "{{baseUrl}}/events/{{eventId}}", "host": ["{{baseUrl}}"], "path": ["events", "{{eventId}}"] }
+          },
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "console.log('\\n🗑️  DELETE EVENT (SOFT DELETE)');",
+                  "console.log('━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━');",
+                  "console.log('📍 Endpoint: DELETE /events/{{eventId}}');",
+                  "console.log('⏱️  Response Time: ' + pm.response.responseTime + 'ms');",
+                  "console.log('📊 Status Code: ' + pm.response.code);",
+                  "if (pm.response.code === 200) {",
+                  "  console.log('✅ Event Soft Deleted Successfully');",
+                  "  console.log('ℹ️  Note: Event is marked as deleted but data is preserved');",
+                  "  pm.environment.set('eventId', '');",
+                  "} else {",
+                  "  const delEventData = pm.response.json();",
+                  "  console.log('❌ Failed to Delete Event');",
+                  "  console.log('⚠️  Error: ' + delEventData.message);",
+                  "}",
+                  "try { console.log('📋 Response:', JSON.stringify(pm.response.json(), null, 2)); } catch(e) {}",
+                  "console.log('━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━\\n');"
+                ]
+              }
+            }
+          ]
+        }
+      ]
+    }
+  ]
+}
