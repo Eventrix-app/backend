@@ -1,5 +1,5 @@
 import { ConflictException, ForbiddenException, Injectable, NotFoundException, Logger } from '@nestjs/common';
-import { In } from 'typeorm';
+import { In, Raw } from 'typeorm';
 import { InjectRepository } from '@nestjs/typeorm';
 import { Repository } from 'typeorm';
 import * as bcrypt from 'bcrypt';
@@ -58,7 +58,7 @@ export class AdminService {
   }
 
   async countAdmins(): Promise<number> {
-    return this.usersRepository.count({ where: { roles: In(['admin']) } });
+    return this.usersRepository.count({ where: { roles: Raw((alias) => `${alias} @> '["admin"]'::jsonb`) } });
   }
 
   async bootstrap(createAdminDto: CreateAdminDto): Promise<AdminRecord> {
@@ -108,14 +108,14 @@ export class AdminService {
 
   async findAll(): Promise<AdminRecord[]> {
     const admins = await this.usersRepository.find({
-      where: { roles: In(['admin']) },
+      where: { roles: Raw((alias) => `${alias} @> '["admin"]'::jsonb`) },
     });
     return admins.map((user) => this.mapUserToAdminRecord(user));
   }
 
   async findOne(id: string): Promise<AdminRecord> {
     const user = await this.usersRepository.findOne({
-      where: { id, roles: In(['admin']) },
+      where: { id, roles: Raw((alias) => `${alias} @> '["admin"]'::jsonb`) },
     });
     if (!user) {
       throw new NotFoundException(`Admin with id ${id} not found`);
@@ -128,7 +128,7 @@ export class AdminService {
     updateAdminDto: UpdateAdminDto,
   ): Promise<AdminRecord> {
     const user = await this.usersRepository.findOne({
-      where: { id, roles: In(['admin']) },
+      where: { id, roles: Raw((alias) => `${alias} @> '["admin"]'::jsonb`) },
     });
     if (!user) {
       throw new NotFoundException(`Admin with id ${id} not found`);
@@ -158,7 +158,7 @@ export class AdminService {
 
   async remove(id: string): Promise<void> {
     const user = await this.usersRepository.findOne({
-      where: { id, roles: In(['admin']) },
+      where: { id, roles: Raw((alias) => `${alias} @> '["admin"]'::jsonb`) },
     });
     if (!user) {
       throw new NotFoundException(`Admin with id ${id} not found`);

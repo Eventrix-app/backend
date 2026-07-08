@@ -1,11 +1,15 @@
 import { ConflictException, Injectable, NotFoundException, Logger } from '@nestjs/common';
-import { In } from 'typeorm';
+import { In, Raw } from 'typeorm';
 import { InjectRepository } from '@nestjs/typeorm';
 import { Repository } from 'typeorm';
 import * as bcrypt from 'bcrypt';
 import { CreateParticipantDto } from './dto/create-participant.dto';
 import { UpdateParticipantDto } from './dto/update-participant.dto';
+import { UpdateInterestsDto } from './dto/update-interests.dto';
+import { UpdateLocationDto } from './dto/update-location.dto';
+import { UpdateNotificationPrefsDto } from './dto/update-notification-prefs.dto';
 import { User } from '../../entities/user.entity';
+import { EventCategory } from '../../entities/category.entity';
 
 const BCRYPT_ROUNDS = 10;
 
@@ -38,6 +42,8 @@ export class ParticipantService {
   constructor(
     @InjectRepository(User)
     private readonly usersRepository: Repository<User>,
+    @InjectRepository(EventCategory)
+    private readonly categoryRepository: Repository<EventCategory>,
   ) {}
 
   /**
@@ -137,14 +143,14 @@ export class ParticipantService {
 
   async findAll(): Promise<ParticipantRecord[]> {
     const users = await this.usersRepository.find({
-      where: { roles: In(['user']) },
+      where: { roles: Raw((alias) => `${alias} @> '["user"]'::jsonb`) },
     });
     return users.map((u) => this.mapUserToParticipantRecord(u));
   }
 
   async findOne(id: string): Promise<ParticipantRecord> {
     const user = await this.usersRepository.findOne({
-      where: { id, roles: In(['user']) },
+      where: { id, roles: Raw((alias) => `${alias} @> '["user"]'::jsonb`) },
     });
     if (!user) {
       throw new NotFoundException(`Participant with id ${id} not found`);
@@ -157,7 +163,7 @@ export class ParticipantService {
     dto: UpdateParticipantDto,
   ): Promise<ParticipantRecord> {
     const user = await this.usersRepository.findOne({
-      where: { id, roles: In(['user']) },
+      where: { id, roles: Raw((alias) => `${alias} @> '["user"]'::jsonb`) },
     });
     if (!user) {
       throw new NotFoundException(`Participant with id ${id} not found`);
@@ -181,25 +187,52 @@ export class ParticipantService {
     // Merge meta stored in bio — only fields explicitly provided in DTO
     const existingMeta = this.parseMeta(user.bio);
 
-    // #region agent log
-    fetch('http://127.0.0.1:7900/ingest/60f87d47-04ee-4c91-8969-d73cd3960c98',{method:'POST',headers:{'Content-Type':'application/json','X-Debug-Session-Id':'947f72'},body:JSON.stringify({sessionId:'947f72',runId:'post-fix',hypothesisId:'H4',location:'participant.service.ts:update',message:'participant meta before merge',data:{existingCity:existingMeta['city'],dtoKeys:Object.keys(dto),participantId:id},timestamp:Date.now()})}).catch(()=>{});
-    // #endregion
-
     const updatedMeta = this.mergeMetaPatch(existingMeta, dto);
     user.bio = JSON.stringify(updatedMeta);
-
-    // #region agent log
-    fetch('http://127.0.0.1:7900/ingest/60f87d47-04ee-4c91-8969-d73cd3960c98',{method:'POST',headers:{'Content-Type':'application/json','X-Debug-Session-Id':'947f72'},body:JSON.stringify({sessionId:'947f72',runId:'post-fix',hypothesisId:'H4',location:'participant.service.ts:update',message:'participant meta after merge',data:{mergedCity:updatedMeta['city'],mergedPincode:updatedMeta['pincode'],participantId:id},timestamp:Date.now()})}).catch(()=>{});
-    // #endregion
 
     const updatedUser = await this.usersRepository.save(user);
     this.logger.log(`Updated participant in database: ${updatedUser.email}`);
     return this.mapUserToParticipantRecord(updatedUser);
   }
 
+  async updateInterests(userId: string, dto: UpdateInterestsDto): Promise<void> {
+    const user = await this.usersRepository.findOne({
+      where: { id: userId },
+      relations: ['interests'],
+    });
+    if (!user) throw new NotFoundException(`User ${userId} not found`);
+
+    const categories = dto.categoryIds.length > 0
+      ? await this.categoryRepository.findBy(
+          dto.categoryIds.map((id) => ({ id })),
+        )
+      : [];
+
+    user.interests = categories;
+    await this.usersRepository.save(user);
+    this.logger.log(`Updated interests for user ${userId}: ${dto.categoryIds.join(', ')}`);
+  }
+
+  async updateLocation(userId: string, dto: UpdateLocationDto): Promise<void> {
+    const result = await this.usersRepository.update(userId, {
+      latitude: dto.latitude,
+      longitude: dto.longitude,
+    });
+    if (result.affected === 0) throw new NotFoundException(`User ${userId} not found`);
+    this.logger.log(`Updated location for user ${userId}: ${dto.latitude},${dto.longitude}`);
+  }
+
+  async updateNotificationPrefs(userId: string, dto: UpdateNotificationPrefsDto): Promise<void> {
+    const result = await this.usersRepository.update(userId, {
+      notificationPrefs: dto,
+    });
+    if (result.affected === 0) throw new NotFoundException(`User ${userId} not found`);
+    this.logger.log(`Updated notification prefs for user ${userId}`);
+  }
+
   async remove(id: string): Promise<void> {
     const user = await this.usersRepository.findOne({
-      where: { id, roles: In(['user']) },
+      where: { id, roles: Raw((alias) => `${alias} @> '["user"]'::jsonb`) },
     });
     if (!user) {
       throw new NotFoundException(`Participant with id ${id} not found`);

@@ -1,8 +1,8 @@
-import { Injectable, NotFoundException, Logger, OnModuleInit } from '@nestjs/common';
+import { Injectable, NotFoundException, Logger, OnModuleInit, BadRequestException, ConflictException } from '@nestjs/common';
 import { InjectRepository } from '@nestjs/typeorm';
-import { Repository } from 'typeorm';
+import { In, Repository } from 'typeorm';
 import { EventCategory } from '../entities/category.entity';
-import { CreateCategoryDto } from './category.dto';
+import { BulkCreateCategoriesDto, CreateCategoryDto } from './category.dto';
 import { PartialType } from '@nestjs/mapped-types';
 
 export class UpdateCategoryDto extends PartialType(CreateCategoryDto) {}
@@ -41,6 +41,41 @@ export class CategoryService implements OnModuleInit {
   async create(dto: CreateCategoryDto): Promise<EventCategory> {
     const category = this.categoryRepo.create(dto);
     return await this.categoryRepo.save(category);
+  }
+
+  async bulkCreate(dto: BulkCreateCategoriesDto): Promise<EventCategory[]> {
+    const normalizedCategories = dto.categories.map((category) => ({
+      ...category,
+      name: category.name.trim(),
+    }));
+
+    const duplicateNames = normalizedCategories
+      .map((category) => category.name)
+      .filter((name, index, names) => names.indexOf(name) !== index);
+
+    if (duplicateNames.length > 0) {
+      throw new BadRequestException(
+        `Duplicate category names in request: ${Array.from(new Set(duplicateNames)).join(', ')}`,
+      );
+    }
+
+    const existingCategories = await this.categoryRepo.find({
+      select: ['name'],
+      where: {
+        name: In(normalizedCategories.map((category) => category.name)),
+      },
+    });
+
+    if (existingCategories.length > 0) {
+      throw new ConflictException(
+        `Category names already exist: ${existingCategories.map((category) => category.name).join(', ')}`,
+      );
+    }
+
+    return await this.categoryRepo.manager.transaction(async (manager) => {
+      const categories = manager.create(EventCategory, normalizedCategories);
+      return await manager.save(EventCategory, categories);
+    });
   }
 
   async findAll(): Promise<EventCategory[]> {

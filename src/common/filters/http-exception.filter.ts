@@ -60,7 +60,7 @@ export class HttpExceptionFilter implements ExceptionFilter {
       try {
         const decoded = jwt.decode(token) as any;
         if (decoded && typeof decoded === 'object') {
-          userType = decoded.role || 'user';
+          userType = Array.isArray(decoded.roles) && decoded.roles.length ? decoded.roles[0] : 'user';
           userId = decoded.id || 'unknown';
         } else {
           userType = 'invalid_token';

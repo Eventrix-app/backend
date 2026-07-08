@@ -7,11 +7,12 @@ import {
   DeleteDateColumn,
   OneToMany,
   ManyToMany,
+  JoinTable,
 } from 'typeorm';
-import { Event } from './event.entity';
 import { Organizer } from './organizer.entity';
 import { Enrollment } from './enrollment.entity';
 import { AuthIdentity } from './auth-identity.entity';
+import { EventCategory } from './category.entity';
 
 @Entity('users')
 export class User {
@@ -60,6 +61,19 @@ export class User {
   @Column({ name: 'is_phone_verified', default: false })
   isPhoneVerified!: boolean;
 
+  @Column({
+    name: 'notification_prefs',
+    type: 'jsonb',
+    nullable: true,
+    default: () => `'{"eventReminders":true,"nearbyEvents":true,"reelsAndCommunity":true,"specialOffers":true}'`,
+  })
+  notificationPrefs!: {
+    eventReminders: boolean;
+    nearbyEvents: boolean;
+    reelsAndCommunity: boolean;
+    specialOffers: boolean;
+  } | null;
+
   @CreateDateColumn({ name: 'created_at' })
   createdAt!: Date;
 
@@ -78,6 +92,11 @@ export class User {
   @OneToMany(() => AuthIdentity, (identity) => identity.user)
   authIdentities!: AuthIdentity[];
 
-  @ManyToMany(() => Event, (event) => event.participants)
-  enrolledIn!: Event[];
+  @ManyToMany(() => EventCategory)
+  @JoinTable({
+    name: 'user_interests',
+    joinColumn: { name: 'user_id', referencedColumnName: 'id' },
+    inverseJoinColumn: { name: 'category_id', referencedColumnName: 'id' },
+  })
+  interests!: EventCategory[];
 }

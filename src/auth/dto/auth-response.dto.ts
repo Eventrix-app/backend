@@ -3,6 +3,6 @@ export class AuthResponseDto {
   id!: string;
   email!: string;
   full_name!: string;
-  role!: string;
+  roles!: string[];
   expiresIn?: number;
 }

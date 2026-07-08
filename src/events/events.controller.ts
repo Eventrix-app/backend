@@ -15,6 +15,8 @@ import {
   HttpStatus,
 } from '@nestjs/common';
 import { ApiTags } from '@nestjs/swagger';
+import { createClient } from '@supabase/supabase-js';
+import { ConfigService } from '@nestjs/config';
 
 import { EventsService } from './events.service';
 import { CreateEventDto } from './dto/create-event.dto';
@@ -26,15 +28,17 @@ import { Public } from '../common/decorators/public.decorator';
 @ApiTags('events')
 @Controller('events')
 export class EventsController {
-  constructor(private readonly eventsService: EventsService) { }
+  constructor(
+    private readonly eventsService: EventsService,
+    private readonly configService: ConfigService,
+  ) { }
 
-  @Roles('admin', 'organizer')
   @Post()
   async create(
     @Body() createEventDto: CreateEventDto,
     @Request() req: Request & { user: JwtPayload },
   ) {
-    return await this.eventsService.createForUser(createEventDto, req.user.id, req.user.role);
+    return await this.eventsService.createForUser(createEventDto, req.user.id, req.user.roles);
   }
 
   @Public()
@@ -59,11 +63,9 @@ export class EventsController {
     return await this.eventsService.findPending(page, limit);
   }
 
-  // Organizer view their events
-  @Roles('organizer', 'admin')
-  @Get('organizer/:organizerId')
-  async findByOrganizer(@Param('organizerId') organizerId: string) {
-    return await this.eventsService.findByOrganizerId(organizerId);
+  @Get('my-events')
+  async findMyEvents(@Request() req: Request & { user: JwtPayload }) {
+    return await this.eventsService.findMyEvents(req.user.id);
   }
 
   @Public()
@@ -72,14 +74,13 @@ export class EventsController {
     return await this.eventsService.findOne(id);
   }
 
-  @Roles('admin', 'organizer')
   @Patch(':id')
   async update(
     @Param('id', ParseUUIDPipe) id: string,
     @Body() updateEventDto: UpdateEventDto,
     @Request() req: Request & { user: JwtPayload },
   ) {
-    return await this.eventsService.update(id, updateEventDto, req.user.id, req.user.role);
+    return await this.eventsService.update(id, updateEventDto, req.user.id, req.user.roles);
   }
 
   // Admin approve event
@@ -105,18 +106,53 @@ export class EventsController {
     return await this.eventsService.reject(id, rejectionReason, req.user.id);
   }
 
-  @Roles('admin', 'organizer')
   @Delete(':id')
   @HttpCode(HttpStatus.NO_CONTENT)
   async remove(
     @Param('id', ParseUUIDPipe) id: string,
     @Request() req: Request & { user: JwtPayload },
   ) {
-    await this.eventsService.remove(id, req.user.id, req.user.role);
+    await this.eventsService.remove(id, req.user.id, req.user.roles);
+  }
+
+  // Section 3f: presigned upload URL for cover image
+  @Post('upload-url')
+  async getUploadUrl(
+    @Body('fileName') fileName: string,
+    @Request() req: Request & { user: JwtPayload },
+  ) {
+    const supabase = createClient(
+      this.configService.get<string>('SUPABASE_URL') ?? '',
+      this.configService.get<string>('SUPABASE_SERVICE_ROLE_KEY') ?? '',
+    );
+    const path = `events/${req.user.id}/${Date.now()}-${fileName}`;
+    const { data, error } = await supabase.storage
+      .from('event-images')
+      .createSignedUploadUrl(path);
+    if (error) throw new Error(error.message);
+    return { signedUrl: data.signedUrl, path, token: data.token };
+  }
+
+  // Section 3e: enrollment visibility — ownership-based
+  @Get(':id/enrollments')
+  async getEnrollments(
+    @Param('id', ParseUUIDPipe) id: string,
+    @Request() req: Request & { user: JwtPayload },
+  ) {
+    return this.eventsService.findEnrollments(id, req.user.id, req.user.roles);
+  }
+
+  // Section 5c: check-in endpoint
+  @Post('check-in')
+  @HttpCode(HttpStatus.OK)
+  async checkIn(
+    @Body('ticketCode') ticketCode: string,
+    @Request() req: Request & { user: JwtPayload },
+  ) {
+    return this.eventsService.checkIn(ticketCode, req.user.id, req.user.roles);
   }
 
   // Participant enrollment
-  @Roles('user', 'admin', 'organizer')
   @Post(':id/enroll')
   @HttpCode(HttpStatus.CREATED)
   async enroll(
@@ -124,5 +160,14 @@ export class EventsController {
     @Request() req: Request & { user: JwtPayload },
   ) {
     return await this.eventsService.enroll(id, req.user.id);
+  }
+
+  // Section 4e / Section 5: get a single enrollment by id (for TicketDetailsScreen)
+  @Get('enrollments/:enrollmentId')
+  async getEnrollmentById(
+    @Param('enrollmentId', ParseUUIDPipe) enrollmentId: string,
+    @Request() req: Request & { user: JwtPayload },
+  ) {
+    return this.eventsService.findEnrollmentById(enrollmentId, req.user.id, req.user.roles);
   }
 }

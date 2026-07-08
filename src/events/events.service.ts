@@ -1,7 +1,9 @@
 import { Injectable, NotFoundException, ForbiddenException, Logger, ConflictException, BadRequestException } from '@nestjs/common';
 import { InjectRepository } from '@nestjs/typeorm';
 import { Repository, DataSource } from 'typeorm';
+import { JwtService } from '@nestjs/jwt';
 import { Event, EventApprovalStatus, EventStatus } from '../entities/event.entity';
+import { Enrollment } from '../entities/enrollment.entity';
 import { Organizer } from '../entities/organizer.entity';
 import { User } from '../entities/user.entity';
 import { EventCategory } from '../entities/category.entity';
@@ -15,6 +17,8 @@ export class EventsService {
   constructor(
     @InjectRepository(Event)
     private readonly eventsRepository: Repository<Event>,
+    @InjectRepository(Enrollment)
+    private readonly enrollmentRepository: Repository<Enrollment>,
     @InjectRepository(Organizer)
     private readonly organizersRepository: Repository<Organizer>,
     @InjectRepository(User)
@@ -22,6 +26,7 @@ export class EventsService {
     @InjectRepository(EventCategory)
     private readonly categoriesRepository: Repository<EventCategory>,
     private readonly dataSource: DataSource,
+    private readonly jwtService: JwtService,
   ) {}
 
   async create(createEventDto: CreateEventDto): Promise<Event> {
@@ -42,32 +47,55 @@ export class EventsService {
     return savedEvent;
   }
 
-  async createForUser(createEventDto: CreateEventDto, userId: string, userRole: string): Promise<Event> {
-    // Validate category exists
+  async createForUser(createEventDto: CreateEventDto, userId: string, userRoles: string[]): Promise<Event> {
     await this.validateCategory(createEventDto.categoryId);
 
-    // If user is an organizer, they can only create events for themselves
-    if (userRole === 'organizer') {
-      const organizer = await this.organizersRepository.findOne({
-        where: { userId },
-      });
-      if (!organizer) {
-        throw new NotFoundException('Organizer profile not found for this user');
-      }
-      createEventDto.organizerId = organizer.id;
-    } else if (userRole === 'admin' && createEventDto.organizerId) {
-      // Admin can specify organizerId, validate it exists
-      await this.validateOrganizer(createEventDto.organizerId);
-    }
+    return await this.dataSource.transaction(async (manager) => {
+      const user = await manager.findOne(User, { where: { id: userId } });
+      if (!user) throw new NotFoundException('User not found');
 
-    const event = this.eventsRepository.create(createEventDto);
-    event.createdByUserId = userId;
-    event.approvalStatus = EventApprovalStatus.PENDING_APPROVAL;
-    event.status = EventStatus.UPCOMING;
-    
-    const savedEvent = await this.eventsRepository.save(event);
-    this.logger.log(`Created event: ${savedEvent.title} (id=${savedEvent.id}) by user ${userId} (${userRole})`);
-    return savedEvent;
+      let organizer = await manager.findOne(Organizer, { where: { userId } });
+
+      if (!organizer) {
+        organizer = manager.create(Organizer, {
+          userId,
+          companyName: user.fullName || user.email,
+        });
+        organizer = await manager.save(Organizer, organizer);
+        this.logger.log(`Auto-created organizer profile for user ${userId}`);
+      }
+
+      if (!user.roles.includes('organizer')) {
+        user.roles = [...user.roles, 'organizer'];
+        await manager.save(User, user);
+        this.logger.log(`Added 'organizer' role to user ${userId}`);
+      }
+
+      if (userRoles.includes('admin') && createEventDto.organizerId) {
+        await this.validateOrganizer(createEventDto.organizerId);
+      } else {
+        createEventDto.organizerId = organizer.id;
+      }
+
+      const isFree = !createEventDto.pricePerTicket || Number(createEventDto.pricePerTicket) === 0;
+      const approvalStatus = isFree ? EventApprovalStatus.APPROVED : EventApprovalStatus.PENDING_APPROVAL;
+      const approvalMethod = isFree ? 'auto' : null;
+      const approvedAt = isFree ? new Date() : undefined;
+
+      const event = manager.create(Event, {
+        ...createEventDto,
+        createdByUserId: userId,
+        isPaid: !isFree,
+        approvalStatus,
+        approvalMethod: approvalMethod ?? undefined,
+        approvedAt,
+        status: EventStatus.UPCOMING,
+      });
+
+      const savedEvent = await manager.save(Event, event);
+      this.logger.log(`Created event: ${savedEvent.title} (id=${savedEvent.id}) by user ${userId}, approvalStatus=${approvalStatus}`);
+      return savedEvent;
+    });
   }
 
   async findAll(page: number = 1, limit: number = 20): Promise<{ events: Event[]; total: number; page: number; totalPages: number }> {
@@ -132,7 +160,7 @@ export class EventsService {
     return event;
   }
 
-  async update(id: string, updateEventDto: UpdateEventDto, userId: string, userRole: string): Promise<Event> {
+  async update(id: string, updateEventDto: UpdateEventDto, userId: string, userRoles: string[]): Promise<Event> {
     const event = await this.findOne(id);
     
     // Validate category if being updated
@@ -145,8 +173,7 @@ export class EventsService {
       await this.validateOrganizer(updateEventDto.organizerId);
     }
     
-    // Check ownership
-    if (userRole !== 'admin') {
+    if (!userRoles.includes('admin')) {
       const organizer = await this.organizersRepository.findOne({
         where: { userId },
       });
@@ -154,6 +181,20 @@ export class EventsService {
       if (!organizer || organizer.id !== event.organizerId) {
         throw new ForbiddenException('You can only update your own events');
       }
+    }
+
+    // Section 4c: close free-to-paid loophole
+    const wasApproved = event.approvalStatus === EventApprovalStatus.APPROVED;
+    const switchingToPaid =
+      updateEventDto.pricePerTicket !== undefined &&
+      Number(updateEventDto.pricePerTicket) > 0 &&
+      !event.isPaid;
+    if (wasApproved && switchingToPaid) {
+      updateEventDto.approvalStatus = EventApprovalStatus.PENDING_APPROVAL;
+      (updateEventDto as any).approvalMethod = null;
+    }
+    if (updateEventDto.pricePerTicket !== undefined) {
+      (updateEventDto as any).isPaid = Number(updateEventDto.pricePerTicket) > 0;
     }
 
     Object.assign(event, updateEventDto);
@@ -164,11 +205,10 @@ export class EventsService {
     return updatedEvent;
   }
 
-  async remove(id: string, userId: string, userRole: string): Promise<void> {
+  async remove(id: string, userId: string, userRoles: string[]): Promise<void> {
     const event = await this.findOne(id);
     
-    // Check ownership - only organizers can delete their own events, admins can delete any
-    if (userRole !== 'admin') {
+    if (!userRoles.includes('admin')) {
       const organizer = await this.organizersRepository.findOne({
         where: { userId },
       });
@@ -182,6 +222,15 @@ export class EventsService {
     this.logger.log(`Soft-deleted event: ${event.title} (id=${event.id})`);
   }
 
+  async findMyEvents(userId: string): Promise<Event[]> {
+    const organizer = await this.organizersRepository.findOne({ where: { userId } });
+    if (!organizer) return [];
+    return await this.eventsRepository.find({
+      where: { organizerId: organizer.id, deletedAt: null as any },
+      relations: ['organizer', 'organizer.user'],
+    });
+  }
+
   async findByOrganizerId(organizerId: string): Promise<Event[]> {
     return await this.eventsRepository.find({
       where: { organizerId, deletedAt: null as any },
@@ -190,11 +239,10 @@ export class EventsService {
   }
 
   // Participant enrollment with atomic ticket decrement
-  async enroll(eventId: string, userId: string): Promise<Event> {
+  async enroll(eventId: string, userId: string): Promise<Enrollment> {
     return await this.dataSource.transaction(async (manager) => {
       const event = await manager.findOne(Event, {
         where: { id: eventId, deletedAt: null as any },
-        relations: ['participants'],
         lock: { mode: 'pessimistic_write' },
       });
 
@@ -202,7 +250,6 @@ export class EventsService {
         throw new NotFoundException(`Event with id ${eventId} not found`);
       }
 
-      // Validate event can accept enrollments
       if (!event.canEnroll()) {
         throw new BadRequestException('Event is not accepting enrollments');
       }
@@ -211,26 +258,42 @@ export class EventsService {
         throw new ConflictException('No tickets available for this event');
       }
 
-      const user = await manager.findOne(User, { where: { id: userId } });
-      if (!user) {
-        throw new NotFoundException(`User with id ${userId} not found`);
-      }
-
-      // Check if already enrolled
-      if (event.participants?.some((p) => p.id === user.id)) {
+      const existing = await manager.findOne(Enrollment, {
+        where: { eventId, userId },
+      });
+      if (existing) {
         throw new ConflictException('User already enrolled in this event');
       }
 
-      // Atomically decrement available tickets
       if (event.availableTickets) {
         event.availableTickets -= 1;
+        await manager.save(Event, event);
       }
 
-      if (!event.participants) event.participants = [];
-      event.participants.push(user);
+      const bookingReference = `BK-${Date.now()}-${Math.random().toString(36).slice(2, 7).toUpperCase()}`;
 
-      const saved = await manager.save(Event, event);
-      this.logger.log(`User ${user.id} enrolled in event ${event.id}. Remaining tickets: ${saved.availableTickets}`);
+      // Section 5b: generate signed ticket_code for free (immediately confirmed) events
+      let ticketCode: string | undefined;
+      if (!event.isPaid) {
+        ticketCode = this.jwtService.sign(
+          { sub: 'ticket', eventId },
+          { expiresIn: '365d' },
+        );
+      }
+
+      const enrollment = manager.create(Enrollment, {
+        userId,
+        eventId,
+        quantity: 1,
+        totalAmount: event.pricePerTicket ?? 0,
+        status: 'confirmed',
+        bookingDate: new Date(),
+        bookingReference,
+        ticketCode,
+      });
+
+      const saved = await manager.save(Enrollment, enrollment);
+      this.logger.log(`User ${userId} enrolled in event ${eventId}`);
       return saved;
     });
   }
@@ -292,6 +355,7 @@ export class EventsService {
     const [events, total] = await this.eventsRepository.findAndCount({
       where: { 
         approvalStatus: EventApprovalStatus.PENDING_APPROVAL,
+        isPaid: true,
         deletedAt: null as any,
       },
       relations: ['organizer', 'organizer.user', 'category'],
@@ -306,6 +370,66 @@ export class EventsService {
       page,
       totalPages: Math.ceil(total / limit),
     };
+  }
+
+  // Section 3e: enrollment visibility — ownership-based
+  async findEnrollments(eventId: string, userId: string, userRoles: string[]): Promise<Enrollment[]> {
+    const event = await this.findOne(eventId);
+    if (!userRoles.includes('admin')) {
+      const organizer = await this.organizersRepository.findOne({ where: { userId } });
+      if (!organizer || organizer.id !== event.organizerId) {
+        throw new ForbiddenException('You can only view enrollments for your own events');
+      }
+    }
+    return this.enrollmentRepository.find({
+      where: { eventId },
+      relations: ['user'],
+    });
+  }
+
+  // Section 5c: check-in endpoint — ownership-based, signed token verification
+  async checkIn(ticketCode: string, userId: string, userRoles: string[]): Promise<Enrollment> {
+    let payload: { sub: string; eventId: string; enrollmentId?: string };
+    try {
+      payload = this.jwtService.verify(ticketCode);
+    } catch {
+      throw new BadRequestException('Invalid or expired ticket code');
+    }
+
+    const enrollment = await this.enrollmentRepository.findOne({
+      where: { ticketCode },
+      relations: ['event'],
+    });
+    if (!enrollment) {
+      throw new NotFoundException('Ticket not found');
+    }
+
+    if (!userRoles.includes('admin')) {
+      const organizer = await this.organizersRepository.findOne({ where: { userId } });
+      if (!organizer || organizer.id !== enrollment.event.organizerId) {
+        throw new ForbiddenException('You can only check in tickets for your own events');
+      }
+    }
+
+    if (enrollment.checkedInAt) {
+      throw new ConflictException('Ticket already checked in');
+    }
+
+    enrollment.checkedInAt = new Date();
+    return this.enrollmentRepository.save(enrollment);
+  }
+
+  // Section 4e: fetch a single enrollment — only the owning user or admin may access
+  async findEnrollmentById(enrollmentId: string, userId: string, userRoles: string[]): Promise<Enrollment> {
+    const enrollment = await this.enrollmentRepository.findOne({
+      where: { id: enrollmentId },
+      relations: ['event'],
+    });
+    if (!enrollment) throw new NotFoundException('Enrollment not found');
+    if (!userRoles.includes('admin') && enrollment.userId !== userId) {
+      throw new ForbiddenException('You can only view your own tickets');
+    }
+    return enrollment;
   }
 
   // Helper validation methods

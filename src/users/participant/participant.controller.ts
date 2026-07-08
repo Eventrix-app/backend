@@ -3,6 +3,8 @@ import {
   Controller,
   Delete,
   Get,
+  HttpCode,
+  HttpStatus,
   Param,
   ParseUUIDPipe,
   Patch,
@@ -47,7 +49,7 @@ export class ParticipantController {
     @Body() updateParticipantDto: UpdateParticipantDto,
     @Request() req: Request & { user: JwtPayload },
   ) {
-    if (req.user.role !== 'admin' && req.user.id !== id) {
+    if (!req.user.roles.includes('admin') && req.user.id !== id) {
       throw new ForbiddenException('You can only update your own profile');
     }
     return await this.participantService.update(id, updateParticipantDto);
@@ -59,7 +61,7 @@ export class ParticipantController {
     @Param('id', ParseUUIDPipe) id: string,
     @Request() req: Request & { user: JwtPayload },
   ) {
-    if (req.user.role !== 'admin' && req.user.id !== id) {
+    if (!req.user.roles.includes('admin') && req.user.id !== id) {
       throw new ForbiddenException('You can only delete your own profile');
     }
     return await this.participantService.remove(id);

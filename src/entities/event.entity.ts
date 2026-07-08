@@ -45,22 +45,19 @@ export class Event {
   @Column({ name: 'organizer_id' })
   organizerId!: string;
 
-  @ManyToMany(() => User, (user) => user.enrolledIn)
-  @JoinTable({ name: 'event_participants' })
-  participants!: User[];
-
   @ManyToOne(() => EventCategory, (category) => category.events)
   @JoinColumn({ name: 'category_id' })
   category!: EventCategory;
 
   @Column({
+    name: 'approval_status',
     type: 'enum',
     enum: EventApprovalStatus,
     default: EventApprovalStatus.DRAFT,
   })
   approvalStatus!: EventApprovalStatus;
 
-  @Column({ type: 'text', nullable: true })
+  @Column({ name: 'rejection_reason', type: 'text', nullable: true })
   rejectionReason?: string;
 
   @Column({ name: 'created_by_user_id', type: 'uuid' })
@@ -126,10 +123,10 @@ export class Event {
   @Column({ type: 'boolean', default: false })
   featured!: boolean;
 
-  @Column({ type: 'boolean', default: false })
+  @Column({ name: 'is_online', type: 'boolean', default: false })
   isOnline!: boolean;
 
-  @Column({ type: 'text', nullable: true })
+  @Column({ name: 'meeting_link', type: 'text', nullable: true })
   meetingLink?: string;
 
   @Column({ name: 'image_url', type: 'text', nullable: true })
@@ -160,6 +157,17 @@ export class Event {
   @Column({ name: 'updated_by', type: 'uuid', nullable: true })
   updatedBy?: string;
 
+  @Column({ name: 'is_paid', type: 'boolean', default: false })
+  isPaid!: boolean;
+
+  @Column({ name: 'approval_method', type: 'varchar', length: 20, nullable: true })
+  approvalMethod?: string;
+
+  @Column({ name: 'refund_policy_type', type: 'varchar', length: 30, default: 'no_refunds' })
+  refundPolicyType!: string;
+
+  @Column({ name: 'refund_policy_text', type: 'text', nullable: true })
+  refundPolicyText?: string;
 
   @Column({ name: 'ticket_sales_open_date', type: 'date', nullable: true })
   ticketSalesOpenDate!: string;

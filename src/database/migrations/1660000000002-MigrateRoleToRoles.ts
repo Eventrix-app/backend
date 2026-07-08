@@ -20,6 +20,13 @@ export class MigrateRoleToRoles1660000000002 implements MigrationInterface {
   name = 'MigrateRoleToRoles1660000000002';
 
   public async up(queryRunner: QueryRunner): Promise<void> {
+    // Ensure roles is jsonb before checking jsonb_typeof/jsonb_array_length
+    await queryRunner.query(`
+      ALTER TABLE "users" ALTER COLUMN "roles" DROP DEFAULT;
+      ALTER TABLE "users" ALTER COLUMN "roles" TYPE jsonb USING "roles"::jsonb;
+      ALTER TABLE "users" ALTER COLUMN "roles" SET DEFAULT '[]'::jsonb;
+    `);
+
     // Fix rows where the stored first element is itself a JSON array string
     // e.g. roles = '["[\"admin\"]"]' → should be '["admin"]'
     await queryRunner.query(`

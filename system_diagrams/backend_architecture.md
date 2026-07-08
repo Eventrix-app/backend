@@ -126,11 +126,6 @@
 | HTTP Method | URL Pattern | Controller | Required Role(s) | Description |
 |-------------|-------------|------------|------------------|-------------|
 | `POST` | `/auth/login` | `AuthController` | **Public** | Authenticate user & return JWT. |
-| `POST` | `/organizers` | `OrganizerController` | **Public** | Create a new organizer profile. |
-| `GET` | `/organizers` | `OrganizerController` | **admin** | List all organizer profiles (admin only). |
-| `GET` | `/organizers/:id` | `OrganizerController` | **admin** | Retrieve a specific organizer. |
-| `PATCH` | `/organizers/:id` | `OrganizerController` | **admin** & **organizer** (owner) | Update organizer profile. |
-| `DELETE` | `/organizers/:id` | `OrganizerController` | **admin** & **organizer** (owner) | Delete an organizer profile. |
 | `POST` | `/participants` | `ParticipantController` | **Public** | Create a participant (user) profile. |
 | `GET` | `/participants` | `ParticipantController` | **admin** | List all participants (admin only). |
 | `GET` | `/participants/:id` | `ParticipantController` | **admin** & **user** (self) | Retrieve a participant profile. |

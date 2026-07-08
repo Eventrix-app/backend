@@ -65,13 +65,12 @@ export class AuthService {
       throw new UnauthorizedException('Invalid email or password');
     }
 
-    // `user.role` no longer exists – use the first role in the array
-    const userRole = user.roles?.[0] ?? 'user';
+    const userRoles = user.roles?.length ? user.roles : ['user'];
 
     const payload: JwtPayload = {
       id: user.id,
       email: user.email,
-      role: userRole,
+      roles: userRoles,
       full_name: user.fullName || '',
     };
 
@@ -82,7 +81,7 @@ export class AuthService {
       id: user.id,
       email: user.email,
       full_name: user.fullName || '',
-      role: userRole,
+      roles: userRoles,
       expiresIn: 3600,
     };
   }
@@ -113,12 +112,12 @@ export class AuthService {
     const saved = await this.usersRepository.save(user);
     this.logger.log(`Registered new user: ${saved.email} (roles=${saved.roles})`);
 
-    const savedRole = saved.roles?.[0] ?? 'user';
+    const savedRoles = saved.roles?.length ? saved.roles : ['user'];
 
     const payload: JwtPayload = {
       id: saved.id,
       email: saved.email,
-      role: savedRole,
+      roles: savedRoles,
       full_name: saved.fullName || '',
     };
 
@@ -129,7 +128,7 @@ export class AuthService {
       id: saved.id,
       email: saved.email,
       full_name: saved.fullName || '',
-      role: savedRole,
+      roles: savedRoles,
       expiresIn: 3600,
     };
   }

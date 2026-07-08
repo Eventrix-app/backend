@@ -4,13 +4,6 @@ import { LoginDto } from './dto/login.dto';
 import { AuthResponseDto } from './dto/auth-response.dto';
 import { Public } from '../common/decorators/public.decorator';
 import { ApiTags } from '@nestjs/swagger';
-import { AdminService } from '../users/admin/admin.service';
-import { CreateAdminDto } from '../users/admin/dto/create-admin.dto';
-import { ParticipantService } from '../users/participant/participant.service';
-import { CreateParticipantDto } from '../users/participant/dto/create-participant.dto';
-import { OrganizerService } from '../users/organizer/organizer.service';
-import { CreateOrganizerDto } from '../users/organizer/dto/create-organizer.dto';
-
 import { CreateUserDto } from './dto/create-user.dto';
 
 @ApiTags('auth')
@@ -18,9 +11,6 @@ import { CreateUserDto } from './dto/create-user.dto';
 export class AuthController {
   constructor(
     private readonly authService: AuthService,
-    private readonly adminService: AdminService,
-    private readonly participantService: ParticipantService,
-    private readonly organizerService: OrganizerService,
   ) {}
 
   @Public()

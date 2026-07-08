@@ -14,7 +14,7 @@ import {
   ValidateIf,
   Matches,
 } from 'class-validator';
-import { EventStatus } from '../../entities/event.entity';
+import { EventApprovalStatus, EventStatus } from '../../entities/event.entity';
 
 export class CreateEventDto {
   @IsOptional()
@@ -129,4 +129,20 @@ export class CreateEventDto {
   @IsOptional()
   @IsDateString({}, { message: 'Invalid ticket sales close date format' })
   ticketSalesCloseDate?: string;
+
+  @IsOptional()
+  @IsEnum(EventApprovalStatus, { message: 'Invalid approval status' })
+  approvalStatus?: EventApprovalStatus;
+
+  @IsOptional()
+  @IsBoolean()
+  isPaid?: boolean;
+
+  @IsOptional()
+  @IsString()
+  refundPolicyType?: string;
+
+  @IsOptional()
+  @IsString()
+  refundPolicyText?: string;
 }

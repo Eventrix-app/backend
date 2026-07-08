@@ -9,7 +9,7 @@ import {
   Post,
 } from '@nestjs/common';
 import { CategoryService, UpdateCategoryDto } from './category.service';
-import { CreateCategoryDto } from './category.dto';
+import { BulkCreateCategoriesDto, CreateCategoryDto } from './category.dto';
 import { Roles } from '../common/decorators/roles.decorator';
 import { Public } from '../common/decorators/public.decorator';
 import { ApiTags } from '@nestjs/swagger';
@@ -23,6 +23,12 @@ export class CategoryController {
   @Post()
   async create(@Body() createCategoryDto: CreateCategoryDto) {
     return await this.categoryService.create(createCategoryDto);
+  }
+
+  @Roles('admin')
+  @Post('bulk')
+  async bulkCreate(@Body() bulkCreateCategoriesDto: BulkCreateCategoriesDto) {
+    return await this.categoryService.bulkCreate(bulkCreateCategoriesDto);
   }
 
   @Public()

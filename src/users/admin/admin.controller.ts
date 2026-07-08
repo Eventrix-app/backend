@@ -28,7 +28,6 @@ export class AdminController {
     return await this.adminService.bootstrap(createAdminDto);
   }
 
-  @Public()
   @Post()
   async create(@Body() createAdminDto: CreateAdminDto) {
     return await this.adminService.create(createAdminDto);

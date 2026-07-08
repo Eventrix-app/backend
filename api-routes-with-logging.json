@@ -896,44 +896,10 @@
               }
             }
           ]
-        },
-        {
-          "name": "Delete Event (Soft Delete)",
-          "request": {
-            "method": "DELETE",
-            "header": [
-              { "key": "Authorization", "value": "Bearer {{accessToken}}" }
-            ],
-            "url": { "raw": "{{baseUrl}}/events/{{eventId}}", "host": ["{{baseUrl}}"], "path": ["events", "{{eventId}}"] }
-          },
-          "event": [
-            {
-              "listen": "test",
-              "script": {
-                "type": "text/javascript",
-                "exec": [
-                  "console.log('\\n🗑️  DELETE EVENT (SOFT DELETE)');",
-                  "console.log('━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━');",
-                  "console.log('📍 Endpoint: DELETE /events/{{eventId}}');",
-                  "console.log('⏱️  Response Time: ' + pm.response.responseTime + 'ms');",
-                  "console.log('📊 Status Code: ' + pm.response.code);",
-                  "if (pm.response.code === 200) {",
-                  "  console.log('✅ Event Soft Deleted Successfully');",
-                  "  console.log('ℹ️  Note: Event is marked as deleted but data is preserved');",
-                  "  pm.environment.set('eventId', '');",
-                  "} else {",
-                  "  const delEventData = pm.response.json();",
-                  "  console.log('❌ Failed to Delete Event');",
-                  "  console.log('⚠️  Error: ' + delEventData.message);",
-                  "}",
-                  "try { console.log('📋 Response:', JSON.stringify(pm.response.json(), null, 2)); } catch(e) {}",
-                  "console.log('━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━\\n');"
-                ]
-              }
-            }
-          ]
         }
       ]
     }
   ]
 }
+
+

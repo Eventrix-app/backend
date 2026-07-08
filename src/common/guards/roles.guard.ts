@@ -40,12 +40,12 @@ export class RolesGuard implements CanActivate {
       .getRequest<Request & { user?: JwtPayload }>();
     const user = request.user;
 
-    if (!user || !user.role) {
+    if (!user || !user.roles?.length) {
       // JwtAuthGuard should have populated this. If not, the request never authenticated.
       throw new UnauthorizedException('Authentication required');
     }
 
-    if (!required.includes(user.role)) {
+    if (!required.some(r => user.roles.includes(r))) {
       throw new ForbiddenException(
         `Insufficient role: requires one of [${required.join(', ')}]`,
       );

@@ -11,15 +11,11 @@ import {
 } from 'typeorm';
 import { Event } from './event.entity';
 import { User } from './user.entity';
-import { Enrollment } from './enrollment.entity';
 
 @Entity('organizers')
 export class Organizer {
   @OneToMany(() => Event, (event) => event.organizer)
   events!: Event[];
-
-  @OneToMany(() => Enrollment, (enrollment) => enrollment.event)
-  enrollments!: Enrollment[];
 
   @PrimaryGeneratedColumn('uuid')
   id!: string;
