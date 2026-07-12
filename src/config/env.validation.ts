@@ -3,6 +3,8 @@ import * as Joi from 'joi';
 export const validateEnv = (config: Record<string, unknown>) => {
   const schema = Joi.object({
     PORT: Joi.number().optional(),
+    DATABASE_URL: Joi.string().optional(),
+    DATABASE_URL_POOLER: Joi.string().optional(),
     DATABASE_HOST: Joi.string().optional(),
     DATABASE_PORT: Joi.number().optional(),
     DATABASE_USER: Joi.string().optional(),
@@ -11,6 +13,12 @@ export const validateEnv = (config: Record<string, unknown>) => {
     JWT_SECRET: Joi.string().optional(),
     JWT_EXPIRES_IN: Joi.string().optional(),
     FRONTEND_URL: Joi.string().optional(),
+    GATEWAY_FEE_PERCENT: Joi.number().optional(),
+    GATEWAY_FEE_FLAT: Joi.number().optional(),
+    REFUND_WINDOW_HOURS: Joi.number().optional(),
+    PAYOUT_DELAY_DAYS: Joi.number().optional(),
+    SUPABASE_URL: Joi.string().optional(),
+    SUPABASE_SERVICE_ROLE_KEY: Joi.string().optional(),
   }).unknown(true);
 
   const { error, value } = schema.validate(config, {

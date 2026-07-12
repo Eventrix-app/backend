@@ -2,7 +2,7 @@
   "info": {
     "name": "Eventrix Backend API",
     "schema": "https://schema.getpostman.com/json/collection/v2.1.0/collection.json",
-    "description": "Postman collection for the current Eventrix backend routes.\n\n🔑 **TOKEN FLOW**:\n1. Bootstrap an admin with `POST /admins/bootstrap` or create one with `POST /admins` after login.\n2. Log in with `POST /auth/login` and store the returned token in `{{accessToken}}`.\n3. All protected requests reuse `{{accessToken}}`.\n4. `POST /events` auto-creates the organizer profile for the logged-in user and returns `organizerId` for follow-up organizer requests.\n\n🧪 **RECOMMENDED RUN ORDER**:\n1. `POST /auth/register` for a regular user.\n2. `POST /admins/bootstrap` to seed the first admin record.\n3. `POST /auth/login` to capture `{{accessToken}}`.\n4. `POST /admins` to create a protected admin record.\n5. `POST /categories` to capture category IDs.\n6. `POST /events` to capture `eventId` and `organizerId`.\n7. `GET /events/my-events` and `GET /events/pending` to verify event visibility.\n8. `POST /participants` plus the `users/me` and `participants/me` profile routes.\n9. Use the captured IDs for update and delete flows."
+    "description": "Postman collection for the current Eventrix backend routes.\n\n🔑 TOKEN FLOW:\n1. Bootstrap an admin with POST /admins/bootstrap or create one with POST /admins after login.\n2. Log in with POST /auth/login and store the returned token in {{accessToken}}.\n3. All protected requests reuse {{accessToken}}.\n4. POST /events auto-creates the organizer profile for the logged-in user and returns organizerId for follow-up organizer requests.\n5. Runtime env keys used by the backend include DATABASE_URL, DATABASE_URL_POOLER, JWT_SECRET, JWT_EXPIRES_IN, FRONTEND_URL, GATEWAY_FEE_PERCENT, GATEWAY_FEE_FLAT, REFUND_WINDOW_HOURS, PAYOUT_DELAY_DAYS, SUPABASE_URL, and SUPABASE_SERVICE_ROLE_KEY.\n\n📤 FILE UPLOADS: POST /uploads/signed-url with a purpose (profile-picture | event-image | event-cover | company-logo) to get a signed Supabase PUT URL, PUT the file bytes to it directly, then send the returned publicUrl as a normal string field on the participant/event/organizer create-or-update call. See multipart.md. Requires SUPABASE_URL and SUPABASE_SERVICE_ROLE_KEY (note the _ROLE_ — not SUPABASE_SERVICE_KEY, an older/removed variable name) in your local .env, or this now returns a 503 with a clear message instead of a raw 500.\n\n👤 ORGANIZER SELF-SERVICE: PATCH/DELETE /organizers/:id now accepts an organizer's own token (not just admin) to manage their own profile, gated by ownership in the handler; admin-only fields (commissionRate, commissionFlatFee, verificationLevel, autoApproveEvents) still 403 for non-admins. See the two 'Update Organizer' requests and the admin-only-field negative test below.\n\n🧪 RECOMMENDED RUN ORDER:\n1. POST /auth/register for a regular user.\n2. POST /admins/bootstrap to seed the first admin record.\n3. POST /auth/login to capture {{accessToken}}.\n4. POST /admins to create a protected admin record.\n5. POST /categories then POST /categories/bulk to capture 3 distinct category IDs (categoryId, categoryId2, categoryId3) — PUT /users/me/interests requires 3 unique IDs, duplicates now 400.\n6. POST /events to capture eventId and organizerId.\n7. GET /events/my-events and GET /events/pending to verify event visibility.\n8. POST /participants plus the users/me profile routes — Create Participant now returns an accessToken too (same as auth/register), since it creates the same kind of account.\n9. Use the captured IDs for update, ticket, refund, and delete flows."
   },
   "variable": [
     { "key": "baseUrl", "value": "http://localhost:3000/api", "type": "string" },
@@ -16,7 +16,14 @@
     { "key": "categoryId", "value": "", "type": "string" },
     { "key": "categoryId2", "value": "", "type": "string" },
     { "key": "categoryId3", "value": "", "type": "string" },
-    { "key": "eventId", "value": "", "type": "string" }
+    { "key": "eventId", "value": "", "type": "string" },
+    { "key": "ticketTypeId", "value": "", "type": "string" },
+    { "key": "enrollmentId", "value": "", "type": "string" },
+    { "key": "refundId", "value": "", "type": "string" },
+    { "key": "contentType", "value": "image/jpeg", "type": "string" },
+    { "key": "companyLogoUrl", "value": "", "type": "string" },
+    { "key": "ticketCode", "value": "", "type": "string" },
+    { "key": "name", "value": "", "type": "string" }
   ],
   "item": [
     {
@@ -36,27 +43,11 @@
       "item": [
         {
           "name": "Preview Page",
-          "request": {
-            "method": "GET",
-            "header": [],
-            "url": {
-              "raw": "{{baseUrl}}/preview",
-              "host": ["{{baseUrl}}"],
-              "path": ["preview"]
-            }
-          }
+          "request": { "method": "GET", "header": [], "url": { "raw": "{{baseUrl}}/preview", "host": ["{{baseUrl}}"], "path": ["preview"] } }
         },
         {
           "name": "Preview API",
-          "request": {
-            "method": "GET",
-            "header": [],
-            "url": {
-              "raw": "{{baseUrl}}/preview/api",
-              "host": ["{{baseUrl}}"],
-              "path": ["preview", "api"]
-            }
-          }
+          "request": { "method": "GET", "header": [], "url": { "raw": "{{baseUrl}}/preview/api", "host": ["{{baseUrl}}"], "path": ["preview", "api"] } }
         }
       ]
     },
@@ -67,142 +58,29 @@
           "name": "Register User",
           "request": {
             "method": "POST",
-            "header": [
-              {
-                "key": "Content-Type",
-                "value": "application/json"
-              }
-            ],
-            "body": {
-              "mode": "raw",
-              "raw": "{\n  \"username\": \"testuser\",\n  \"email\": \"user@example.com\",\n  \"password\": \"Password123!\",\n  \"firstName\": \"Test\",\n  \"lastName\": \"User\"\n}",
-              "options": {
-                "raw": {
-                  "language": "json"
-                }
-              }
-            },
-            "url": {
-              "raw": "{{baseUrl}}/auth/register",
-              "host": ["{{baseUrl}}"],
-              "path": ["auth", "register"]
-            }
+            "header": [{ "key": "Content-Type", "value": "application/json" }],
+            "body": { "mode": "raw", "raw": "{\n  \"username\": \"testuser\",\n  \"email\": \"user@example.com\",\n  \"password\": \"Password123!\",\n  \"firstName\": \"Test\",\n  \"lastName\": \"User\"\n}", "options": { "raw": { "language": "json" } } },
+            "url": { "raw": "{{baseUrl}}/auth/register", "host": ["{{baseUrl}}"], "path": ["auth", "register"] }
           },
-          "event": [
-            {
-              "listen": "test",
-              "script": {
-                "type": "text/javascript",
-                "exec": [
-                  "const data = pm.response.json();",
-                  "if (data && data.id) {",
-                  "  pm.environment.set('userId', data.id);",
-                  "}",
-                  "if (data && (data.accessToken || data.token)) {",
-                  "  const token = data.accessToken || data.token;",
-                  "  pm.environment.set('accessToken', token);",
-                  "}"
-                ]
-              }
-            }
-          ]
+          "event": [{ "listen": "test", "script": { "exec": ["const data = pm.response.json();", "if (data && data.id) pm.environment.set('userId', data.id);", "if (data && (data.accessToken || data.token)) {", "  const token = data.accessToken || data.token;", "  pm.environment.set('accessToken', token);", "}"] } }]
         },
         {
-          "name": "Login Admin",
+          "name": "Login",
           "request": {
             "method": "POST",
-            "header": [
-              {
-                "key": "Content-Type",
-                "value": "application/json"
-              }
-            ],
-            "body": {
-              "mode": "raw",
-              "raw": "{\n  \"email\": \"admin@example.com\",\n  \"password\": \"Password123!\"\n}",
-              "options": {
-                "raw": {
-                  "language": "json"
-                }
-              }
-            },
-            "url": {
-              "raw": "{{baseUrl}}/auth/login",
-              "host": ["{{baseUrl}}"],
-              "path": ["auth", "login"]
-            }
+            "header": [{ "key": "Content-Type", "value": "application/json" }],
+            "body": { "mode": "raw", "raw": "{\n  \"email\": \"admin@example.com\",\n  \"password\": \"Password123!\"\n}", "options": { "raw": { "language": "json" } } },
+            "url": { "raw": "{{baseUrl}}/auth/login", "host": ["{{baseUrl}}"], "path": ["auth", "login"] }
           },
-          "event": [
-            {
-              "listen": "test",
-              "script": {
-                "type": "text/javascript",
-                "exec": [
-                  "const data = pm.response.json();",
-                  "const token = data && (data.accessToken || data.token);",
-                  "if (token) {",
-                  "  pm.collectionVariables.set('accessToken', token);",
-                  "  pm.environment.set('accessToken', token);",
-                  "}",
-                  "if (data && data.role) {",
-                  "  pm.environment.set('userRole', data.role);",
-                  "}"
-                ]
-              }
-            }
-          ]
+          "event": [{ "listen": "test", "script": { "exec": ["const data = pm.response.json();", "const token = data && (data.accessToken || data.token);", "if (token) {", "  pm.collectionVariables.set('accessToken', token);", "  pm.environment.set('accessToken', token);", "}", "if (data && data.role) pm.environment.set('userRole', data.role);"] } }]
         },
         {
           "name": "Forgot Password",
-          "request": {
-            "method": "POST",
-            "header": [
-              {
-                "key": "Content-Type",
-                "value": "application/json"
-              }
-            ],
-            "body": {
-              "mode": "raw",
-              "raw": "{\n  \"email\": \"admin@example.com\"\n}",
-              "options": {
-                "raw": {
-                  "language": "json"
-                }
-              }
-            },
-            "url": {
-              "raw": "{{baseUrl}}/auth/forgot-password",
-              "host": ["{{baseUrl}}"],
-              "path": ["auth", "forgot-password"]
-            }
-          }
+          "request": { "method": "POST", "header": [{ "key": "Content-Type", "value": "application/json" }], "body": { "mode": "raw", "raw": "{\n  \"email\": \"admin@example.com\"\n}", "options": { "raw": { "language": "json" } } }, "url": { "raw": "{{baseUrl}}/auth/forgot-password", "host": ["{{baseUrl}}"], "path": ["auth", "forgot-password"] } }
         },
         {
           "name": "Reset Password",
-          "request": {
-            "method": "POST",
-            "header": [
-              {
-                "key": "Content-Type",
-                "value": "application/json"
-              }
-            ],
-            "body": {
-              "mode": "raw",
-              "raw": "{\n  \"token\": \"123456\",\n  \"password\": \"NewPassword123!\"\n}",
-              "options": {
-                "raw": {
-                  "language": "json"
-                }
-              }
-            },
-            "url": {
-              "raw": "{{baseUrl}}/auth/reset-password",
-              "host": ["{{baseUrl}}"],
-              "path": ["auth", "reset-password"]
-            }
-          }
+          "request": { "method": "POST", "header": [{ "key": "Content-Type", "value": "application/json" }], "body": { "mode": "raw", "raw": "{\n  \"token\": \"123456\",\n  \"password\": \"NewPassword123!\"\n}", "options": { "raw": { "language": "json" } } }, "url": { "raw": "{{baseUrl}}/auth/reset-password", "host": ["{{baseUrl}}"], "path": ["auth", "reset-password"] } }
         }
       ]
     },
@@ -210,903 +88,105 @@
       "name": "Users",
       "item": [
         {
-          "name": "Admins",
+          "name": "Profile",
           "item": [
-            {
-              "name": "Bootstrap Admin",
-              "request": {
-                "method": "POST",
-                "header": [
-                  {
-                    "key": "Content-Type",
-                    "value": "application/json"
-                  }
-                ],
-                "body": {
-                  "mode": "raw",
-                  "raw": "{\n  \"username\": \"adminbootstrap\",\n  \"email\": \"admin@example.com\",\n  \"password\": \"Password123!\",\n  \"firstName\": \"Admin\",\n  \"lastName\": \"Bootstrap\",\n  \"phone\": \"9876543210\",\n  \"isActive\": true\n}",
-                  "options": {
-                    "raw": {
-                      "language": "json"
-                    }
-                  }
-                },
-                "url": {
-                  "raw": "{{baseUrl}}/admins/bootstrap",
-                  "host": ["{{baseUrl}}"],
-                  "path": ["admins", "bootstrap"]
-                }
-              },
-              "event": [
-                {
-                  "listen": "test",
-                  "script": {
-                    "exec": [
-                      "const data = pm.response.json();",
-                      "if (data && data.id) {",
-                      "  pm.environment.set('adminBootstrapId', data.id);",
-                      "}"
-                    ]
-                  }
-                }
-              ]
-            },
-            {
-              "name": "Create Admin",
-              "request": {
-                "method": "POST",
-                "header": [
-                  {
-                    "key": "Content-Type",
-                    "value": "application/json"
-                  },
-                  {
-                    "key": "Authorization",
-                    "value": "Bearer {{accessToken}}"
-                  }
-                ],
-                "body": {
-                  "mode": "raw",
-                  "raw": "{\n  \"username\": \"adminuser2\",\n  \"email\": \"admin2@example.com\",\n  \"password\": \"Password123!\",\n  \"firstName\": \"Admin\",\n  \"lastName\": \"User\",\n  \"phone\": \"9999999999\",\n  \"isActive\": true\n}",
-                  "options": {
-                    "raw": {
-                      "language": "json"
-                    }
-                  }
-                },
-                "url": {
-                  "raw": "{{baseUrl}}/admins",
-                  "host": ["{{baseUrl}}"],
-                  "path": ["admins"]
-                }
-              },
-              "event": [
-                {
-                  "listen": "test",
-                  "script": {
-                    "exec": [
-                      "const data = pm.response.json();",
-                      "if (data && data.id) {",
-                      "  pm.environment.set('adminId', data.id);",
-                      "}"
-                    ]
-                  }
-                }
-              ]
-            },
-            {
-              "name": "List Admins",
-              "request": {
-                "method": "GET",
-                "header": [
-                  {
-                    "key": "Authorization",
-                    "value": "Bearer {{accessToken}}"
-                  }
-                ],
-                "url": {
-                  "raw": "{{baseUrl}}/admins",
-                  "host": ["{{baseUrl}}"],
-                  "path": ["admins"]
-                }
-              }
-            },
-            {
-              "name": "Get Admin By ID",
-              "request": {
-                "method": "GET",
-                "header": [
-                  {
-                    "key": "Authorization",
-                    "value": "Bearer {{accessToken}}"
-                  }
-                ],
-                "url": {
-                  "raw": "{{baseUrl}}/admins/{{adminId}}",
-                  "host": ["{{baseUrl}}"],
-                  "path": ["admins", "{{adminId}}"]
-                }
-              }
-            },
-            {
-              "name": "Update Admin",
-              "request": {
-                "method": "PATCH",
-                "header": [
-                  {
-                    "key": "Content-Type",
-                    "value": "application/json"
-                  },
-                  {
-                    "key": "Authorization",
-                    "value": "Bearer {{accessToken}}"
-                  }
-                ],
-                "body": {
-                  "mode": "raw",
-                  "raw": "{\n  \"firstName\": \"Admin\",\n  \"lastName\": \"Updated\",\n  \"phone\": \"9999999998\",\n  \"isActive\": true\n}",
-                  "options": {
-                    "raw": {
-                      "language": "json"
-                    }
-                  }
-                },
-                "url": {
-                  "raw": "{{baseUrl}}/admins/{{adminId}}",
-                  "host": ["{{baseUrl}}"],
-                  "path": ["admins", "{{adminId}}"]
-                }
-              }
-            },
-            {
-              "name": "Delete Admin",
-              "request": {
-                "method": "DELETE",
-                "header": [
-                  {
-                    "key": "Authorization",
-                    "value": "Bearer {{accessToken}}"
-                  }
-                ],
-                "url": {
-                  "raw": "{{baseUrl}}/admins/{{adminId}}",
-                  "host": ["{{baseUrl}}"],
-                  "path": ["admins", "{{adminId}}"]
-                }
-              }
-            }
+            { "name": "Get Me", "request": { "method": "GET", "header": [{ "key": "Authorization", "value": "Bearer {{accessToken}}" }], "url": { "raw": "{{baseUrl}}/users/me", "host": ["{{baseUrl}}"], "path": ["users", "me"] } } },
+            { "name": "Update Interests", "request": { "method": "PUT", "header": [{ "key": "Content-Type", "value": "application/json" }, { "key": "Authorization", "value": "Bearer {{accessToken}}" }], "body": { "mode": "raw", "raw": "{\n  \"categoryIds\": [\n    \"{{categoryId}}\",\n    \"{{categoryId2}}\",\n    \"{{categoryId3}}\"\n  ]\n}", "options": { "raw": { "language": "json" } } }, "url": { "raw": "{{baseUrl}}/users/me/interests", "host": ["{{baseUrl}}"], "path": ["users", "me", "interests"] } } },
+            { "name": "Update Location", "request": { "method": "PATCH", "header": [{ "key": "Content-Type", "value": "application/json" }, { "key": "Authorization", "value": "Bearer {{accessToken}}" }], "body": { "mode": "raw", "raw": "{\n  \"latitude\": 37.7749,\n  \"longitude\": -122.4194\n}", "options": { "raw": { "language": "json" } } }, "url": { "raw": "{{baseUrl}}/users/me/location", "host": ["{{baseUrl}}"], "path": ["users", "me", "location"] } } },
+            { "name": "Update Notification Preferences", "request": { "method": "PATCH", "header": [{ "key": "Content-Type", "value": "application/json" }, { "key": "Authorization", "value": "Bearer {{accessToken}}" }], "body": { "mode": "raw", "raw": "{\n  \"eventReminders\": true,\n  \"nearbyEvents\": true,\n  \"reelsAndCommunity\": true,\n  \"specialOffers\": true\n}", "options": { "raw": { "language": "json" } } }, "url": { "raw": "{{baseUrl}}/users/me/notification-preferences", "host": ["{{baseUrl}}"], "path": ["users", "me", "notification-preferences"] } } }
           ]
         },
         {
           "name": "Participants",
           "item": [
-            {
-              "name": "Create Participant",
-              "request": {
-                "method": "POST",
-                "header": [
-                  {
-                    "key": "Content-Type",
-                    "value": "application/json"
-                  },
-                  {
-                    "key": "Authorization",
-                    "value": "Bearer {{accessToken}}"
-                  }
-                ],
-                "body": {
-                  "mode": "raw",
-                  "raw": "{\n  \"username\": \"participantuser\",\n  \"email\": \"participant@example.com\",\n  \"password\": \"Password123!\",\n  \"firstName\": \"Parti\",\n  \"lastName\": \"Cipant\",\n  \"gender\": \"Male\",\n  \"dateOfBirth\": \"1995-05-15\",\n  \"phone\": \"9876543210\",\n  \"profileImageUrl\": \"https://example.com/image.jpg\",\n  \"addressType\": \"Residential\",\n  \"addressLine\": \"123 Main Street, Apt 4B\",\n  \"city\": \"New York\",\n  \"state\": \"NY\",\n  \"country\": \"USA\",\n  \"pincode\": \"10001\",\n  \"isActive\": true\n}",
-                  "options": {
-                    "raw": {
-                      "language": "json"
-                    }
-                  }
-                },
-                "url": {
-                  "raw": "{{baseUrl}}/participants",
-                  "host": ["{{baseUrl}}"],
-                  "path": ["participants"]
-                }
-              },
-              "event": [
-                {
-                  "listen": "test",
-                  "script": {
-                    "exec": [
-                      "const data = pm.response.json();",
-                      "if (data && data.id) {",
-                      "  pm.environment.set('participantId', data.id);",
-                      "}"
-                    ]
-                  }
-                }
-              ]
-            },
-            {
-              "name": "List Participants",
-              "request": {
-                "method": "GET",
-                "header": [
-                  {
-                    "key": "Authorization",
-                    "value": "Bearer {{accessToken}}"
-                  }
-                ],
-                "url": {
-                  "raw": "{{baseUrl}}/participants",
-                  "host": ["{{baseUrl}}"],
-                  "path": ["participants"]
-                }
-              }
-            },
-            {
-              "name": "Get Participant By ID",
-              "request": {
-                "method": "GET",
-                "header": [
-                  {
-                    "key": "Authorization",
-                    "value": "Bearer {{accessToken}}"
-                  }
-                ],
-                "url": {
-                  "raw": "{{baseUrl}}/participants/{{participantId}}",
-                  "host": ["{{baseUrl}}"],
-                  "path": ["participants", "{{participantId}}"]
-                }
-              }
-            },
-            {
-              "name": "Update Participant",
-              "request": {
-                "method": "PATCH",
-                "header": [
-                  {
-                    "key": "Content-Type",
-                    "value": "application/json"
-                  },
-                  {
-                    "key": "Authorization",
-                    "value": "Bearer {{accessToken}}"
-                  }
-                ],
-                "body": {
-                  "mode": "raw",
-                  "raw": "{\n  \"firstName\": \"Participant\",\n  \"lastName\": \"Updated\",\n  \"gender\": \"Female\",\n  \"dateOfBirth\": \"1995-05-15\",\n  \"phone\": \"9999999999\",\n  \"profileImageUrl\": \"https://example.com/updated-image.jpg\",\n  \"addressType\": \"Residential\",\n  \"addressLine\": \"456 Oak Avenue, Suite 200\",\n  \"city\": \"Los Angeles\",\n  \"state\": \"CA\",\n  \"country\": \"USA\",\n  \"pincode\": \"90001\",\n  \"isActive\": true\n}",
-                  "options": {
-                    "raw": {
-                      "language": "json"
-                    }
-                  }
-                },
-                "url": {
-                  "raw": "{{baseUrl}}/participants/{{participantId}}",
-                  "host": ["{{baseUrl}}"],
-                  "path": ["participants", "{{participantId}}"]
-                }
-              }
-            },
-            {
-              "name": "Delete Participant",
-              "request": {
-                "method": "DELETE",
-                "header": [
-                  {
-                    "key": "Authorization",
-                    "value": "Bearer {{accessToken}}"
-                  }
-                ],
-                "url": {
-                  "raw": "{{baseUrl}}/participants/{{participantId}}",
-                  "host": ["{{baseUrl}}"],
-                  "path": ["participants", "{{participantId}}"]
-                }
-              }
-            },
-            {
-              "name": "Update Participant Interests",
-              "request": {
-                "method": "PUT",
-                "header": [
-                  {
-                    "key": "Content-Type",
-                    "value": "application/json"
-                  },
-                  {
-                    "key": "Authorization",
-                    "value": "Bearer {{accessToken}}"
-                  }
-                ],
-                "body": {
-                  "mode": "raw",
-                  "raw": "{\n  \"categoryIds\": [\n    \"{{categoryId}}\",\n    \"{{categoryId2}}\",\n    \"{{categoryId3}}\"\n  ]\n}",
-                  "options": {
-                    "raw": {
-                      "language": "json"
-                    }
-                  }
-                },
-                "url": {
-                  "raw": "{{baseUrl}}/participants/me/interests",
-                  "host": ["{{baseUrl}}"],
-                  "path": ["participants", "me", "interests"]
-                }
-              }
-            },
-            {
-              "name": "Update Participant Location",
-              "request": {
-                "method": "PATCH",
-                "header": [
-                  {
-                    "key": "Content-Type",
-                    "value": "application/json"
-                  },
-                  {
-                    "key": "Authorization",
-                    "value": "Bearer {{accessToken}}"
-                  }
-                ],
-                "body": {
-                  "mode": "raw",
-                  "raw": "{\n  \"latitude\": 37.7749,\n  \"longitude\": -122.4194\n}",
-                  "options": {
-                    "raw": {
-                      "language": "json"
-                    }
-                  }
-                },
-                "url": {
-                  "raw": "{{baseUrl}}/participants/me/location",
-                  "host": ["{{baseUrl}}"],
-                  "path": ["participants", "me", "location"]
-                }
-              }
-            },
-            {
-              "name": "Update Participant Notification Preferences",
-              "request": {
-                "method": "PATCH",
-                "header": [
-                  {
-                    "key": "Content-Type",
-                    "value": "application/json"
-                  },
-                  {
-                    "key": "Authorization",
-                    "value": "Bearer {{accessToken}}"
-                  }
-                ],
-                "body": {
-                  "mode": "raw",
-                  "raw": "{\n  \"eventReminders\": true,\n  \"nearbyEvents\": true,\n  \"reelsAndCommunity\": true,\n  \"specialOffers\": true\n}",
-                  "options": {
-                    "raw": {
-                      "language": "json"
-                    }
-                  }
-                },
-                "url": {
-                  "raw": "{{baseUrl}}/participants/me/notification-preferences",
-                  "host": ["{{baseUrl}}"],
-                  "path": ["participants", "me", "notification-preferences"]
-                }
-              }
-            }
-          ]
-        },
-        {
-          "name": "Profile",
-          "item": [
-            {
-              "name": "Get Profile (Me)",
-              "request": {
-                "method": "GET",
-                "header": [
-                  {
-                    "key": "Authorization",
-                    "value": "Bearer {{accessToken}}"
-                  }
-                ],
-                "url": {
-                  "raw": "{{baseUrl}}/users/me",
-                  "host": ["{{baseUrl}}"],
-                  "path": ["users", "me"]
-                }
-              }
-            },
-            {
-              "name": "Update Interests",
-              "request": {
-                "method": "PUT",
-                "header": [
-                  {
-                    "key": "Content-Type",
-                    "value": "application/json"
-                  },
-                  {
-                    "key": "Authorization",
-                    "value": "Bearer {{accessToken}}"
-                  }
-                ],
-                "body": {
-                  "mode": "raw",
-                  "raw": "{\n  \"categoryIds\": [\n    \"{{categoryId}}\",\n    \"{{categoryId2}}\",\n    \"{{categoryId3}}\"\n  ]\n}",
-                  "options": {
-                    "raw": {
-                      "language": "json"
-                    }
-                  }
-                },
-                "url": {
-                  "raw": "{{baseUrl}}/users/me/interests",
-                  "host": ["{{baseUrl}}"],
-                  "path": ["users", "me", "interests"]
-                }
-              }
-            },
-            {
-              "name": "Update Location",
-              "request": {
-                "method": "PATCH",
-                "header": [
-                  {
-                    "key": "Content-Type",
-                    "value": "application/json"
-                  },
-                  {
-                    "key": "Authorization",
-                    "value": "Bearer {{accessToken}}"
-                  }
-                ],
-                "body": {
-                  "mode": "raw",
-                  "raw": "{\n  \"latitude\": 37.7749,\n  \"longitude\": -122.4194\n}",
-                  "options": {
-                    "raw": {
-                      "language": "json"
-                    }
-                  }
-                },
-                "url": {
-                  "raw": "{{baseUrl}}/users/me/location",
-                  "host": ["{{baseUrl}}"],
-                  "path": ["users", "me", "location"]
-                }
-              }
-            },
-            {
-              "name": "Update Notification Preferences",
-              "request": {
-                "method": "PATCH",
-                "header": [
-                  {
-                    "key": "Content-Type",
-                    "value": "application/json"
-                  },
-                  {
-                    "key": "Authorization",
-                    "value": "Bearer {{accessToken}}"
-                  }
-                ],
-                "body": {
-                  "mode": "raw",
-                  "raw": "{\n  \"eventReminders\": true,\n  \"nearbyEvents\": true,\n  \"reelsAndCommunity\": true,\n  \"specialOffers\": true\n}",
-                  "options": {
-                    "raw": {
-                      "language": "json"
-                    }
-                  }
-                },
-                "url": {
-                  "raw": "{{baseUrl}}/users/me/notification-preferences",
-                  "host": ["{{baseUrl}}"],
-                  "path": ["users", "me", "notification-preferences"]
-                }
-              }
-            }
+            { "name": "Create Participant", "request": { "method": "POST", "header": [{ "key": "Content-Type", "value": "application/json" }, { "key": "Authorization", "value": "Bearer {{accessToken}}" }], "body": { "mode": "raw", "raw": "{\n  \"username\": \"participantuser\",\n  \"email\": \"participant@example.com\",\n  \"password\": \"Password123!\",\n  \"firstName\": \"Parti\",\n  \"lastName\": \"Cipant\",\n  \"gender\": \"Male\",\n  \"dateOfBirth\": \"1995-05-15\",\n  \"phone\": \"9876543210\",\n  \"profileImageUrl\": \"https://example.com/image.jpg\",\n  \"addressType\": \"Residential\",\n  \"addressLine\": \"123 Main Street, Apt 4B\",\n  \"city\": \"New York\",\n  \"state\": \"NY\",\n  \"country\": \"USA\",\n  \"pincode\": \"10001\",\n  \"isActive\": true\n}", "options": { "raw": { "language": "json" } } }, "url": { "raw": "{{baseUrl}}/participants", "host": ["{{baseUrl}}"], "path": ["participants"] } }, "event": [{ "listen": "test", "script": { "exec": ["const data = pm.response.json();", "if (data && data.id) pm.environment.set('participantId', data.id);"] } }] },
+            { "name": "List Participants", "request": { "method": "GET", "header": [{ "key": "Authorization", "value": "Bearer {{accessToken}}" }], "url": { "raw": "{{baseUrl}}/participants", "host": ["{{baseUrl}}"], "path": ["participants"] } } },
+            { "name": "Get Participant By ID", "request": { "method": "GET", "header": [{ "key": "Authorization", "value": "Bearer {{accessToken}}" }], "url": { "raw": "{{baseUrl}}/participants/{{participantId}}", "host": ["{{baseUrl}}"], "path": ["participants", "{{participantId}}"] } } },
+            { "name": "Update Participant", "request": { "method": "PATCH", "header": [{ "key": "Content-Type", "value": "application/json" }, { "key": "Authorization", "value": "Bearer {{accessToken}}" }], "body": { "mode": "raw", "raw": "{\n  \"firstName\": \"Participant\",\n  \"lastName\": \"Updated\",\n  \"phone\": \"9999999999\"\n}", "options": { "raw": { "language": "json" } } }, "url": { "raw": "{{baseUrl}}/participants/{{participantId}}", "host": ["{{baseUrl}}"], "path": ["participants", "{{participantId}}"] } } },
+            { "name": "Delete Participant", "request": { "method": "DELETE", "header": [{ "key": "Authorization", "value": "Bearer {{accessToken}}" }], "url": { "raw": "{{baseUrl}}/participants/{{participantId}}", "host": ["{{baseUrl}}"], "path": ["participants", "{{participantId}}"] } } }
           ]
         }
+      ]
+    },
+    {
+      "name": "Admins",
+      "item": [
+        { "name": "Bootstrap Admin", "request": { "method": "POST", "header": [{ "key": "Content-Type", "value": "application/json" }], "body": { "mode": "raw", "raw": "{\n  \"username\": \"adminbootstrap\",\n  \"email\": \"admin@example.com\",\n  \"password\": \"Password123!\",\n  \"firstName\": \"Admin\",\n  \"lastName\": \"Bootstrap\",\n  \"phone\": \"9876543210\",\n  \"isActive\": true\n}", "options": { "raw": { "language": "json" } } }, "url": { "raw": "{{baseUrl}}/admins/bootstrap", "host": ["{{baseUrl}}"], "path": ["admins", "bootstrap"] } }, "event": [{ "listen": "test", "script": { "exec": ["const data = pm.response.json();", "if (data && data.id) pm.environment.set('adminBootstrapId', data.id);"] } }] },
+            { "name": "Create Admin", "request": { "method": "POST", "header": [{ "key": "Content-Type", "value": "application/json" }, { "key": "Authorization", "value": "Bearer {{accessToken}}" }], "body": { "mode": "raw", "raw": "{\n  \"username\": \"adminuser\",\n  \"email\": \"admin2@example.com\",\n  \"password\": \"Password123!\",\n  \"firstName\": \"Admin\",\n  \"lastName\": \"User\",\n  \"phone\": \"9999999999\",\n  \"isActive\": true\n}", "options": { "raw": { "language": "json" } } }, "url": { "raw": "{{baseUrl}}/admins", "host": ["{{baseUrl}}"], "path": ["admins"] } }, "event": [{ "listen": "test", "script": { "exec": ["const data = pm.response.json();", "if (data && data.id) pm.environment.set('adminId', data.id);"] } }] },
+        { "name": "List Admins", "request": { "method": "GET", "header": [{ "key": "Authorization", "value": "Bearer {{accessToken}}" }], "url": { "raw": "{{baseUrl}}/admins", "host": ["{{baseUrl}}"], "path": ["admins"] } } },
+        { "name": "Get Admin By ID", "request": { "method": "GET", "header": [{ "key": "Authorization", "value": "Bearer {{accessToken}}" }], "url": { "raw": "{{baseUrl}}/admins/{{adminId}}", "host": ["{{baseUrl}}"], "path": ["admins", "{{adminId}}"] } } },
+        { "name": "Update Admin", "request": { "method": "PATCH", "header": [{ "key": "Content-Type", "value": "application/json" }, { "key": "Authorization", "value": "Bearer {{accessToken}}" }], "body": { "mode": "raw", "raw": "{\n  \"firstName\": \"Admin\",\n  \"lastName\": \"Updated\",\n  \"phone\": \"9999999998\",\n  \"isActive\": true\n}", "options": { "raw": { "language": "json" } } }, "url": { "raw": "{{baseUrl}}/admins/{{adminId}}", "host": ["{{baseUrl}}"], "path": ["admins", "{{adminId}}"] } } },
+        { "name": "Delete Admin", "request": { "method": "DELETE", "header": [{ "key": "Authorization", "value": "Bearer {{accessToken}}" }], "url": { "raw": "{{baseUrl}}/admins/{{adminId}}", "host": ["{{baseUrl}}"], "path": ["admins", "{{adminId}}"] } } },
+        { "name": "Ban User", "request": { "method": "PATCH", "header": [{ "key": "Content-Type", "value": "application/json" }, { "key": "Authorization", "value": "Bearer {{accessToken}}" }], "body": { "mode": "raw", "raw": "{\n  \"reason\": \"Policy violation\"\n}", "options": { "raw": { "language": "json" } } }, "url": { "raw": "{{baseUrl}}/admins/users/{{userId}}/ban", "host": ["{{baseUrl}}"], "path": ["admins", "users", "{{userId}}", "ban"] } } },
+        { "name": "Unban User", "request": { "method": "PATCH", "header": [{ "key": "Authorization", "value": "Bearer {{accessToken}}" }], "url": { "raw": "{{baseUrl}}/admins/users/{{userId}}/unban", "host": ["{{baseUrl}}"], "path": ["admins", "users", "{{userId}}", "unban"] } } }
+      ]
+    },
+    {
+      "name": "Organizers",
+      "item": [
+        { "name": "List Organizers", "request": { "method": "GET", "header": [{ "key": "Authorization", "value": "Bearer {{accessToken}}" }], "url": { "raw": "{{baseUrl}}/organizers", "host": ["{{baseUrl}}"], "path": ["organizers"] } } },
+        { "name": "Get Organizer By ID", "request": { "method": "GET", "header": [{ "key": "Authorization", "value": "Bearer {{accessToken}}" }], "url": { "raw": "{{baseUrl}}/organizers/{{organizerId}}", "host": ["{{baseUrl}}"], "path": ["organizers", "{{organizerId}}"] } } },
+        { "name": "Update Organizer (admin token)", "request": { "method": "PATCH", "header": [{ "key": "Content-Type", "value": "application/json" }, { "key": "Authorization", "value": "Bearer {{accessToken}}" }], "body": { "mode": "raw", "raw": "{\n  \"firstName\": \"Org\",\n  \"lastName\": \"Updated\",\n  \"phone\": \"9999999997\",\n  \"password\": \"Password123!\",\n  \"companyLogoUrl\": \"{{companyLogoUrl}}\",\n  \"commissionRate\": 12,\n  \"commissionFlatFee\": 5,\n  \"verificationLevel\": \"document_verified\",\n  \"autoApproveEvents\": true\n}", "options": { "raw": { "language": "json" } } }, "url": { "raw": "{{baseUrl}}/organizers/{{organizerId}}", "host": ["{{baseUrl}}"], "path": ["organizers", "{{organizerId}}"] } } },
+        { "name": "Update Organizer (self-service, organizer's own token)", "request": { "method": "PATCH", "header": [{ "key": "Content-Type", "value": "application/json" }, { "key": "Authorization", "value": "Bearer {{accessToken}}" }], "body": { "mode": "raw", "raw": "{\n  \"firstName\": \"Org\",\n  \"lastName\": \"Updated\",\n  \"phone\": \"9999999997\",\n  \"companyLogoUrl\": \"{{companyLogoUrl}}\"\n}", "options": { "raw": { "language": "json" } } }, "url": { "raw": "{{baseUrl}}/organizers/{{organizerId}}", "host": ["{{baseUrl}}"], "path": ["organizers", "{{organizerId}}"] } } },
+        { "name": "Update Organizer - admin-only field as self (expect 403)", "request": { "method": "PATCH", "header": [{ "key": "Content-Type", "value": "application/json" }, { "key": "Authorization", "value": "Bearer {{accessToken}}" }], "body": { "mode": "raw", "raw": "{\n  \"commissionRate\": 50\n}", "options": { "raw": { "language": "json" } } }, "url": { "raw": "{{baseUrl}}/organizers/{{organizerId}}", "host": ["{{baseUrl}}"], "path": ["organizers", "{{organizerId}}"] } } },
+        { "name": "Delete Organizer", "request": { "method": "DELETE", "header": [{ "key": "Authorization", "value": "Bearer {{accessToken}}" }], "url": { "raw": "{{baseUrl}}/organizers/{{organizerId}}", "host": ["{{baseUrl}}"], "path": ["organizers", "{{organizerId}}"] } } }
       ]
     },
     {
       "name": "Categories",
       "item": [
-        {
-          "name": "Create Category",
-          "request": {
-            "method": "POST",
-            "header": [
-              {
-                "key": "Content-Type",
-                "value": "application/json"
-              },
-              {
-                "key": "Authorization",
-                "value": "Bearer {{accessToken}}"
-              }
-            ],
-            "body": {
-              "mode": "raw",
-              "raw": "{\n  \"name\": \"Conference\",\n  \"emoji\": \"🎪\",\n  \"colorHex\": \"#FF5733\",\n  \"description\": \"Professional conferences and networking events\"\n}",
-              "options": {
-                "raw": {
-                  "language": "json"
-                }
-              }
-            },
-            "url": {
-              "raw": "{{baseUrl}}/categories",
-              "host": ["{{baseUrl}}"],
-              "path": ["categories"]
-            }
-          },
-          "event": [
-            {
-              "listen": "test",
-              "script": {
-                "exec": [
-                  "const data = pm.response.json();",
-                  "if (data && data.id) {",
-                  "  pm.environment.set('categoryId', data.id);",
-                  "  pm.environment.set('categoryId2', data.id);",
-                  "  pm.environment.set('categoryId3', data.id);",
-                  "}"
-                ]
-              }
-            }
-          ]
-        },
-        {
-          "name": "Bulk Create Categories",
-          "request": {
-            "method": "POST",
-            "header": [
-              {
-                "key": "Content-Type",
-                "value": "application/json"
-              },
-              {
-                "key": "Authorization",
-                "value": "Bearer {{accessToken}}"
-              }
-            ],
-            "body": {
-              "mode": "raw",
-              "raw": "{\n  \"categories\": [\n    { \"name\": \"Music\", \"emoji\": \"🎵\", \"description\": \"Live shows and concerts\" },\n    { \"name\": \"Technology\", \"emoji\": \"💻\", \"description\": \"Tech conferences, workshops, and meetups\" },\n    { \"name\": \"Food\", \"emoji\": \"🍔\", \"description\": \"Food festivals and culinary events\" },\n    { \"name\": \"Art & Culture\", \"emoji\": \"🎨\", \"description\": \"Art exhibitions and cultural events\" },\n    { \"name\": \"Photography\", \"emoji\": \"📸\", \"description\": \"Photo walks and creative shoots\" },\n    { \"name\": \"Sports\", \"emoji\": \"⚽\", \"description\": \"Sports events and competitions\" },\n    { \"name\": \"Fitness\", \"emoji\": \"💪\", \"description\": \"Health and fitness activities\" },\n    { \"name\": \"Lifestyle\", \"emoji\": \"⭐\", \"description\": \"Lifestyle and personal growth events\" },\n    { \"name\": \"Travel\", \"emoji\": \"✈️\", \"description\": \"Travel talks and experiences\" },\n    { \"name\": \"Gaming\", \"emoji\": \"🎮\", \"description\": \"Gaming tournaments and communities\" },\n    { \"name\": \"Business\", \"emoji\": \"🏢\", \"description\": \"Business networking and conferences\" },\n    { \"name\": \"Networking\", \"emoji\": \"👥\", \"description\": \"Meetups and professional networking\" },\n    { \"name\": \"Programming\", \"emoji\": \"👨‍💻\", \"description\": \"Coding meetups and hackathons\" },\n    { \"name\": \"Education\", \"emoji\": \"🎓\", \"description\": \"Workshops, seminars, and courses\" },\n    { \"name\": \"Workshops\", \"emoji\": \"🔨\", \"description\": \"Hands-on learning sessions\" },\n    { \"name\": \"Adventure\", \"emoji\": \"🚵‍♀️\", \"description\": \"Outdoor and adventure events\" },\n    { \"name\": \"Esports\", \"emoji\": \"🖥️\", \"description\": \"Competitive gaming and esports events\" },\n    { \"name\": \"More\", \"emoji\": \"➕\", \"description\": \"Additional categories and event types\" }\n  ]\n}",
-              "options": {
-                "raw": {
-                  "language": "json"
-                }
-              }
-            },
-            "url": {
-              "raw": "{{baseUrl}}/categories/bulk",
-              "host": ["{{baseUrl}}"],
-              "path": ["categories", "bulk"]
-            }
-          }
-        },
-        {
-          "name": "List All Categories",
-          "request": {
-            "method": "GET",
-            "header": [],
-            "url": {
-              "raw": "{{baseUrl}}/categories",
-              "host": ["{{baseUrl}}"],
-              "path": ["categories"]
-            }
-          }
-        },
-        {
-          "name": "Get Category By ID",
-          "request": {
-            "method": "GET",
-            "header": [],
-            "url": {
-              "raw": "{{baseUrl}}/categories/{{categoryId}}",
-              "host": ["{{baseUrl}}"],
-              "path": ["categories", "{{categoryId}}"]
-            }
-          }
-        },
-        {
-          "name": "Update Category",
-          "request": {
-            "method": "PATCH",
-            "header": [
-              {
-                "key": "Content-Type",
-                "value": "application/json"
-              },
-              {
-                "key": "Authorization",
-                "value": "Bearer {{accessToken}}"
-              }
-            ],
-            "body": {
-              "mode": "raw",
-              "raw": "{\n  \"name\": \"Conference Updated\",\n  \"emoji\": \"📢\",\n  \"colorHex\": \"#00FF00\",\n  \"description\": \"Updated category description\"\n}",
-              "options": {
-                "raw": {
-                  "language": "json"
-                }
-              }
-            },
-            "url": {
-              "raw": "{{baseUrl}}/categories/{{categoryId}}",
-              "host": ["{{baseUrl}}"],
-              "path": ["categories", "{{categoryId}}"]
-            }
-          }
-        },
-        {
-          "name": "Delete Category",
-          "request": {
-            "method": "DELETE",
-            "header": [
-              {
-                "key": "Authorization",
-                "value": "Bearer {{accessToken}}"
-              }
-            ],
-            "url": {
-              "raw": "{{baseUrl}}/categories/{{categoryId}}",
-              "host": ["{{baseUrl}}"],
-              "path": ["categories", "{{categoryId}}"]
-            }
-          }
-        }
+        { "name": "Create Category", "request": { "method": "POST", "header": [{ "key": "Content-Type", "value": "application/json" }, { "key": "Authorization", "value": "Bearer {{accessToken}}" }], "body": { "mode": "raw", "raw": "{\n  \"name\": \"Conference\",\n  \"emoji\": \"🎪\",\n  \"colorHex\": \"#FF5733\",\n  \"description\": \"Professional conferences and networking events\"\n}", "options": { "raw": { "language": "json" } } }, "url": { "raw": "{{baseUrl}}/categories", "host": ["{{baseUrl}}"], "path": ["categories"] } }, "event": [{ "listen": "test", "script": { "exec": ["const data = pm.response.json();", "if (data && data.id) pm.environment.set('categoryId', data.id);"] } }] },
+        { "name": "Bulk Create Categories", "request": { "method": "POST", "header": [{ "key": "Content-Type", "value": "application/json" }, { "key": "Authorization", "value": "Bearer {{accessToken}}" }], "body": { "mode": "raw", "raw": "{\n  \"categories\": [\n    { \"name\": \"Music\", \"emoji\": \"🎵\", \"description\": \"Live shows and concerts\" },\n    { \"name\": \"Technology\", \"emoji\": \"💻\", \"description\": \"Tech conferences, workshops, and meetups\" }\n  ]\n}", "options": { "raw": { "language": "json" } } }, "url": { "raw": "{{baseUrl}}/categories/bulk", "host": ["{{baseUrl}}"], "path": ["categories", "bulk"] } }, "event": [{ "listen": "test", "script": { "exec": ["const data = pm.response.json();", "if (Array.isArray(data) && data[0] && data[0].id) pm.environment.set('categoryId2', data[0].id);", "if (Array.isArray(data) && data[1] && data[1].id) pm.environment.set('categoryId3', data[1].id);"] } }] },
+        { "name": "List Categories", "request": { "method": "GET", "header": [], "url": { "raw": "{{baseUrl}}/categories", "host": ["{{baseUrl}}"], "path": ["categories"] } } },
+        { "name": "Get Category By ID", "request": { "method": "GET", "header": [], "url": { "raw": "{{baseUrl}}/categories/{{categoryId}}", "host": ["{{baseUrl}}"], "path": ["categories", "{{categoryId}}"] } } },
+        { "name": "Update Category", "request": { "method": "PATCH", "header": [{ "key": "Content-Type", "value": "application/json" }, { "key": "Authorization", "value": "Bearer {{accessToken}}" }], "body": { "mode": "raw", "raw": "{\n  \"name\": \"Conference Updated\",\n  \"emoji\": \"📢\",\n  \"colorHex\": \"#00FF00\",\n  \"description\": \"Updated category description\"\n}", "options": { "raw": { "language": "json" } } }, "url": { "raw": "{{baseUrl}}/categories/{{categoryId}}", "host": ["{{baseUrl}}"], "path": ["categories", "{{categoryId}}"] } } },
+        { "name": "Delete Category", "request": { "method": "DELETE", "header": [{ "key": "Authorization", "value": "Bearer {{accessToken}}" }], "url": { "raw": "{{baseUrl}}/categories/{{categoryId}}", "host": ["{{baseUrl}}"], "path": ["categories", "{{categoryId}}"] } } }
       ]
     },
     {
       "name": "Events",
       "item": [
-        {
-          "name": "Create Event",
-          "request": {
-            "method": "POST",
-            "header": [
-              {
-                "key": "Content-Type",
-                "value": "application/json"
-              },
-              {
-                "key": "Authorization",
-                "value": "Bearer {{accessToken}}"
-              }
-            ],
-            "body": {
-              "mode": "raw",
-              "raw": "{\n  \"title\": \"Tech Conference 2024\",\n  \"description\": \"Annual technology conference featuring the latest trends\",\n  \"categoryId\": \"{{categoryId}}\",\n  \"venueName\": \"Tech Center\",\n  \"venueAddress\": \"123 Innovation Street, San Francisco, CA\",\n  \"latitude\": 37.7749,\n  \"longitude\": -122.4194,\n  \"eventDate\": \"2024-12-15\",\n  \"startTime\": \"09:00:00\",\n  \"endTime\": \"17:00:00\",\n  \"durationMinutes\": 480,\n  \"pricePerTicket\": 99.99,\n  \"currency\": \"USD\",\n  \"totalCapacity\": 500,\n  \"availableTickets\": 500,\n  \"featured\": true,\n  \"isOnline\": false,\n  \"imageUrl\": \"https://example.com/image.jpg\",\n  \"coverImageUrl\": \"https://example.com/cover.jpg\"\n}",
-              "options": {
-                "raw": {
-                  "language": "json"
-                }
-              }
-            },
-            "url": {
-              "raw": "{{baseUrl}}/events",
-              "host": ["{{baseUrl}}"],
-              "path": ["events"]
-            }
-          },
-          "event": [
-            {
-              "listen": "test",
-              "script": {
-                "exec": [
-                  "const data = pm.response.json();",
-                  "if (data && data.id) {",
-                  "  pm.environment.set('eventId', data.id);",
-                  "}",
-                  "if (data && data.organizerId) {",
-                  "  pm.environment.set('organizerId', data.organizerId);",
-                  "}"
-                ]
-              }
-            }
-          ]
-        },
-        {
-          "name": "List All Events",
-          "request": {
-            "method": "GET",
-            "header": [],
-            "url": {
-              "raw": "{{baseUrl}}/events?categoryId={{categoryId}}&isOnline=false&page=1&limit=20",
-              "host": ["{{baseUrl}}"],
-              "path": ["events"],
-              "query": [
-                {
-                  "key": "categoryId",
-                  "value": "{{categoryId}}"
-                },
-                {
-                  "key": "isOnline",
-                  "value": "false"
-                },
-                {
-                  "key": "page",
-                  "value": "1"
-                },
-                {
-                  "key": "limit",
-                  "value": "20"
-                }
-              ]
-            }
-          }
-        },
-        {
-          "name": "List Pending Events",
-          "request": {
-            "method": "GET",
-            "header": [
-              {
-                "key": "Authorization",
-                "value": "Bearer {{accessToken}}"
-              }
-            ],
-            "url": {
-              "raw": "{{baseUrl}}/events/pending?page=1&limit=20",
-              "host": ["{{baseUrl}}"],
-              "path": ["events", "pending"],
-              "query": [
-                {
-                  "key": "page",
-                  "value": "1"
-                },
-                {
-                  "key": "limit",
-                  "value": "20"
-                }
-              ]
-            }
-          }
-        },
-        {
-          "name": "My Events",
-          "request": {
-            "method": "GET",
-            "header": [
-              {
-                "key": "Authorization",
-                "value": "Bearer {{accessToken}}"
-              }
-            ],
-            "url": {
-              "raw": "{{baseUrl}}/events/my-events",
-              "host": ["{{baseUrl}}"],
-              "path": ["events", "my-events"]
-            }
-          }
-        },
-        {
-          "name": "Get Event By ID",
-          "request": {
-            "method": "GET",
-            "header": [],
-            "url": {
-              "raw": "{{baseUrl}}/events/{{eventId}}",
-              "host": ["{{baseUrl}}"],
-              "path": ["events", "{{eventId}}"]
-            }
-          }
-        },
-        {
-          "name": "Update Event",
-          "request": {
-            "method": "PATCH",
-            "header": [
-              {
-                "key": "Content-Type",
-                "value": "application/json"
-              },
-              {
-                "key": "Authorization",
-                "value": "Bearer {{accessToken}}"
-              }
-            ],
-            "body": {
-              "mode": "raw",
-              "raw": "{\n  \"title\": \"Tech Conference 2024 - Updated\",\n  \"description\": \"Updated description\",\n  \"pricePerTicket\": 89.99,\n  \"availableTickets\": 450\n}",
-              "options": {
-                "raw": {
-                  "language": "json"
-                }
-              }
-            },
-            "url": {
-              "raw": "{{baseUrl}}/events/{{eventId}}",
-              "host": ["{{baseUrl}}"],
-              "path": ["events", "{{eventId}}"]
-            }
-          }
-        },
-        {
-          "name": "Approve Event",
-          "request": {
-            "method": "PATCH",
-            "header": [
-              {
-                "key": "Authorization",
-                "value": "Bearer {{accessToken}}"
-              }
-            ],
-            "url": {
-              "raw": "{{baseUrl}}/events/{{eventId}}/approve",
-              "host": ["{{baseUrl}}"],
-              "path": ["events", "{{eventId}}", "approve"]
-            }
-          }
-        },
-        {
-          "name": "Reject Event",
-          "request": {
-            "method": "PATCH",
-            "header": [
-              {
-                "key": "Content-Type",
-                "value": "application/json"
-              },
-              {
-                "key": "Authorization",
-                "value": "Bearer {{accessToken}}"
-              }
-            ],
-            "body": {
-              "mode": "raw",
-              "raw": "{\n  \"rejectionReason\": \"Event title is misleading or lacks details.\"\n}",
-              "options": {
-                "raw": {
-                  "language": "json"
-                }
-              }
-            },
-            "url": {
-              "raw": "{{baseUrl}}/events/{{eventId}}/reject",
-              "host": ["{{baseUrl}}"],
-              "path": ["events", "{{eventId}}", "reject"]
-            }
-          }
-        },
-        {
-          "name": "Enroll Participant",
-          "request": {
-            "method": "POST",
-            "header": [
-              {
-                "key": "Authorization",
-                "value": "Bearer {{accessToken}}"
-              }
-            ],
-            "url": {
-              "raw": "{{baseUrl}}/events/{{eventId}}/enroll",
-              "host": ["{{baseUrl}}"],
-              "path": ["events", "{{eventId}}", "enroll"]
-            }
-          }
-        },
-        {
-          "name": "Delete Event",
-          "request": {
-            "method": "DELETE",
-            "header": [
-              {
-                "key": "Authorization",
-                "value": "Bearer {{accessToken}}"
-              }
-            ],
-            "url": {
-              "raw": "{{baseUrl}}/events/{{eventId}}",
-              "host": ["{{baseUrl}}"],
-              "path": ["events", "{{eventId}}"]
-            }
-          }
-        }
+        { "name": "Create Paid Event", "request": { "method": "POST", "header": [{ "key": "Content-Type", "value": "application/json" }, { "key": "Authorization", "value": "Bearer {{accessToken}}" }], "body": { "mode": "raw", "raw": "{\n  \"title\": \"Tech Conference 2024\",\n  \"description\": \"Annual technology conference featuring the latest trends\",\n  \"categoryId\": \"{{categoryId}}\",\n  \"venueName\": \"Tech Center\",\n  \"venueAddress\": \"123 Innovation Street, San Francisco, CA\",\n  \"latitude\": 37.7749,\n  \"longitude\": -122.4194,\n  \"eventDate\": \"2024-12-15\",\n  \"startTime\": \"09:00:00\",\n  \"endTime\": \"17:00:00\",\n  \"durationMinutes\": 480,\n  \"pricePerTicket\": 99.99,\n  \"currency\": \"INR\",\n  \"totalCapacity\": 500,\n  \"availableTickets\": 500,\n  \"featured\": true,\n  \"isOnline\": false,\n  \"isPaid\": true,\n  \"refundPolicyType\": \"full_refund\",\n  \"refundPolicyText\": \"Full refund available up to 48 hours before the event.\",\n  \"feePayer\": \"organizer\",\n  \"imageUrl\": \"https://example.com/image.jpg\",\n  \"coverImageUrl\": \"https://example.com/cover.jpg\"\n}", "options": { "raw": { "language": "json" } } }, "url": { "raw": "{{baseUrl}}/events", "host": ["{{baseUrl}}"], "path": ["events"] } }, "event": [{ "listen": "test", "script": { "exec": ["const data = pm.response.json();", "if (data && data.id) pm.environment.set('eventId', data.id);", "if (data && data.organizerId) pm.environment.set('organizerId', data.organizerId);"] } }] },
+        { "name": "Create Free Event", "request": { "method": "POST", "header": [{ "key": "Content-Type", "value": "application/json" }, { "key": "Authorization", "value": "Bearer {{accessToken}}" }], "body": { "mode": "raw", "raw": "{\n  \"title\": \"Community Meetup 2024\",\n  \"description\": \"A free community gathering for networking and knowledge sharing\",\n  \"categoryId\": \"{{categoryId}}\",\n  \"venueName\": \"Community Hall\",\n  \"venueAddress\": \"456 Community Road, San Francisco, CA\",\n  \"latitude\": 37.7749,\n  \"longitude\": -122.4194,\n  \"eventDate\": \"2024-12-20\",\n  \"startTime\": \"10:00:00\",\n  \"endTime\": \"13:00:00\",\n  \"durationMinutes\": 180,\n  \"pricePerTicket\": 0,\n  \"currency\": \"INR\",\n  \"totalCapacity\": 100,\n  \"availableTickets\": 100,\n  \"featured\": false,\n  \"isOnline\": false,\n  \"isPaid\": false,\n  \"imageUrl\": \"https://example.com/image.jpg\",\n  \"coverImageUrl\": \"https://example.com/cover.jpg\"\n}", "options": { "raw": { "language": "json" } } }, "url": { "raw": "{{baseUrl}}/events", "host": ["{{baseUrl}}"], "path": ["events"] } }, "event": [{ "listen": "test", "script": { "exec": ["const data = pm.response.json();", "if (data && data.id) pm.environment.set('eventId', data.id);", "if (data && data.organizerId) pm.environment.set('organizerId', data.organizerId);"] } }] },
+        { "name": "List Events", "request": { "method": "GET", "header": [], "url": { "raw": "{{baseUrl}}/events?categoryId={{categoryId}}&isOnline=false&page=1&limit=20", "host": ["{{baseUrl}}"], "path": ["events"], "query": [ { "key": "categoryId", "value": "{{categoryId}}" }, { "key": "isOnline", "value": "false" }, { "key": "page", "value": "1" }, { "key": "limit", "value": "20" } ] } } },
+        { "name": "Pending Events", "request": { "method": "GET", "header": [{ "key": "Authorization", "value": "Bearer {{accessToken}}" }], "url": { "raw": "{{baseUrl}}/events/pending?page=1&limit=20", "host": ["{{baseUrl}}"], "path": ["events", "pending"], "query": [ { "key": "page", "value": "1" }, { "key": "limit", "value": "20" } ] } } },
+        { "name": "My Events", "request": { "method": "GET", "header": [{ "key": "Authorization", "value": "Bearer {{accessToken}}" }], "url": { "raw": "{{baseUrl}}/events/my-events", "host": ["{{baseUrl}}"], "path": ["events", "my-events"] } } },
+        { "name": "My Waitlist", "request": { "method": "GET", "header": [{ "key": "Authorization", "value": "Bearer {{accessToken}}" }], "url": { "raw": "{{baseUrl}}/events/my-waitlist", "host": ["{{baseUrl}}"], "path": ["events", "my-waitlist"] } } },
+        { "name": "Get Event By ID", "request": { "method": "GET", "header": [], "url": { "raw": "{{baseUrl}}/events/{{eventId}}", "host": ["{{baseUrl}}"], "path": ["events", "{{eventId}}"] } } },
+        { "name": "Update Event", "request": { "method": "PATCH", "header": [{ "key": "Content-Type", "value": "application/json" }, { "key": "Authorization", "value": "Bearer {{accessToken}}" }], "body": { "mode": "raw", "raw": "{\n  \"title\": \"Tech Conference 2024 - Updated\",\n  \"description\": \"Updated description\",\n  \"pricePerTicket\": 89.99,\n  \"availableTickets\": 450\n}", "options": { "raw": { "language": "json" } } }, "url": { "raw": "{{baseUrl}}/events/{{eventId}}", "host": ["{{baseUrl}}"], "path": ["events", "{{eventId}}"] } } },
+        { "name": "Approve Event", "request": { "method": "PATCH", "header": [{ "key": "Authorization", "value": "Bearer {{accessToken}}" }], "url": { "raw": "{{baseUrl}}/events/{{eventId}}/approve", "host": ["{{baseUrl}}"], "path": ["events", "{{eventId}}", "approve"] } } },
+        { "name": "Reject Event", "request": { "method": "PATCH", "header": [{ "key": "Content-Type", "value": "application/json" }, { "key": "Authorization", "value": "Bearer {{accessToken}}" }], "body": { "mode": "raw", "raw": "{\n  \"rejectionReason\": \"Event title is misleading or lacks details.\"\n}", "options": { "raw": { "language": "json" } } }, "url": { "raw": "{{baseUrl}}/events/{{eventId}}/reject", "host": ["{{baseUrl}}"], "path": ["events", "{{eventId}}", "reject"] } } },
+        { "name": "Delete Event", "request": { "method": "DELETE", "header": [{ "key": "Authorization", "value": "Bearer {{accessToken}}" }], "url": { "raw": "{{baseUrl}}/events/{{eventId}}", "host": ["{{baseUrl}}"], "path": ["events", "{{eventId}}"] } } },
+        { "name": "List Event Ticket Types", "request": { "method": "GET", "header": [], "url": { "raw": "{{baseUrl}}/events/{{eventId}}/ticket-types", "host": ["{{baseUrl}}"], "path": ["events", "{{eventId}}", "ticket-types"] } } },
+        { "name": "Create Ticket Type", "request": { "method": "POST", "header": [{ "key": "Content-Type", "value": "application/json" }, { "key": "Authorization", "value": "Bearer {{accessToken}}" }], "body": { "mode": "raw", "raw": "{\n  \"name\": \"General Admission\",\n  \"price\": 99.99,\n  \"currency\": \"USD\",\n  \"quantityTotal\": 100,\n  \"salesStartAt\": \"2024-10-01T00:00:00.000Z\",\n  \"salesEndAt\": \"2024-12-01T00:00:00.000Z\",\n  \"minPerOrder\": 1,\n  \"maxPerOrder\": 4,\n  \"isHidden\": false,\n  \"accessPassword\": \"\"\n}", "options": { "raw": { "language": "json" } } }, "url": { "raw": "{{baseUrl}}/events/{{eventId}}/ticket-types", "host": ["{{baseUrl}}"], "path": ["events", "{{eventId}}", "ticket-types"] } }, "event": [{ "listen": "test", "script": { "exec": ["const data = pm.response.json();", "if (data && data.id) pm.environment.set('ticketTypeId', data.id);"] } }] },
+        { "name": "Update Ticket Type", "request": { "method": "PATCH", "header": [{ "key": "Content-Type", "value": "application/json" }, { "key": "Authorization", "value": "Bearer {{accessToken}}" }], "body": { "mode": "raw", "raw": "{\n  \"name\": \"General Admission Updated\",\n  \"price\": 109.99\n}", "options": { "raw": { "language": "json" } } }, "url": { "raw": "{{baseUrl}}/events/{{eventId}}/ticket-types/{{ticketTypeId}}", "host": ["{{baseUrl}}"], "path": ["events", "{{eventId}}", "ticket-types", "{{ticketTypeId}}"] } } },
+        { "name": "Delete Ticket Type", "request": { "method": "DELETE", "header": [{ "key": "Authorization", "value": "Bearer {{accessToken}}" }], "url": { "raw": "{{baseUrl}}/events/{{eventId}}/ticket-types/{{ticketTypeId}}", "host": ["{{baseUrl}}"], "path": ["events", "{{eventId}}", "ticket-types", "{{ticketTypeId}}"] } } },
+        { "name": "Upload Event Image URL (deprecated, use Uploads > Signed URL)", "request": { "method": "POST", "header": [{ "key": "Content-Type", "value": "application/json" }, { "key": "Authorization", "value": "Bearer {{accessToken}}" }], "body": { "mode": "raw", "raw": "{\n  \"contentType\": \"{{contentType}}\"\n}", "options": { "raw": { "language": "json" } } }, "url": { "raw": "{{baseUrl}}/events/upload-url", "host": ["{{baseUrl}}"], "path": ["events", "upload-url"] } } },
+        { "name": "Event Enrollments", "request": { "method": "GET", "header": [{ "key": "Authorization", "value": "Bearer {{accessToken}}" }], "url": { "raw": "{{baseUrl}}/events/{{eventId}}/enrollments", "host": ["{{baseUrl}}"], "path": ["events", "{{eventId}}", "enrollments"] } } },
+        { "name": "Search Enrollments", "request": { "method": "GET", "header": [{ "key": "Authorization", "value": "Bearer {{accessToken}}" }], "url": { "raw": "{{baseUrl}}/events/{{eventId}}/enrollments/search?name=John", "host": ["{{baseUrl}}"], "path": ["events", "{{eventId}}", "enrollments", "search"], "query": [{ "key": "name", "value": "John" }] } } },
+        { "name": "Check In", "request": { "method": "POST", "header": [{ "key": "Content-Type", "value": "application/json" }, { "key": "Authorization", "value": "Bearer {{accessToken}}" }], "body": { "mode": "raw", "raw": "{\n  \"ticketCode\": \"{{ticketCode}}\"\n}", "options": { "raw": { "language": "json" } } }, "url": { "raw": "{{baseUrl}}/events/check-in", "host": ["{{baseUrl}}"], "path": ["events", "check-in"] } } },
+        { "name": "Enroll Participant", "request": { "method": "POST", "header": [{ "key": "Content-Type", "value": "application/json" }, { "key": "Authorization", "value": "Bearer {{accessToken}}" }], "body": { "mode": "raw", "raw": "{\n  \"ticketTypeId\": \"{{ticketTypeId}}\",\n  \"quantity\": 1\n}", "options": { "raw": { "language": "json" } } }, "url": { "raw": "{{baseUrl}}/events/{{eventId}}/enroll", "host": ["{{baseUrl}}"], "path": ["events", "{{eventId}}", "enroll"] } }, "event": [{ "listen": "test", "script": { "exec": ["const data = pm.response.json();", "if (data && data.id) pm.environment.set('enrollmentId', data.id);"] } }] },
+        { "name": "Get Enrollment By ID", "request": { "method": "GET", "header": [{ "key": "Authorization", "value": "Bearer {{accessToken}}" }], "url": { "raw": "{{baseUrl}}/events/enrollments/{{enrollmentId}}", "host": ["{{baseUrl}}"], "path": ["events", "enrollments", "{{enrollmentId}}"] } } },
+        { "name": "Cancel Enrollment", "request": { "method": "PATCH", "header": [{ "key": "Authorization", "value": "Bearer {{accessToken}}" }], "url": { "raw": "{{baseUrl}}/events/enrollments/{{enrollmentId}}/cancel", "host": ["{{baseUrl}}"], "path": ["events", "enrollments", "{{enrollmentId}}", "cancel"] } } }
+      ]
+    },
+    {
+      "name": "Payments",
+      "item": [
+        { "name": "Fee Estimate", "request": { "method": "GET", "header": [{ "key": "Authorization", "value": "Bearer {{accessToken}}" }], "url": { "raw": "{{baseUrl}}/payments/fee-estimate?ticketPrice=99.99&feePayer=organizer", "host": ["{{baseUrl}}"], "path": ["payments", "fee-estimate"], "query": [{ "key": "ticketPrice", "value": "99.99" }, { "key": "feePayer", "value": "organizer" }] } } },
+        { "name": "Request Refund", "request": { "method": "POST", "header": [{ "key": "Content-Type", "value": "application/json" }, { "key": "Authorization", "value": "Bearer {{accessToken}}" }], "body": { "mode": "raw", "raw": "{\n  \"enrollmentId\": \"{{enrollmentId}}\",\n  \"reason\": \"Cannot attend\"\n}", "options": { "raw": { "language": "json" } } }, "url": { "raw": "{{baseUrl}}/payments/refunds", "host": ["{{baseUrl}}"], "path": ["payments", "refunds"] } } },
+        { "name": "Pending Refunds", "request": { "method": "GET", "header": [{ "key": "Authorization", "value": "Bearer {{accessToken}}" }], "url": { "raw": "{{baseUrl}}/payments/refunds/pending", "host": ["{{baseUrl}}"], "path": ["payments", "refunds", "pending"] } } },
+        { "name": "Approve Refund", "request": { "method": "PATCH", "header": [{ "key": "Authorization", "value": "Bearer {{accessToken}}" }], "url": { "raw": "{{baseUrl}}/payments/refunds/{{refundId}}/approve", "host": ["{{baseUrl}}"], "path": ["payments", "refunds", "{{refundId}}", "approve"] } } },
+        { "name": "Reject Refund", "request": { "method": "PATCH", "header": [{ "key": "Content-Type", "value": "application/json" }, { "key": "Authorization", "value": "Bearer {{accessToken}}" }], "body": { "mode": "raw", "raw": "{\n  \"reason\": \"Outside refund window\"\n}", "options": { "raw": { "language": "json" } } }, "url": { "raw": "{{baseUrl}}/payments/refunds/{{refundId}}/reject", "host": ["{{baseUrl}}"], "path": ["payments", "refunds", "{{refundId}}", "reject"] } } },
+        { "name": "Payment Webhook", "request": { "method": "POST", "header": [{ "key": "Content-Type", "value": "application/json" }], "body": { "mode": "raw", "raw": "{\n  \"gateway\": \"razorpay\",\n  \"gatewayEventId\": \"evt_123\",\n  \"gatewayPaymentId\": \"pay_123\",\n  \"enrollmentId\": \"{{enrollmentId}}\",\n  \"amount\": 99.99,\n  \"status\": \"success\"\n}", "options": { "raw": { "language": "json" } } }, "url": { "raw": "{{baseUrl}}/payments/webhook", "host": ["{{baseUrl}}"], "path": ["payments", "webhook"] } } }
+      ]
+    },
+    {
+      "name": "Uploads",
+      "item": [
+        { "name": "Signed URL - Profile Picture", "request": { "method": "POST", "header": [{ "key": "Content-Type", "value": "application/json" }, { "key": "Authorization", "value": "Bearer {{accessToken}}" }], "body": { "mode": "raw", "raw": "{\n  \"purpose\": \"profile-picture\",\n  \"contentType\": \"{{contentType}}\"\n}", "options": { "raw": { "language": "json" } } }, "url": { "raw": "{{baseUrl}}/uploads/signed-url", "host": ["{{baseUrl}}"], "path": ["uploads", "signed-url"] } } },
+        { "name": "Signed URL - Event Cover (organizer/admin only)", "request": { "method": "POST", "header": [{ "key": "Content-Type", "value": "application/json" }, { "key": "Authorization", "value": "Bearer {{accessToken}}" }], "body": { "mode": "raw", "raw": "{\n  \"purpose\": \"event-cover\",\n  \"contentType\": \"{{contentType}}\"\n}", "options": { "raw": { "language": "json" } } }, "url": { "raw": "{{baseUrl}}/uploads/signed-url", "host": ["{{baseUrl}}"], "path": ["uploads", "signed-url"] } } },
+        { "name": "Signed URL - Company Logo (organizer/admin only)", "request": { "method": "POST", "header": [{ "key": "Content-Type", "value": "application/json" }, { "key": "Authorization", "value": "Bearer {{accessToken}}" }], "body": { "mode": "raw", "raw": "{\n  \"purpose\": \"company-logo\",\n  \"contentType\": \"{{contentType}}\"\n}", "options": { "raw": { "language": "json" } } }, "url": { "raw": "{{baseUrl}}/uploads/signed-url", "host": ["{{baseUrl}}"], "path": ["uploads", "signed-url"] } } }
       ]
     }
   ]

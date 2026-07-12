@@ -4,7 +4,7 @@ import { Repository } from 'typeorm';
 import * as bcrypt from 'bcrypt';
 import { UpdateOrganizerDto } from './dto/update-organizer.dto';
 import { User } from '../../entities/user.entity';
-import { Organizer } from '../../entities/organizer.entity';
+import { Organizer, VerificationLevel } from '../../entities/organizer.entity';
 
 const BCRYPT_ROUNDS = 10;
 
@@ -21,6 +21,10 @@ export interface OrganizerRecord {
   companyLogoUrl?: string;
   verified: boolean;
   verifiedAt?: Date;
+  verificationLevel: VerificationLevel;
+  autoApproveEvents: boolean;
+  commissionRate: number;
+  commissionFlatFee: number;
   isActive: boolean;
   createdAt: string;
   updatedAt: string;
@@ -52,6 +56,10 @@ export class OrganizerService {
       companyLogoUrl: organizer.companyLogoUrl || undefined,
       verified: organizer.verified,
       verifiedAt: organizer.verifiedAt || undefined,
+      verificationLevel: organizer.verificationLevel,
+      autoApproveEvents: organizer.autoApproveEvents,
+      commissionRate: Number(organizer.commissionRate),
+      commissionFlatFee: Number(organizer.commissionFlatFee),
       isActive: !user.deletedAt,
       createdAt: organizer.createdAt.toISOString(),
       updatedAt: organizer.updatedAt.toISOString(),
@@ -98,6 +106,12 @@ export class OrganizerService {
     if (dto.password) {
       user.passwordHash = await bcrypt.hash(dto.password, BCRYPT_ROUNDS);
     }
+
+    if (dto.companyLogoUrl !== undefined) organizer.companyLogoUrl = dto.companyLogoUrl;
+    if (dto.commissionRate !== undefined) organizer.commissionRate = dto.commissionRate;
+    if (dto.commissionFlatFee !== undefined) organizer.commissionFlatFee = dto.commissionFlatFee;
+    if (dto.verificationLevel !== undefined) organizer.verificationLevel = dto.verificationLevel;
+    if (dto.autoApproveEvents !== undefined) organizer.autoApproveEvents = dto.autoApproveEvents;
 
     const savedUser = await this.usersRepository.save(user);
     const savedOrganizer = await this.organizersRepository.save(organizer);

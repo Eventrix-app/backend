@@ -155,6 +155,20 @@ describe('UsersService', () => {
 
       expect(errors.length).toBeGreaterThan(0);
     });
+
+    // Regression test for testing-bugs.txt #1: [A, B, B] has length 3 (passes
+    // arrayMinSize) but only 2 distinct categories — previously saved silently with
+    // no error instead of being rejected.
+    it('fails validation when categoryIds contains a duplicate, even if length >= 3', async () => {
+      const dto = new UpdateInterestsDto();
+      dto.categoryIds = [CAT_A.id, CAT_B.id, CAT_B.id];
+
+      const errors = await validate(dto);
+
+      expect(errors.length).toBeGreaterThan(0);
+      const constraints = errors.flatMap((e) => Object.keys(e.constraints ?? {}));
+      expect(constraints).toContain('arrayUnique');
+    });
   });
 
   // ─── updateInterests service method ──────────────────────────────────────────

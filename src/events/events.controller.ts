@@ -1,4 +1,5 @@
 import {
+  BadRequestException,
   Body,
   Controller,
   Delete,
@@ -15,22 +16,27 @@ import {
   HttpStatus,
 } from '@nestjs/common';
 import { ApiTags } from '@nestjs/swagger';
-import { createClient } from '@supabase/supabase-js';
-import { ConfigService } from '@nestjs/config';
+import { Throttle } from '@nestjs/throttler';
 
 import { EventsService } from './events.service';
 import { CreateEventDto } from './dto/create-event.dto';
 import { UpdateEventDto } from './dto/update-event.dto';
+import { EnrollDto } from './dto/enroll.dto';
+import { CreateTicketTypeDto } from './dto/create-ticket-type.dto';
+import { UpdateTicketTypeDto } from './dto/update-ticket-type.dto';
 import { JwtPayload } from '../auth/jwt.util';
 import { Roles } from '../common/decorators/roles.decorator';
 import { Public } from '../common/decorators/public.decorator';
+import { AuditAction } from '../common/decorators/audit-action.decorator';
+import { UploadsService } from '../uploads/uploads.service';
+import { ALLOWED_UPLOAD_CONTENT_TYPES, AllowedUploadContentType, UploadPurpose } from '../uploads/dto/create-signed-url.dto';
 
 @ApiTags('events')
 @Controller('events')
 export class EventsController {
   constructor(
     private readonly eventsService: EventsService,
-    private readonly configService: ConfigService,
+    private readonly uploadsService: UploadsService,
   ) { }
 
   @Post()
@@ -68,10 +74,18 @@ export class EventsController {
     return await this.eventsService.findMyEvents(req.user.id);
   }
 
+  @Get('my-waitlist')
+  async findMyWaitlistEntries(@Request() req: Request & { user: JwtPayload }) {
+    return await this.eventsService.findMyWaitlistEntries(req.user.id);
+  }
+
   @Public()
   @Get(':id')
-  async findOne(@Param('id', ParseUUIDPipe) id: string) {
-    return await this.eventsService.findOne(id);
+  async findOne(
+    @Param('id', ParseUUIDPipe) id: string,
+    @Request() req: Request & { user?: JwtPayload },
+  ) {
+    return await this.eventsService.findOneForViewer(id, req.user?.id, req.user?.roles ?? []);
   }
 
   @Patch(':id')
@@ -85,6 +99,7 @@ export class EventsController {
 
   // Admin approve event
   @Roles('admin')
+  @AuditAction('event.approve', 'event')
   @Patch(':id/approve')
   @HttpCode(HttpStatus.OK)
   async approve(
@@ -96,6 +111,7 @@ export class EventsController {
 
   // Admin reject event
   @Roles('admin')
+  @AuditAction('event.reject', 'event')
   @Patch(':id/reject')
   @HttpCode(HttpStatus.OK)
   async reject(
@@ -115,22 +131,69 @@ export class EventsController {
     await this.eventsService.remove(id, req.user.id, req.user.roles);
   }
 
-  // Section 3f: presigned upload URL for cover image
-  @Post('upload-url')
-  async getUploadUrl(
-    @Body('fileName') fileName: string,
+  // Nested ticket-type CRUD (organizer-only, own event). New tiers may be added at any
+  // time; editing/removing a tier is blocked once it has sales.
+  @Public()
+  @Get(':id/ticket-types')
+  async findTicketTypes(
+    @Param('id', ParseUUIDPipe) id: string,
+    @Request() req: Request & { user?: JwtPayload },
+  ) {
+    return await this.eventsService.findTicketTypes(id, req.user?.id, req.user?.roles ?? []);
+  }
+
+  @Post(':id/ticket-types')
+  @HttpCode(HttpStatus.CREATED)
+  async createTicketType(
+    @Param('id', ParseUUIDPipe) id: string,
+    @Body() dto: CreateTicketTypeDto,
     @Request() req: Request & { user: JwtPayload },
   ) {
-    const supabase = createClient(
-      this.configService.get<string>('SUPABASE_URL') ?? '',
-      this.configService.get<string>('SUPABASE_SERVICE_ROLE_KEY') ?? '',
+    return await this.eventsService.createTicketType(id, dto, req.user.id, req.user.roles);
+  }
+
+  @Patch(':id/ticket-types/:ticketTypeId')
+  async updateTicketType(
+    @Param('id', ParseUUIDPipe) id: string,
+    @Param('ticketTypeId', ParseUUIDPipe) ticketTypeId: string,
+    @Body() dto: UpdateTicketTypeDto,
+    @Request() req: Request & { user: JwtPayload },
+  ) {
+    return await this.eventsService.updateTicketType(id, ticketTypeId, dto, req.user.id, req.user.roles);
+  }
+
+  @Delete(':id/ticket-types/:ticketTypeId')
+  @HttpCode(HttpStatus.NO_CONTENT)
+  async removeTicketType(
+    @Param('id', ParseUUIDPipe) id: string,
+    @Param('ticketTypeId', ParseUUIDPipe) ticketTypeId: string,
+    @Request() req: Request & { user: JwtPayload },
+  ) {
+    await this.eventsService.removeTicketType(id, ticketTypeId, req.user.id, req.user.roles);
+  }
+
+  // Deprecated: use POST /uploads/signed-url with purpose: "event-cover" instead
+  // (see multipart.md §3.1). Kept as a thin forward — rather than a hard break — so any
+  // in-flight client still gets a valid signed URL, now correctly organizer/admin-gated
+  // instead of open to any authenticated user.
+  @Post('upload-url')
+  async getUploadUrl(
+    @Body('contentType') contentType: string,
+    @Request() req: Request & { user: JwtPayload },
+  ) {
+    // This route bypasses the CreateSignedUrlDto's @IsIn validation (no ValidationPipe
+    // runs on a manually-built object), so the allow-list has to be re-checked here —
+    // otherwise this deprecated path would silently defeat the restriction.
+    const resolvedContentType = (contentType || 'image/jpeg') as AllowedUploadContentType;
+    if (!ALLOWED_UPLOAD_CONTENT_TYPES.includes(resolvedContentType)) {
+      throw new BadRequestException(`contentType must be one of: ${ALLOWED_UPLOAD_CONTENT_TYPES.join(', ')}`);
+    }
+
+    return await this.uploadsService.createSignedUrl(
+      { purpose: UploadPurpose.EVENT_COVER, contentType: resolvedContentType },
+      req.user.id,
+      req.user.roles,
     );
-    const path = `events/${req.user.id}/${Date.now()}-${fileName}`;
-    const { data, error } = await supabase.storage
-      .from('event-images')
-      .createSignedUploadUrl(path);
-    if (error) throw new Error(error.message);
-    return { signedUrl: data.signedUrl, path, token: data.token };
   }
 
   // Section 3e: enrollment visibility — ownership-based
@@ -140,6 +203,16 @@ export class EventsController {
     @Request() req: Request & { user: JwtPayload },
   ) {
     return this.eventsService.findEnrollments(id, req.user.id, req.user.roles);
+  }
+
+  // Section 5d: Search confirmed enrollments by participant name
+  @Get(':id/enrollments/search')
+  async searchEnrollments(
+    @Param('id', ParseUUIDPipe) id: string,
+    @Query('name') name: string,
+    @Request() req: Request & { user: JwtPayload },
+  ) {
+    return this.eventsService.searchEnrollments(id, name, req.user.id, req.user.roles);
   }
 
   // Section 5c: check-in endpoint
@@ -152,14 +225,16 @@ export class EventsController {
     return this.eventsService.checkIn(ticketCode, req.user.id, req.user.roles);
   }
 
-  // Participant enrollment
+  // Participant enrollment — tightly throttled to blunt scripted mass-enrollment/scalping.
+  @Throttle({ default: { limit: 5, ttl: 60000 } })
   @Post(':id/enroll')
   @HttpCode(HttpStatus.CREATED)
   async enroll(
     @Param('id', ParseUUIDPipe) id: string,
+    @Body() enrollDto: EnrollDto,
     @Request() req: Request & { user: JwtPayload },
   ) {
-    return await this.eventsService.enroll(id, req.user.id);
+    return await this.eventsService.enroll(id, req.user.id, enrollDto?.ticketTypeId, enrollDto?.quantity);
   }
 
   // Section 4e / Section 5: get a single enrollment by id (for TicketDetailsScreen)
@@ -169,5 +244,16 @@ export class EventsController {
     @Request() req: Request & { user: JwtPayload },
   ) {
     return this.eventsService.findEnrollmentById(enrollmentId, req.user.id, req.user.roles);
+  }
+
+  // Participant-facing cancellation — frees the tier's capacity and auto-promotes the
+  // next FIFO waitlist entry.
+  @Patch('enrollments/:enrollmentId/cancel')
+  @HttpCode(HttpStatus.OK)
+  async cancelEnrollment(
+    @Param('enrollmentId', ParseUUIDPipe) enrollmentId: string,
+    @Request() req: Request & { user: JwtPayload },
+  ) {
+    return this.eventsService.cancelEnrollment(enrollmentId, req.user.id, req.user.roles);
   }
 }

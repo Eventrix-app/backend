@@ -11,6 +11,7 @@ export function setupSwagger(app: INestApplication) {
     .setTitle('Eventrix API')
     .setDescription('Eventrix backend API docs')
     .setVersion('1.0')
+    .addBearerAuth()
     .build();
 
   const document = SwaggerModule.createDocument(app, config);

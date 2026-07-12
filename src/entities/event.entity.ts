@@ -18,6 +18,7 @@ import { Organizer } from './organizer.entity';
 import { User } from './user.entity';
 import { EventCategory } from './category.entity';
 import { Enrollment } from './enrollment.entity';
+import { TicketType } from './ticket-type.entity';
 
 // Enums for type safety
 export enum EventApprovalStatus {
@@ -32,6 +33,16 @@ export enum EventStatus {
   ONGOING = 'ongoing',
   COMPLETED = 'completed',
   CANCELLED = 'cancelled',
+}
+
+// Who bears platform commission + gateway fee. Settled default: ORGANIZER — the
+// participant pays exactly ticket_type.price, and the organizer's payout is net of
+// both commission and gateway fee (see Organizer.commissionRate/commissionFlatFee).
+// PARTICIPANT is the opt-in mirror: buyer pays price + commission + gateway fee on
+// top, organizer receives the full ticket price. Free events: no fee applies either way.
+export enum FeePayer {
+  ORGANIZER = 'organizer',
+  PARTICIPANT = 'participant',
 }
 
 @Entity('events')
@@ -92,6 +103,13 @@ export class Event {
   @Column({ name: 'event_date', type: 'date' })
   eventDate!: string;
 
+  // Nullable, defaults to eventDate at the application level for single-day events (the
+  // overwhelming majority of rows) — no backfill needed. Multi-day events (college fests,
+  // conferences) set this explicitly. See loophole.md for why this exists: without it,
+  // every "when does this event end" derivation silently assumed a single-day event.
+  @Column({ name: 'event_end_date', type: 'date', nullable: true })
+  eventEndDate?: string;
+
   @Column({ name: 'start_time', type: 'time' })
   startTime!: string;
 
@@ -101,6 +119,7 @@ export class Event {
   @Column({ name: 'duration_minutes', type: 'int', nullable: true })
   durationMinutes!: number;
 
+  /** @deprecated superseded by TicketType.price; kept for backward compat on legacy events. */
   @Column({
     name: 'price_per_ticket',
     type: 'decimal',
@@ -114,11 +133,26 @@ export class Event {
   @Column({ type: 'varchar', length: 10, default: 'INR' })
   currency!: string;
 
+  /** @deprecated superseded by TicketType.quantityTotal; kept for backward compat on legacy events. */
   @Column({ name: 'total_capacity', type: 'int', nullable: true })
   totalCapacity!: number;
 
+  /** @deprecated superseded by TicketType.quantityTotal - quantitySold; kept for backward compat on legacy events. */
   @Column({ name: 'available_tickets', type: 'int', nullable: true })
   availableTickets!: number;
+
+  // Aggregate cap across all ticket tiers for this event; null = unlimited (per-tier caps still apply).
+  @Column({ type: 'int', nullable: true })
+  capacity?: number;
+
+  @Column({
+    name: 'fee_payer',
+    type: 'varchar',
+    length: 20,
+    enum: FeePayer,
+    default: FeePayer.ORGANIZER,
+  })
+  feePayer!: FeePayer;
 
   @Column({ type: 'boolean', default: false })
   featured!: boolean;
@@ -187,6 +221,9 @@ export class Event {
   @OneToMany(() => Enrollment, (enrollment) => enrollment.event)
   enrollments!: Enrollment[];
 
+  @OneToMany(() => TicketType, (ticketType) => ticketType.event)
+  ticketTypes!: TicketType[];
+
   @BeforeInsert()
   @BeforeUpdate()
   validateAndCalculate() {
@@ -214,13 +251,16 @@ export class Event {
   canEnroll(): boolean {
     return (
       this.approvalStatus === EventApprovalStatus.APPROVED &&
-      this.status === EventStatus.UPCOMING &&
-      (!this.availableTickets || this.availableTickets > 0)
+      this.status === EventStatus.UPCOMING
     );
   }
 
   hasTicketsAvailable(): boolean {
-    return !this.availableTickets || this.availableTickets > 0;
+    return (
+      this.availableTickets === undefined ||
+      this.availableTickets === null ||
+      this.availableTickets > 0
+    );
   }
 
   // Pure derived field calculation (no side effects)

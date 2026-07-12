@@ -2,19 +2,31 @@ import { Test, TestingModule } from '@nestjs/testing';
 import { EventsService } from './events.service';
 import { getRepositoryToken } from '@nestjs/typeorm';
 import { Event, EventApprovalStatus, EventStatus } from '../entities/event.entity';
+import { Enrollment } from '../entities/enrollment.entity';
 import { Organizer } from '../entities/organizer.entity';
 import { User } from '../entities/user.entity';
 import { EventCategory } from '../entities/category.entity';
+import { TicketType } from '../entities/ticket-type.entity';
 import { DataSource } from 'typeorm';
+import { JwtService } from '@nestjs/jwt';
 import { NotFoundException, BadRequestException, ConflictException } from '@nestjs/common';
+import { AuditLogService } from '../common/audit-log/audit-log.service';
+import { WaitlistService } from '../waitlist/waitlist.service';
+import { NotificationService } from '../notifications/notification.service';
 
 describe('EventsService - Fixed Issues', () => {
   let service: EventsService;
   let mockEventRepo: any;
+  let mockEnrollmentRepo: any;
   let mockOrganizerRepo: any;
   let mockUserRepo: any;
   let mockCategoryRepo: any;
+  let mockTicketTypeRepo: any;
   let mockDataSource: any;
+  let mockJwtService: any;
+  let mockAuditLogService: any;
+  let mockWaitlistService: any;
+  let mockNotificationService: any;
 
   beforeEach(async () => {
     mockEventRepo = {
@@ -24,6 +36,13 @@ describe('EventsService - Fixed Issues', () => {
       find: jest.fn(),
       findAndCount: jest.fn(),
       softRemove: jest.fn(),
+    };
+
+    mockEnrollmentRepo = {
+      findOne: jest.fn(),
+      save: jest.fn(),
+      find: jest.fn(),
+      count: jest.fn(),
     };
 
     mockOrganizerRepo = {
@@ -38,18 +57,53 @@ describe('EventsService - Fixed Issues', () => {
       findOne: jest.fn(),
     };
 
+    mockTicketTypeRepo = {
+      create: jest.fn(),
+      save: jest.fn(),
+      find: jest.fn(),
+      findOne: jest.fn(),
+      remove: jest.fn(),
+    };
+
     mockDataSource = {
       transaction: jest.fn(),
+    };
+
+    mockJwtService = {
+      sign: jest.fn(),
+      verify: jest.fn(),
+    };
+
+    mockAuditLogService = {
+      log: jest.fn(),
+    };
+
+    mockWaitlistService = {
+      join: jest.fn(),
+      findMyEntries: jest.fn(),
+      promoteNext: jest.fn(),
+    };
+
+    mockNotificationService = {
+      notifyEventChanged: jest.fn(),
+      notifyWaitlistPromoted: jest.fn(),
+      notifyRefundStatus: jest.fn(),
     };
 
     const module: TestingModule = await Test.createTestingModule({
       providers: [
         EventsService,
         { provide: getRepositoryToken(Event), useValue: mockEventRepo },
+        { provide: getRepositoryToken(Enrollment), useValue: mockEnrollmentRepo },
         { provide: getRepositoryToken(Organizer), useValue: mockOrganizerRepo },
         { provide: getRepositoryToken(User), useValue: mockUserRepo },
         { provide: getRepositoryToken(EventCategory), useValue: mockCategoryRepo },
+        { provide: getRepositoryToken(TicketType), useValue: mockTicketTypeRepo },
         { provide: DataSource, useValue: mockDataSource },
+        { provide: JwtService, useValue: mockJwtService },
+        { provide: AuditLogService, useValue: mockAuditLogService },
+        { provide: WaitlistService, useValue: mockWaitlistService },
+        { provide: NotificationService, useValue: mockNotificationService },
       ],
     }).compile();
 
@@ -67,52 +121,64 @@ describe('EventsService - Fixed Issues', () => {
   });
 
   describe('Issue 2: Overbooking Prevention', () => {
-    it('should prevent enrollment when no tickets available', async () => {
+    it('should join the waitlist instead of failing outright when no tickets are available', async () => {
       const mockEvent = {
         id: 'event-1',
         approvalStatus: EventApprovalStatus.APPROVED,
         status: EventStatus.UPCOMING,
-        availableTickets: 0,
-        canEnroll: () => false,
-        hasTicketsAvailable: () => false,
-      };
-
-      mockDataSource.transaction.mockImplementation(async (callback) => {
-        const mockManager = {
-          findOne: jest.fn().mockResolvedValue(mockEvent),
-        };
-        return callback(mockManager);
-      });
-
-      await expect(service.enroll('event-1', 'user-1')).rejects.toThrow(ConflictException);
-    });
-
-    it('should atomically decrement tickets on successful enrollment', async () => {
-      const mockUser = { id: 'user-1', email: 'test@test.com' };
-      const mockEvent = {
-        id: 'event-1',
-        approvalStatus: EventApprovalStatus.APPROVED,
-        status: EventStatus.UPCOMING,
-        availableTickets: 10,
-        participants: [],
+        capacity: null,
+        ticketTypes: [{ id: 'tt-1', quantitySold: 10, quantityTotal: 10 }],
         canEnroll: () => true,
-        hasTicketsAvailable: () => true,
       };
 
       mockDataSource.transaction.mockImplementation(async (callback) => {
         const mockManager = {
           findOne: jest.fn()
-            .mockResolvedValueOnce(mockEvent)
-            .mockResolvedValueOnce(mockUser),
+            .mockResolvedValueOnce(mockEvent) // initial event fetch (with ticketTypes)
+            .mockResolvedValueOnce(null), // enrollment duplicate check
+          query: jest.fn().mockResolvedValue([[], 0]), // no rows updated => sold out
+        };
+        return callback(mockManager);
+      });
+
+      const waitlistEntry = { id: 'wl-1', ticketTypeId: 'tt-1', userId: 'user-1' };
+      mockWaitlistService.join.mockResolvedValue(waitlistEntry);
+
+      const result = await service.enroll('event-1', 'user-1', 'tt-1');
+
+      expect(mockWaitlistService.join).toHaveBeenCalledWith('event-1', 'tt-1', 'user-1', 1);
+      expect(result).toBe(waitlistEntry);
+    });
+
+    it('should atomically decrement tickets on successful enrollment', async () => {
+      const mockEvent = {
+        id: 'event-1',
+        approvalStatus: EventApprovalStatus.APPROVED,
+        status: EventStatus.UPCOMING,
+        capacity: null,
+        ticketTypes: [{ id: 'tt-1', quantitySold: 0, quantityTotal: 10 }],
+        canEnroll: () => true,
+      };
+
+      mockDataSource.transaction.mockImplementation(async (callback) => {
+        const mockManager = {
+          findOne: jest.fn()
+            .mockResolvedValueOnce(mockEvent) // initial event fetch (with ticketTypes)
+            .mockResolvedValueOnce(null), // enrollment duplicate check
+          query: jest.fn().mockResolvedValue([[{ id: 'tt-1', price: '100.00' }], 1]),
+          create: jest.fn().mockImplementation((entity, data) => data),
           save: jest.fn().mockImplementation((entity, data) => {
-            expect(data.availableTickets).toBe(9);
+            if (entity === Enrollment) {
+              expect(data.totalAmount).toBe(100);
+              expect(data.ticketTypeId).toBe('tt-1');
+            }
             return Promise.resolve(data);
           }),
         };
         return callback(mockManager);
       });
 
-      await service.enroll('event-1', 'user-1');
+      await service.enroll('event-1', 'user-1', 'tt-1');
     });
   });
 
@@ -252,6 +318,80 @@ describe('EventsService - Fixed Issues', () => {
       expect(result.total).toBe(25);
       expect(result.page).toBe(2);
       expect(result.totalPages).toBe(3);
+    });
+  });
+
+  describe('Issue 10: Event Deletion Guard & Approval-Status Gating (loophole fixes)', () => {
+    it('blocks deleting an event that still has active (confirmed/pending) enrollments', async () => {
+      const mockEvent = { id: 'event-1', organizerId: 'org-1' };
+      mockEventRepo.findOne.mockResolvedValue(mockEvent);
+      mockEnrollmentRepo.count.mockResolvedValue(2);
+
+      await expect(service.remove('event-1', 'user-1', ['admin'])).rejects.toThrow(ConflictException);
+      expect(mockEventRepo.softRemove).not.toHaveBeenCalled();
+    });
+
+    it('allows deleting an event once no active enrollments remain', async () => {
+      const mockEvent = { id: 'event-1', organizerId: 'org-1', title: 'Test Event' };
+      mockEventRepo.findOne.mockResolvedValue(mockEvent);
+      mockEnrollmentRepo.count.mockResolvedValue(0);
+      mockEventRepo.softRemove.mockResolvedValue(undefined);
+
+      await service.remove('event-1', 'user-1', ['admin']);
+
+      expect(mockEventRepo.softRemove).toHaveBeenCalledWith(mockEvent);
+    });
+
+    it('rejects creating a new ticket type on a rejected event', async () => {
+      const mockEvent = { id: 'event-1', organizerId: 'org-1', approvalStatus: EventApprovalStatus.REJECTED };
+      mockEventRepo.findOne.mockResolvedValue(mockEvent);
+      mockOrganizerRepo.findOne.mockResolvedValue({ id: 'org-1', userId: 'user-1' });
+
+      await expect(
+        service.createTicketType('event-1', { name: 'GA', price: 10, quantityTotal: 10 } as any, 'user-1', []),
+      ).rejects.toThrow(BadRequestException);
+      expect(mockTicketTypeRepo.save).not.toHaveBeenCalled();
+    });
+
+    it('hides ticket types from a public viewer when the event is not approved', async () => {
+      const mockEvent = { id: 'event-1', organizerId: 'org-1', approvalStatus: EventApprovalStatus.PENDING_APPROVAL, isApproved: () => false };
+      mockEventRepo.findOne.mockResolvedValue(mockEvent);
+
+      const result = await service.findTicketTypes('event-1');
+
+      expect(result).toEqual([]);
+      expect(mockTicketTypeRepo.find).not.toHaveBeenCalled();
+    });
+
+    it('still shows ticket types to the owning organizer even when not yet approved', async () => {
+      const mockEvent = { id: 'event-1', organizerId: 'org-1', approvalStatus: EventApprovalStatus.PENDING_APPROVAL, isApproved: () => false };
+      mockEventRepo.findOne.mockResolvedValue(mockEvent);
+      mockOrganizerRepo.findOne.mockResolvedValue({ id: 'org-1', userId: 'user-1' });
+      mockTicketTypeRepo.find.mockResolvedValue([{ id: 'tt-1', isHidden: false }]);
+
+      const result = await service.findTicketTypes('event-1', 'user-1', []);
+
+      expect(result).toHaveLength(1);
+    });
+
+    it('findOneForViewer hides a pending/rejected event from an anonymous or unrelated viewer', async () => {
+      const mockEvent = { id: 'event-1', organizerId: 'org-1', approvalStatus: EventApprovalStatus.REJECTED, isApproved: () => false };
+      mockEventRepo.findOne.mockResolvedValue(mockEvent);
+
+      await expect(service.findOneForViewer('event-1')).rejects.toThrow(NotFoundException);
+
+      mockOrganizerRepo.findOne.mockResolvedValue({ id: 'org-2', userId: 'other-user' });
+      await expect(service.findOneForViewer('event-1', 'other-user', [])).rejects.toThrow(NotFoundException);
+    });
+
+    it('findOneForViewer still returns a pending event to its owning organizer', async () => {
+      const mockEvent = { id: 'event-1', organizerId: 'org-1', approvalStatus: EventApprovalStatus.PENDING_APPROVAL, isApproved: () => false };
+      mockEventRepo.findOne.mockResolvedValue(mockEvent);
+      mockOrganizerRepo.findOne.mockResolvedValue({ id: 'org-1', userId: 'user-1' });
+
+      const result = await service.findOneForViewer('event-1', 'user-1', []);
+
+      expect(result).toBe(mockEvent);
     });
   });
 

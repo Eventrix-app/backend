@@ -168,4 +168,28 @@ export class AdminService {
     await this.usersRepository.softRemove(user);
     this.logger.log(`Soft deleted admin user in database: ${user.email}`);
   }
+
+  // Ban is intentionally separate from soft-delete: a banned account still exists (its
+  // bookings/history are unaffected) but can no longer authenticate.
+  async banUser(id: string, reason?: string): Promise<void> {
+    const user = await this.usersRepository.findOne({ where: { id } });
+    if (!user) {
+      throw new NotFoundException(`User with id ${id} not found`);
+    }
+    user.isBanned = true;
+    user.bannedReason = reason;
+    await this.usersRepository.save(user);
+    this.logger.log(`Banned user ${user.email}${reason ? `: ${reason}` : ''}`);
+  }
+
+  async unbanUser(id: string): Promise<void> {
+    const user = await this.usersRepository.findOne({ where: { id } });
+    if (!user) {
+      throw new NotFoundException(`User with id ${id} not found`);
+    }
+    user.isBanned = false;
+    user.bannedReason = undefined;
+    await this.usersRepository.save(user);
+    this.logger.log(`Unbanned user ${user.email}`);
+  }
 }

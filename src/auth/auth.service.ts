@@ -36,6 +36,11 @@ export class AuthService {
       throw new UnauthorizedException('Invalid email or password');
     }
 
+    if (user.isBanned) {
+      this.logger.warn(`Login rejected: user ${email} is banned`);
+      throw new UnauthorizedException('This account has been suspended');
+    }
+
     const stored = user.passwordHash ?? '';
     const isLegacyPlaintext = !BCRYPT_PREFIXES.some((p) =>
       stored.startsWith(p),

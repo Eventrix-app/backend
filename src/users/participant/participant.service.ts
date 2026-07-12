@@ -3,6 +3,7 @@ import { In, Raw } from 'typeorm';
 import { InjectRepository } from '@nestjs/typeorm';
 import { Repository } from 'typeorm';
 import * as bcrypt from 'bcrypt';
+import { JwtService } from '@nestjs/jwt';
 import { CreateParticipantDto } from './dto/create-participant.dto';
 import { UpdateParticipantDto } from './dto/update-participant.dto';
 import { UpdateInterestsDto } from './dto/update-interests.dto';
@@ -10,6 +11,7 @@ import { UpdateLocationDto } from './dto/update-location.dto';
 import { UpdateNotificationPrefsDto } from './dto/update-notification-prefs.dto';
 import { User } from '../../entities/user.entity';
 import { EventCategory } from '../../entities/category.entity';
+import { JwtPayload } from '../../auth/jwt.util';
 
 const BCRYPT_ROUNDS = 10;
 
@@ -33,6 +35,10 @@ export interface ParticipantRecord {
   isActive: boolean;
   createdAt: string;
   updatedAt: string;
+  // Only set on create() — POST /participants is functionally a registration endpoint
+  // (same as POST /auth/register, just with a richer profile form), so it must log the
+  // new account in immediately too, instead of forcing a separate POST /auth/login.
+  accessToken?: string;
 }
 
 @Injectable()
@@ -44,6 +50,7 @@ export class ParticipantService {
     private readonly usersRepository: Repository<User>,
     @InjectRepository(EventCategory)
     private readonly categoryRepository: Repository<EventCategory>,
+    private readonly jwtService: JwtService,
   ) {}
 
   /**
@@ -138,7 +145,19 @@ export class ParticipantService {
 
     const savedUser = await this.usersRepository.save(user);
     this.logger.log(`Created participant in database: ${savedUser.email}`);
-    return this.mapUserToParticipantRecord(savedUser);
+
+    const roles = savedUser.roles?.length ? savedUser.roles : ['user'];
+    const payload: JwtPayload = {
+      id: savedUser.id,
+      email: savedUser.email,
+      roles,
+      full_name: savedUser.fullName || '',
+    };
+
+    return {
+      ...this.mapUserToParticipantRecord(savedUser),
+      accessToken: this.jwtService.sign(payload),
+    };
   }
 
   async findAll(): Promise<ParticipantRecord[]> {

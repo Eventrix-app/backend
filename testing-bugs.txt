@@ -1,0 +1,10 @@
+1. When while adding categories in my profile, if I select two categories and the 3rd category is same as the 2nd or the 1st category uh it doesn't give any error. But the only two categories are added in my profile.
+2. The create participant endpoint and the register participant endpoint should be the same as we are going to register the same user I guess.
+3.while testing uploads/signed-url, i got below response with already present json body:
+{
+    "statusCode": 500,
+    "message": "supabaseKey is required.",
+    "error": "Internal Server Error",
+    "timestamp": "2026-07-11T12:11:14.933Z",
+    "path": "/api/uploads/signed-url"
+}

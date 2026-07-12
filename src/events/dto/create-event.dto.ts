@@ -13,8 +13,13 @@ import {
   IsInt,
   ValidateIf,
   Matches,
+  IsArray,
+  ArrayMinSize,
+  ValidateNested,
 } from 'class-validator';
-import { EventApprovalStatus, EventStatus } from '../../entities/event.entity';
+import { Type } from 'class-transformer';
+import { EventApprovalStatus, EventStatus, FeePayer } from '../../entities/event.entity';
+import { CreateTicketTypeDto } from './create-ticket-type.dto';
 
 export class CreateEventDto {
   @IsOptional()
@@ -56,6 +61,13 @@ export class CreateEventDto {
   @IsNotEmpty({ message: 'Event date is required' })
   @IsDateString({}, { message: 'Invalid date format. Use YYYY-MM-DD' })
   eventDate!: string;
+
+  // Nullable/omitted = single-day event (end defaults to eventDate). Multi-day events
+  // (fests, conferences) set this explicitly. Must be >= eventDate — enforced in
+  // EventsService alongside the other cross-field checks, not here. See loophole.md.
+  @IsOptional()
+  @IsDateString({}, { message: 'Invalid end date format. Use YYYY-MM-DD' })
+  eventEndDate?: string;
 
   @IsNotEmpty({ message: 'Start time is required' })
   @IsString()
@@ -138,11 +150,28 @@ export class CreateEventDto {
   @IsBoolean()
   isPaid?: boolean;
 
-  @IsOptional()
+  @ValidateIf((o) => o.pricePerTicket !== undefined && Number(o.pricePerTicket) > 0)
+  @IsNotEmpty({ message: 'Refund policy type is required for paid events' })
   @IsString()
   refundPolicyType?: string;
 
   @IsOptional()
   @IsString()
   refundPolicyText?: string;
+
+  @IsOptional()
+  @IsInt({ message: 'Capacity must be an integer' })
+  @Min(1, { message: 'Capacity must be at least 1' })
+  capacity?: number;
+
+  @IsOptional()
+  @IsEnum(FeePayer, { message: 'Invalid fee payer' })
+  feePayer?: FeePayer;
+
+  @IsOptional()
+  @IsArray()
+  @ArrayMinSize(1, { message: 'At least one ticket type is required when provided' })
+  @ValidateNested({ each: true })
+  @Type(() => CreateTicketTypeDto)
+  ticketTypes?: CreateTicketTypeDto[];
 }

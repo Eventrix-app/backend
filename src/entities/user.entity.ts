@@ -61,6 +61,12 @@ export class User {
   @Column({ name: 'is_phone_verified', default: false })
   isPhoneVerified!: boolean;
 
+  @Column({ name: 'is_banned', default: false })
+  isBanned!: boolean;
+
+  @Column({ name: 'banned_reason', type: 'text', nullable: true })
+  bannedReason?: string;
+
   @Column({
     name: 'notification_prefs',
     type: 'jsonb',

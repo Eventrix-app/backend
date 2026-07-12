@@ -9,13 +9,18 @@ import { Enrollment } from '../entities/enrollment.entity';
 import { Organizer } from '../entities/organizer.entity';
 import { User } from '../entities/user.entity';
 import { EventCategory } from '../entities/category.entity';
+import { TicketType } from '../entities/ticket-type.entity';
 import { CategoryService } from './category.service';
 import { CategoryController } from './category.controller';
+import { WaitlistModule } from '../waitlist/waitlist.module';
+import { UploadsModule } from '../uploads/uploads.module';
 
 @Module({
   imports: [
     ConfigModule,
-    TypeOrmModule.forFeature([Event, Enrollment, Organizer, User, EventCategory]),
+    TypeOrmModule.forFeature([Event, Enrollment, Organizer, User, EventCategory, TicketType]),
+    WaitlistModule,
+    UploadsModule,
     JwtModule.registerAsync({
       imports: [ConfigModule],
       useFactory: (config: ConfigService) => ({
