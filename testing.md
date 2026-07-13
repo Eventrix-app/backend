@@ -18,7 +18,9 @@ verify the whole backend end-to-end, not just that each endpoint returns 200.
    `companyLogoUrl`, `ticketCode`, `name`) — the collection's `event: test` scripts write
    into these automatically on the requests that already have one (Register, Login,
    Bootstrap Admin, Create Admin, Create Participant, Create Category, Create
-   Paid/Free Event, Create Ticket Type, Enroll Participant).
+   Paid/Free Event, Create Ticket Type, Enroll Participant, Request Refund).
+   `Enroll Participant` captures both `enrollmentId` and `ticketCode`; `Request Refund`
+   captures `refundId`.
 5. Requests without a capture script (most `GET`/admin CRUD requests) require you to
    copy an `id` from the previous response into the variable manually the first time —
    after that, later requests in the same folder reuse it.
@@ -268,7 +270,8 @@ Log in as the Phase 3 `user` for creation (they'll get auto-promoted to `organiz
 | `DELETE /events/:id/ticket-types/:ticketTypeId` after sales | 403 | Same lock rule |
 | `GET /events/:id/ticket-types` as guest, on an **approved** event | 200 | Hidden tiers (`isHidden: true`) filtered out for non-owners |
 | `POST /events/:id/enroll` on an event that isn't `approved`/`upcoming` | 400 | `"Event is not accepting enrollments"` |
-| `POST /events/:id/enroll`, valid | 201, `status: "confirmed"`, `paymentStatus: "pending"` | Captures `enrollmentId`; response includes a signed `ticketCode` |
+| `POST /events/:id/enroll`, valid, **paid** ticket type (`price > 0`) | 201, `status: "confirmed"`, `paymentStatus: "pending"` | Captures `enrollmentId` and `ticketCode`. `paymentStatus` stays `"pending"` until `POST /payments/webhook` confirms it — see Phase 10 |
+| `POST /events/:id/enroll`, valid, **free** ticket type (`price: 0`) | 201, `status: "confirmed"`, `paymentStatus: "paid"` | **Fixed** — free tickets have no gateway/webhook to ever confirm them, so `paymentStatus` is now set to `"paid"` immediately at enroll time instead of being stuck at `"pending"` forever |
 | `POST /events/:id/enroll` again, same user/event | 409 | `"User already enrolled in this event"` |
 | `POST /events/:id/enroll` when the ticket type is sold out (`quantitySold` == `quantityTotal`) | 201, but check the response shape — it should be a **waitlist entry**, not an enrollment | `WaitlistService.join()` fallback |
 | **Rate limit**: fire 6 enroll requests inside 60s (different ticket types/events to get past the 409 duplicate check) | 6th → 429 | `@Throttle({ limit: 5, ttl: 60000 })` on `enroll` specifically |
@@ -277,7 +280,8 @@ Log in as the Phase 3 `user` for creation (they'll get auto-promoted to `organiz
 | `GET /events/enrollments/:enrollmentId` as a different user | 403 | `"You can only view your own tickets"` |
 | `PATCH /events/enrollments/:enrollmentId/cancel` | 200, `status: "cancelled"` | Confirm the ticket type's `quantitySold` decrements afterward (re-check via ticket-types list), and if a waitlist entry existed for that tier, confirm it gets auto-promoted (`GET /events/my-waitlist` as that waitlisted user should now show a promoted/confirmed state) |
 | `PATCH .../cancel` twice | 400 | `"This booking is already cancelled"` |
-| `POST /events/check-in` with a valid `ticketCode`, as the event's organizer | 200 | `checkedInAt` set |
+| `POST /events/check-in` with a **paid-ticket** enrollment's `ticketCode`, called **before** `POST /payments/webhook` confirms payment | 400 | `"Cannot check in: payment for this booking is not confirmed"` — **new fix**, see §5. Run this once right after enroll to prove the gate, then re-run after Phase 10's webhook step to confirm it now succeeds |
+| `POST /events/check-in` with a valid `ticketCode` once `paymentStatus: "paid"` (free ticket immediately, or paid ticket after the webhook), as the event's organizer | 200 | `checkedInAt` set |
 | `POST /events/check-in` same ticket again | 409 | `"Ticket already checked in"` |
 | `POST /events/check-in` as an unrelated organizer | 403 | Ownership check |
 
@@ -288,18 +292,21 @@ Log in as the Phase 3 `user` for creation (they'll get auto-promoted to `organiz
 | `GET /payments/fee-estimate?ticketPrice=99.99&feePayer=organizer` | 200 | Returns the fee breakdown; cross-check the math against `FeeCalculationService` (organizer-pays: buyer pays exactly `ticketPrice`, organizer payout is net of commission+gateway fee) |
 | `GET /payments/fee-estimate?ticketPrice=0` | 200, all-zero breakdown | Free-event short-circuit |
 | `GET /payments/fee-estimate?feePayer=participant` | 200 | Buyer price should now be `ticketPrice + fees`, organizer payout = full `ticketPrice` |
-| `POST /payments/refunds` for an enrollment **more than 48h before the event start** | 201, refund status `requested` | Captures `refundId` |
-| `POST /payments/refunds` for an enrollment **inside the 48h cutoff** (event date < 48h out) | 400/403 | Cutoff is anchored to event **start**, not end — confirm the rejection message references the window |
+| `POST /payments/refunds` for a **paid**-ticket enrollment, called **before** `POST /payments/webhook` confirms payment (`paymentStatus: "pending"`) | 400, `"This booking has no completed payment to refund"` | **New fix** — previously this silently succeeded (201) and could be approved/processed for money that was never actually collected; see §5. Run this once right after enroll to prove the gate is live |
+| `POST /payments/webhook` for that same `enrollmentId`, `status: "success"` | 200 | Confirm via `GET /events/enrollments/:enrollmentId` that `paymentStatus` flips to `"paid"` |
+| `POST /payments/refunds` again, same enrollment, **now that `paymentStatus: "paid"`** and **more than 48h before the event start** | 201, refund status `requested` | Captures `refundId` |
+| `POST /payments/refunds` for an enrollment **inside the 48h cutoff** (event date < 48h out, but paid) | 400/403 | Cutoff is anchored to event **start**, not end — confirm the rejection message references the window, and is distinct from the payment-status message above |
 | `POST /payments/refunds` twice for the same enrollment while one is still open | 4xx | `existingOpenRefund` check |
 | `GET /payments/refunds/pending` as the event's organizer | 200 | Only that organizer's events' refunds appear |
 | `GET /payments/refunds/pending` as an unrelated organizer | 200, empty | Ownership-scoped, not a 403 |
-| `PATCH /payments/refunds/:id/approve` | 200 | |
+| `PATCH /payments/refunds/:id/approve` | 200, refund `status: "processed"` | Also flips the enrollment to `status: "refunded"`, `paymentStatus: "refunded"` — confirm via `GET /events/enrollments/:enrollmentId` |
 | `PATCH /payments/refunds/:id/reject` with a reason | 200 | |
 | `POST /payments/webhook` (`@Public()`, no auth header) | 200 | Gateway callback — confirm it works with **no** `Authorization` header |
 | `POST /payments/webhook` with the **same** `gatewayEventId` twice | 200 both times, but confirm **no duplicate side effect** (enrollment `paymentStatus` shouldn't flip twice / no duplicate Payment row) | Idempotency check — this is the actual point of the test |
 | `POST /payments/webhook` with `status: "failed"` | 200 | Confirm it does *not* mark the enrollment as paid |
+| `POST /payments/webhook`, `status: "success"`, for an enrollment whose refund was **already approved/processed** (i.e. `status: "refunded"`) — use a fresh `gatewayEventId` to simulate a late/duplicate gateway retry | 200, but the `Payment` row is still recorded | **New fix** — confirm via `GET /events/enrollments/:enrollmentId` that `status`/`paymentStatus` **stay** `"refunded"`/`"refunded"` and are **not** flipped back to `"confirmed"`/`"paid"`. Check the server log for the `"...which is already \"refunded\"; payment recorded but enrollment left untouched"` warning — this is the exact bug found in `Backend/logs`, see §5 |
 | **Rate limit**: 61 webhook calls inside 60s | 61st → 429 | `@Throttle({ limit: 60, ttl: 60000 })` |
-| **Payout cron** | N/A — `@Cron(CronExpression.EVERY_HOUR)`, no manual-trigger endpoint exists | Can't be tested on-demand via Postman. To verify: create a paid enrollment, mark it paid via the webhook, set the event's date far enough in the past to clear `eventDate/eventEndDate + 3 days`, then either wait for the top of the hour or temporarily lower the interval in a local branch and watch the server log for `"Payout sweep: N payout(s) created across M candidate event(s)"` |
+| **Payout cron** | N/A — `@Cron(CronExpression.EVERY_HOUR)`, no manual-trigger endpoint exists | Can't be tested on-demand via Postman. To verify: create a paid enrollment, mark it paid via the webhook, set the event's date far enough in the past to clear `eventDate/eventEndDate + 3 days`, then either wait for the top of the hour or temporarily lower the interval in a local branch and watch the server log for `"Payout sweep: N payout(s) created across M candidate event(s)"`. The candidate query now also requires `paymentStatus: "paid"` (not just `status: "confirmed"`) — an enrollment stuck at `"pending"`/`"failed"` payment must never be swept into a payout |
 
 ### Phase 11 — Audit log (no query endpoint — verify via DB)
 
@@ -347,6 +354,18 @@ exceeded, and that it resets after the window.
 - **Upload content-type allow-list**: exactly `image/png`, `image/jpeg`, `image/jpg`,
   `image/heic`, `image/webp` — nothing else, on **both** `/uploads/signed-url` and the
   deprecated `/events/upload-url` forward.
+- **`paymentStatus` enforcement**: `enrollment.status` reaching `"confirmed"` only means
+  a ticket was reserved, not that it was paid for — that's what `paymentStatus` is for.
+  Found via `Backend/logs`: a refund was requested/approved/"processed via gateway" for
+  an enrollment whose `paymentStatus` was still `"pending"` (the webhook hadn't fired
+  yet), and a *later*-arriving webhook then silently resurrected the refunded booking
+  back to `status: "confirmed"`, `paymentStatus: "paid"`. Fixed by (1) marking free
+  tickets `paymentStatus: "paid"` immediately at enroll time since no webhook will ever
+  confirm them, (2) gating `POST /payments/refunds` and `POST /events/check-in` on
+  `paymentStatus === "paid"`, (3) making `handleWebhook()`'s success branch a no-op for
+  an enrollment that's already `"refunded"`/`"cancelled"`, and (4) requiring
+  `paymentStatus: "paid"` in the payout-sweep candidate queries. Any new code path that
+  treats `status: "confirmed"` as "this ticket was paid for" is a regression of this bug.
 - **Class-level vs. method-level `@Roles()`**: any controller mixing a class-level
   `@Roles('admin')` with an in-handler self-service ownership check needs a matching
   method-level `@Roles()` override, or the ownership check is dead code (this was the

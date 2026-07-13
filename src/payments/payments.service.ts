@@ -84,6 +84,9 @@ export class PaymentsService {
     if (enrollment.status === 'cancelled' || enrollment.status === 'refunded') {
       throw new BadRequestException('This booking is not eligible for a refund');
     }
+    if (enrollment.paymentStatus !== 'paid') {
+      throw new BadRequestException('This booking has no completed payment to refund');
+    }
 
     const existingOpenRefund = await this.refundsRepository.findOne({
       where: { enrollmentId: enrollment.id, status: In([RefundStatus.REQUESTED, RefundStatus.APPROVED]) },
@@ -265,7 +268,14 @@ export class PaymentsService {
         throw err;
       }
 
-      if (dto.status === 'success') {
+      // A late or duplicate-gateway-retry webhook can arrive after the enrollment has
+      // already been refunded/cancelled through a separate flow. Record the payment for
+      // the audit trail either way, but never let it resurrect a terminal enrollment.
+      if (enrollment.status === 'refunded' || enrollment.status === 'cancelled') {
+        this.logger.warn(
+          `Webhook ${dto.gatewayEventId} (${dto.status}) received for enrollment ${dto.enrollmentId} which is already "${enrollment.status}"; payment recorded but enrollment left untouched`,
+        );
+      } else if (dto.status === 'success') {
         const organizer = await manager.findOne(Organizer, { where: { id: enrollment.event.organizerId } });
         const breakdown = this.feeCalculationService.calculate(
           dto.amount,
@@ -312,6 +322,7 @@ export class PaymentsService {
       .select('enrollment.eventId', 'eventId')
       .distinct(true)
       .where('enrollment.status = :status', { status: 'confirmed' })
+      .andWhere('enrollment.paymentStatus = :paymentStatus', { paymentStatus: 'paid' })
       .andWhere('enrollment.payoutId IS NULL')
       .getRawMany<{ eventId: string }>();
 
@@ -341,6 +352,7 @@ export class PaymentsService {
         .setLock('pessimistic_write')
         .where('enrollment.eventId = :eventId', { eventId: event.id })
         .andWhere('enrollment.status = :status', { status: 'confirmed' })
+        .andWhere('enrollment.paymentStatus = :paymentStatus', { paymentStatus: 'paid' })
         .andWhere('enrollment.payoutId IS NULL')
         .andWhere(
           `NOT EXISTS (SELECT 1 FROM refunds r WHERE r.enrollment_id = enrollment.id AND r.status IN (:...openStatuses))`,

@@ -575,14 +575,18 @@ export class EventsService {
       const ticketType = updateResult[0][0] as { price: string };
 
       const bookingReference = `BK-${Date.now()}-${Math.random().toString(36).slice(2, 7).toUpperCase()}`;
+      const totalAmount = Number(ticketType.price) * quantity;
 
       const enrollment = manager.create(Enrollment, {
         userId,
         eventId,
         ticketTypeId: resolvedTicketTypeId,
         quantity,
-        totalAmount: Number(ticketType.price) * quantity,
+        totalAmount,
         status: 'confirmed',
+        // Free tickets have no gateway/webhook to confirm payment later, so they must be
+        // marked settled here. Paid tickets stay 'pending' until handleWebhook() confirms.
+        paymentStatus: totalAmount === 0 ? 'paid' : 'pending',
         bookingDate: new Date(),
         bookingReference,
       });
@@ -760,6 +764,10 @@ export class EventsService {
       if (!organizer || organizer.id !== enrollment.event.organizerId) {
         throw new ForbiddenException('You can only check in tickets for your own events');
       }
+    }
+
+    if (enrollment.paymentStatus !== 'paid') {
+      throw new BadRequestException('Cannot check in: payment for this booking is not confirmed');
     }
 
     if (enrollment.checkedInAt) {

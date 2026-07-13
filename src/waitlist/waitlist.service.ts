@@ -87,14 +87,18 @@ export class WaitlistService {
 
       const ticketType = updateResult[0][0] as { price: string };
       const bookingReference = `BK-${Date.now()}-${Math.random().toString(36).slice(2, 7).toUpperCase()}`;
+      const totalAmount = Number(ticketType.price) * fresh.quantity;
 
       const enrollment = manager.create(Enrollment, {
         userId: fresh.userId,
         eventId: fresh.eventId,
         ticketTypeId: fresh.ticketTypeId,
         quantity: fresh.quantity,
-        totalAmount: Number(ticketType.price) * fresh.quantity,
+        totalAmount,
         status: 'confirmed',
+        // Mirrors EventsService.enroll(): free tickets have no gateway/webhook, so mark
+        // them settled immediately; paid tickets wait for handleWebhook() confirmation.
+        paymentStatus: totalAmount === 0 ? 'paid' : 'pending',
         bookingDate: new Date(),
         bookingReference,
       });

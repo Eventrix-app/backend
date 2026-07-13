@@ -36,6 +36,9 @@ lerna-debug.log*
 .env.test.local
 .env.production.local
 .env.local
+api-routes.json
+api-routes-with-logging.json
+testing.md
 
 # temp directory
 .temp

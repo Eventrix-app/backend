@@ -395,6 +395,99 @@ describe('EventsService - Fixed Issues', () => {
     });
   });
 
+  // Regression tests for the logs.md finding: a refund was fully processed for an
+  // enrollment whose paymentStatus was still "pending" (the payment webhook hadn't
+  // fired yet), and a later webhook then resurrected the refunded booking. paymentStatus
+  // must be set correctly at enroll time and enforced at check-in.
+  describe('Issue 11: paymentStatus enforcement', () => {
+    it('marks a free ticket enrollment as paid immediately (no gateway/webhook will ever confirm it)', async () => {
+      const mockEvent = {
+        id: 'event-1',
+        approvalStatus: EventApprovalStatus.APPROVED,
+        status: EventStatus.UPCOMING,
+        capacity: null,
+        ticketTypes: [{ id: 'tt-1', quantitySold: 0, quantityTotal: 10 }],
+        canEnroll: () => true,
+      };
+
+      mockDataSource.transaction.mockImplementation(async (callback: any) => {
+        const mockManager = {
+          findOne: jest.fn().mockResolvedValueOnce(mockEvent).mockResolvedValueOnce(null),
+          query: jest.fn().mockResolvedValue([[{ id: 'tt-1', price: '0.00' }], 1]),
+          create: jest.fn().mockImplementation((entity: any, data: any) => data),
+          save: jest.fn().mockImplementation((entity: any, data: any) => {
+            if (entity === Enrollment) {
+              expect(data.paymentStatus).toBe('paid');
+            }
+            return Promise.resolve(data);
+          }),
+        };
+        return callback(mockManager);
+      });
+
+      await service.enroll('event-1', 'user-1', 'tt-1');
+    });
+
+    it('leaves a paid ticket enrollment pending until the payment webhook confirms it', async () => {
+      const mockEvent = {
+        id: 'event-1',
+        approvalStatus: EventApprovalStatus.APPROVED,
+        status: EventStatus.UPCOMING,
+        capacity: null,
+        ticketTypes: [{ id: 'tt-1', quantitySold: 0, quantityTotal: 10 }],
+        canEnroll: () => true,
+      };
+
+      mockDataSource.transaction.mockImplementation(async (callback: any) => {
+        const mockManager = {
+          findOne: jest.fn().mockResolvedValueOnce(mockEvent).mockResolvedValueOnce(null),
+          query: jest.fn().mockResolvedValue([[{ id: 'tt-1', price: '99.99' }], 1]),
+          create: jest.fn().mockImplementation((entity: any, data: any) => data),
+          save: jest.fn().mockImplementation((entity: any, data: any) => {
+            if (entity === Enrollment) {
+              expect(data.paymentStatus).toBe('pending');
+            }
+            return Promise.resolve(data);
+          }),
+        };
+        return callback(mockManager);
+      });
+
+      await service.enroll('event-1', 'user-1', 'tt-1');
+    });
+
+    it('rejects check-in when the booking has not been paid for', async () => {
+      mockJwtService.verify.mockReturnValue({ enrollmentId: 'enr-1', eventId: 'event-1' });
+      mockEnrollmentRepo.findOne.mockResolvedValue({
+        id: 'enr-1',
+        eventId: 'event-1',
+        paymentStatus: 'pending',
+        checkedInAt: null,
+        event: { organizerId: 'org-1' },
+      });
+
+      await expect(service.checkIn('token', 'admin-1', ['admin'])).rejects.toThrow(BadRequestException);
+      expect(mockEnrollmentRepo.save).not.toHaveBeenCalled();
+    });
+
+    it('allows check-in once the booking is paid', async () => {
+      mockJwtService.verify.mockReturnValue({ enrollmentId: 'enr-1', eventId: 'event-1' });
+      const enrollment = {
+        id: 'enr-1',
+        eventId: 'event-1',
+        paymentStatus: 'paid',
+        checkedInAt: null,
+        event: { organizerId: 'org-1' },
+      };
+      mockEnrollmentRepo.findOne.mockResolvedValue(enrollment);
+      mockEnrollmentRepo.save.mockImplementation((data: any) => Promise.resolve(data));
+
+      const result = await service.checkIn('token', 'admin-1', ['admin']);
+
+      expect(result.checkedInAt).toBeInstanceOf(Date);
+    });
+  });
+
   describe('Helper Methods', () => {
     it('canEnroll should return true only for approved upcoming events with tickets', () => {
       const event = new Event();
