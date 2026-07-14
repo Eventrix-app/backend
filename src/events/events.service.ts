@@ -18,6 +18,28 @@ import { WaitlistEntry } from '../entities/waitlist-entry.entity';
 import { NotificationService } from '../notifications/notification.service';
 import { getEventEndDateTime } from './utils/event-dates.util';
 
+// Loading the 'organizer.user' relation pulls the full User entity by default, including
+// passwordHash and other PII — there's no @Exclude()/serializer scoping it out anywhere in
+// this app. Every read path that eager-loads it for event responses must scope the columns
+// explicitly, or that hash ends up in a public GET /events response.
+const SAFE_ORGANIZER_SELECT = {
+  organizer: {
+    id: true,
+    userId: true,
+    companyName: true,
+    companyLogoUrl: true,
+    verified: true,
+    verificationLevel: true,
+    user: { id: true, fullName: true },
+  },
+} as const;
+
+// Same leak, different relation path: Enrollment.user is a plain ManyToOne to the full
+// User entity, so listing/searching an event's enrollments must scope it too.
+const SAFE_ENROLLMENT_USER_SELECT = {
+  user: { id: true, email: true, fullName: true },
+} as const;
+
 @Injectable()
 export class EventsService {
   private readonly logger = new Logger(EventsService.name);
@@ -169,6 +191,7 @@ export class EventsService {
     
     const [events, total] = await this.eventsRepository.findAndCount({
       relations: ['organizer', 'organizer.user', 'category'],
+      select: SAFE_ORGANIZER_SELECT,
       where: { deletedAt: null as any },
       order: { eventDate: 'ASC', startTime: 'ASC' },
       skip,
@@ -202,6 +225,7 @@ export class EventsService {
     const [events, total] = await this.eventsRepository.findAndCount({
       where,
       relations: ['organizer', 'organizer.user', 'category'],
+      select: SAFE_ORGANIZER_SELECT,
       order: { eventDate: 'ASC', startTime: 'ASC' },
       skip,
       take: limit,
@@ -219,6 +243,7 @@ export class EventsService {
     const event = await this.eventsRepository.findOne({
       where: { id, deletedAt: null as any },
       relations: ['organizer', 'organizer.user', 'category'],
+      select: SAFE_ORGANIZER_SELECT,
     });
     if (!event) {
       throw new NotFoundException(`Event with id ${id} not found`);
@@ -363,6 +388,7 @@ export class EventsService {
     return await this.eventsRepository.find({
       where: { organizerId: organizer.id, deletedAt: null as any },
       relations: ['organizer', 'organizer.user'],
+      select: SAFE_ORGANIZER_SELECT,
     });
   }
 
@@ -370,10 +396,20 @@ export class EventsService {
     return this.waitlistService.findMyEntries(userId);
   }
 
+  // Participant's own booking history (BookingsScreen) — most recent first.
+  async findMyEnrollments(userId: string): Promise<Enrollment[]> {
+    return this.enrollmentRepository.find({
+      where: { userId },
+      relations: ['event', 'ticketType'],
+      order: { createdAt: 'DESC' },
+    });
+  }
+
   async findByOrganizerId(organizerId: string): Promise<Event[]> {
     return await this.eventsRepository.find({
       where: { organizerId, deletedAt: null as any },
       relations: ['organizer', 'organizer.user'],
+      select: SAFE_ORGANIZER_SELECT,
     });
   }
 
@@ -710,6 +746,7 @@ export class EventsService {
         deletedAt: null as any,
       },
       relations: ['organizer', 'organizer.user', 'category'],
+      select: SAFE_ORGANIZER_SELECT,
       order: { createdAt: 'ASC' },
       skip,
       take: limit,
@@ -735,6 +772,7 @@ export class EventsService {
     return this.enrollmentRepository.find({
       where: { eventId },
       relations: ['user'],
+      select: SAFE_ENROLLMENT_USER_SELECT,
     });
   }
 
@@ -814,6 +852,7 @@ export class EventsService {
         user: name ? { fullName: ILike(`%${name}%`) } : undefined,
       },
       relations: ['user'],
+      select: SAFE_ENROLLMENT_USER_SELECT,
     });
   }
 

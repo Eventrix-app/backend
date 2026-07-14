@@ -25,6 +25,7 @@ function makeUser(overrides: Partial<User> = {}): User {
     notificationPrefs: null,
     roles: ['user'],
     interests: [],
+    hasCompletedOnboarding: false,
     createdAt: new Date(),
     updatedAt: new Date(),
     deletedAt: undefined,
@@ -112,6 +113,14 @@ describe('UsersService', () => {
     it('throws NotFoundException when user does not exist', async () => {
       mockUserRepo.findOne.mockResolvedValue(null);
       await expect(service.findMe('missing-id')).rejects.toThrow(NotFoundException);
+    });
+
+    it('surfaces hasCompletedOnboarding so clients can decide whether to re-run onboarding', async () => {
+      mockUserRepo.findOne.mockResolvedValue(makeUser({ hasCompletedOnboarding: true }));
+
+      const result = await service.findMe('user-uuid');
+
+      expect(result.hasCompletedOnboarding).toBe(true);
     });
   });
 

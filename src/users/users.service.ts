@@ -20,6 +20,7 @@ export type CurrentUserResponse = {
   notificationPrefs: UpdateNotificationPrefsDto | null;
   roles: string[];
   interests: EventCategory[];
+  hasCompletedOnboarding: boolean;
   createdAt: Date;
   updatedAt: Date;
 };
@@ -56,6 +57,7 @@ export class UsersService {
       notificationPrefs: user.notificationPrefs ?? null,
       roles: user.roles ?? [],
       interests: user.interests ?? [],
+      hasCompletedOnboarding: user.hasCompletedOnboarding,
       createdAt: user.createdAt,
       updatedAt: user.updatedAt,
     };

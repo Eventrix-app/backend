@@ -488,6 +488,50 @@ describe('EventsService - Fixed Issues', () => {
     });
   });
 
+  describe('findMyEnrollments', () => {
+    it('returns only the requesting user\'s enrollments, most recent first', async () => {
+      const enrollments = [{ id: 'e2', userId: 'user-1' }, { id: 'e1', userId: 'user-1' }];
+      mockEnrollmentRepo.find.mockResolvedValue(enrollments);
+
+      const result = await service.findMyEnrollments('user-1');
+
+      expect(mockEnrollmentRepo.find).toHaveBeenCalledWith({
+        where: { userId: 'user-1' },
+        relations: ['event', 'ticketType'],
+        order: { createdAt: 'DESC' },
+      });
+      expect(result).toBe(enrollments);
+    });
+  });
+
+  describe('findEnrollments / searchEnrollments — enrollment.user PII scoping', () => {
+    it('findEnrollments scopes the joined user relation to safe fields', async () => {
+      mockEventRepo.findOne.mockResolvedValue({ id: 'event-1', organizerId: 'org-1' });
+      const enrollments = [{ id: 'enr-1' }];
+      mockEnrollmentRepo.find.mockResolvedValue(enrollments);
+
+      const result = await service.findEnrollments('event-1', 'admin-1', ['admin']);
+
+      expect(mockEnrollmentRepo.find).toHaveBeenCalledWith({
+        where: { eventId: 'event-1' },
+        relations: ['user'],
+        select: { user: { id: true, email: true, fullName: true } },
+      });
+      expect(result).toBe(enrollments);
+    });
+
+    it('searchEnrollments scopes the joined user relation to safe fields', async () => {
+      mockEventRepo.findOne.mockResolvedValue({ id: 'event-1', organizerId: 'org-1' });
+      mockEnrollmentRepo.find.mockResolvedValue([]);
+
+      await service.searchEnrollments('event-1', 'Jane', 'admin-1', ['admin']);
+
+      const call = mockEnrollmentRepo.find.mock.calls[0][0];
+      expect(call.relations).toEqual(['user']);
+      expect(call.select).toEqual({ user: { id: true, email: true, fullName: true } });
+    });
+  });
+
   describe('Helper Methods', () => {
     it('canEnroll should return true only for approved upcoming events with tickets', () => {
       const event = new Event();

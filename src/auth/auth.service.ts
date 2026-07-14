@@ -87,6 +87,7 @@ export class AuthService {
       email: user.email,
       full_name: user.fullName || '',
       roles: userRoles,
+      hasCompletedOnboarding: user.hasCompletedOnboarding,
       expiresIn: 3600,
     };
   }
@@ -112,6 +113,10 @@ export class AuthService {
       bio: JSON.stringify({ username }),
       isEmailVerified: false,
       isPhoneVerified: false,
+      // Reaching /auth/register in the app's current flow already means the user went
+      // through the full pre-auth onboarding chain (carousel + interests + location +
+      // notification prefs) — see user.entity.ts.
+      hasCompletedOnboarding: true,
     });
 
     const saved = await this.usersRepository.save(user);
@@ -134,6 +139,7 @@ export class AuthService {
       email: saved.email,
       full_name: saved.fullName || '',
       roles: savedRoles,
+      hasCompletedOnboarding: saved.hasCompletedOnboarding,
       expiresIn: 3600,
     };
   }

@@ -373,7 +373,61 @@ exceeded, and that it resets after the window.
   Worth a quick grep (`@Roles\(` vs. `req.user.id !==`) across controllers if this class
   of bug is suspected elsewhere.
 
-## 6. Sign-off checklist
+## 6. Frontend — Stage 0 mobile screens (browser responsive testing)
+
+Companion coverage for `Frontend/eventriximplementationplan.md`'s Stage 0 (the
+foundation fixes that precede Phase 2's ticket-tier/waitlist/refund UI work). Unlike
+§1-5 above, this section is manual browser testing — there is no Postman collection for
+the mobile app. It exists because Stage 0 is UI + data-wiring work that a `tsc`/`jest`
+pass can't fully catch (real layout, real network responses, real error states).
+
+### 6.0 Prerequisites
+
+1. Start the backend (`npm run start:dev`, default `http://localhost:3000`) with at
+   least a few **approved** events in the DB (free and paid, at least one with a real
+   `coverImageUrl`) — an empty DB will only exercise the empty-state UI, not the real
+   data path.
+2. `Frontend/.env.local` must have `EXPO_PUBLIC_API_URL` pointing at that backend
+   (`http://localhost:3000/api/` locally) and valid `EXPO_PUBLIC_SUPABASE_URL`/
+   `EXPO_PUBLIC_SUPABASE_KEY` (needed for the cover-image upload test, which PUTs
+   directly to Supabase Storage).
+3. From `Frontend/`: `npx expo start --web`. Open the printed `localhost` URL in
+   Chrome or Edge.
+4. Open DevTools (F12) → toggle the device toolbar (Ctrl+Shift+M on Windows) → pick a
+   phone preset (e.g. "iPhone 14 Pro" or "Pixel 7"). These screens are built for a
+   ~390-430px-wide viewport — testing at full desktop width will show stretched/broken
+   layout that isn't a real bug, just the wrong test conditions.
+5. Register or log in through the app's own UI (not Postman) so the RTK Query calls
+   carry a real JWT via `authSlice`.
+
+### 6.1 Screen-by-screen checks
+
+| Screen / Action | Expect | Check |
+|---|---|---|
+| Home tab | Loads real events from `GET /events`, not the old hardcoded mock titles | Featured carousel + "Based on Interest"/"You Might Also Like" sections show actual seeded event titles and real cover images (not a stray URL string, not a blank box) |
+| Home → tap an event card | Navigates straight into Event Details with real data | Confirm it's a real UUID driving the screen, not the old `'1'`/`'2'` mock ids |
+| Explore tab | Same real-data source as Home, with its own loading/error/empty states | Load normally first; then in DevTools Network tab throttle to "Offline", reload the tab, confirm a "Couldn't load events" message with a working Retry button appears — not a stuck spinner |
+| Search tab | Typing/category-chip filtering works against real events | Category chips now filter by real category names (not the old mock lowercase keys) — confirm at least one chip actually narrows the result list |
+| Search — throttle to Offline before opening | Distinct error state, not a false "No events found" | This is the regression test for the fix — confirm you see "Couldn't load events" + Retry, and that it's visually different from the genuine empty-results state |
+| Event Details — valid event | Full details render with no `undefined`/`[object Object]` text anywhere | Category name, organizer name, venue, price all populate from the real nested `category`/`organizer` fields |
+| Event Details — cover image present | Real photo renders on Home's "Based on Interest"/"You Might Also Like" cards, Explore's list, Search's cards, and the Featured carousel | Regression test for the `EventInterestCard`/`MainEventCard` image-source fix — a real `coverImageUrl` must show as an actual photo in all four surfaces, not a blank tile only in some of them |
+| Event Details — force a load failure (e.g. stop the backend mid-navigation, or edit the URL to a malformed id if testing web directly) | "Couldn't load this event" with working Retry and Go back buttons | No infinite spinner |
+| Create Event → cover image upload | Real upload succeeds end-to-end via the fixed signed-URL flow | Pick an image; in the Network tab confirm a `POST` to `uploads/signed-url` (200, returns `{uploadUrl, publicUrl}`), then a `PUT` straight to a `supabase.co` URL (200) — then confirm the on-screen preview shows the uploaded image via `publicUrl` |
+| My Bookings tab | Real enrollment history via `GET /events/my-enrollments`, not the old 4 hardcoded mock bookings | Upcoming/Previous/Cancelled tabs bucket correctly: a `refunded`/`cancelled` enrollment → Cancelled tab; a confirmed enrollment for a past-dated event → Previous; everything else → Upcoming |
+| My Bookings — a paid-ticket enrollment whose webhook hasn't fired | Shows a "Pending Payment" badge, not "Confirmed" | Only testable if such an enrollment exists (see Phase 10 of §3) |
+| My Bookings tab, throttled Offline | "Couldn't load your bookings" + Retry, not a blank/stuck screen | |
+| **Any** `GET /events`, `GET /events/:id`, `GET /events/:id/enrollments`, or `GET /events/:id/enrollments/search` response, inspected in the Network tab | Zero occurrence of `passwordHash` anywhere in the body | Regression test for the PII-leak fix — click the request in DevTools → Response tab → search (Ctrl+F within the panel) for `passwordHash`; must find nothing under `organizer.user` or any enrollment's `user` object |
+
+### 6.2 Known limitations of this pass
+
+Browser/responsive testing only covers what Stage 0 actually touched: data wiring,
+error/loading states, and layout. It does **not** cover camera scanning, offline
+sync-queueing, push notifications, or any other native-only capability — those belong
+to later Phase 2 stages and aren't built yet. This pass is a stand-in for the
+data/layout-correctness portion of a real device test, not a substitute for one before
+shipping.
+
+## 7. Sign-off checklist
 
 - [ ] Phase 0 — Health & Public
 - [ ] Phase 1 — Auth (incl. rate limit)
@@ -389,3 +443,6 @@ exceeded, and that it resets after the window.
 - [ ] Phase 11 — Audit log DB spot-check
 - [ ] Rate-limit summary pass (§4)
 - [ ] Cross-cutting checks (§5)
+- [ ] Frontend Stage 0 — browser responsive pass (§6): Home/Explore/Search real-data +
+      error states, Event Details real data + error state, cover-image upload,
+      My Bookings real data + bucketing, `passwordHash` leak regression check

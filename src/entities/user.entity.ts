@@ -64,6 +64,15 @@ export class User {
   @Column({ name: 'is_banned', default: false })
   isBanned!: boolean;
 
+  // Set once the pre-auth onboarding chain (carousel + interest selection + location +
+  // notification prefs) has been completed for this account — reaching Register in the
+  // app's current flow already implies this, so it's set unconditionally at register
+  // time. Persisted server-side (not just on-device) so it never re-shows for this
+  // account on any device, per product decision — only resets if the account itself is
+  // deleted and recreated.
+  @Column({ name: 'has_completed_onboarding', default: false })
+  hasCompletedOnboarding!: boolean;
+
   @Column({ name: 'banned_reason', type: 'text', nullable: true })
   bannedReason?: string;
 

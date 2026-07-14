@@ -79,6 +79,11 @@ export class EventsController {
     return await this.eventsService.findMyWaitlistEntries(req.user.id);
   }
 
+  @Get('my-enrollments')
+  async findMyEnrollments(@Request() req: Request & { user: JwtPayload }) {
+    return await this.eventsService.findMyEnrollments(req.user.id);
+  }
+
   @Public()
   @Get(':id')
   async findOne(
