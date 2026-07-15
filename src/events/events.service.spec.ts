@@ -182,6 +182,46 @@ describe('EventsService - Fixed Issues', () => {
     });
   });
 
+  describe('Ticket type sales window', () => {
+    it('should reject enrollment before salesStartAt', async () => {
+      const future = new Date(Date.now() + 60 * 60 * 1000);
+      const mockEvent = {
+        id: 'event-1',
+        approvalStatus: EventApprovalStatus.APPROVED,
+        status: EventStatus.UPCOMING,
+        capacity: null,
+        ticketTypes: [{ id: 'tt-1', quantitySold: 0, quantityTotal: 10, salesStartAt: future }],
+        canEnroll: () => true,
+      };
+
+      mockDataSource.transaction.mockImplementation(async (callback) => {
+        const mockManager = { findOne: jest.fn().mockResolvedValue(mockEvent) };
+        return callback(mockManager);
+      });
+
+      await expect(service.enroll('event-1', 'user-1', 'tt-1')).rejects.toThrow(BadRequestException);
+    });
+
+    it('should reject enrollment after salesEndAt', async () => {
+      const past = new Date(Date.now() - 60 * 60 * 1000);
+      const mockEvent = {
+        id: 'event-1',
+        approvalStatus: EventApprovalStatus.APPROVED,
+        status: EventStatus.UPCOMING,
+        capacity: null,
+        ticketTypes: [{ id: 'tt-1', quantitySold: 0, quantityTotal: 10, salesEndAt: past }],
+        canEnroll: () => true,
+      };
+
+      mockDataSource.transaction.mockImplementation(async (callback) => {
+        const mockManager = { findOne: jest.fn().mockResolvedValue(mockEvent) };
+        return callback(mockManager);
+      });
+
+      await expect(service.enroll('event-1', 'user-1', 'tt-1')).rejects.toThrow(BadRequestException);
+    });
+  });
+
   describe('Issue 3: Date/Time Handling', () => {
     it('should auto-calculate duration from start and end times', () => {
       const event = new Event();

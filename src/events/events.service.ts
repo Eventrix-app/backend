@@ -13,7 +13,7 @@ import { UpdateEventDto } from './dto/update-event.dto';
 import { CreateTicketTypeDto } from './dto/create-ticket-type.dto';
 import { UpdateTicketTypeDto } from './dto/update-ticket-type.dto';
 import { AuditLogService } from '../common/audit-log/audit-log.service';
-import { WaitlistService } from '../waitlist/waitlist.service';
+import { WaitlistService, WaitlistEntryWithPosition } from '../waitlist/waitlist.service';
 import { WaitlistEntry } from '../entities/waitlist-entry.entity';
 import { NotificationService } from '../notifications/notification.service';
 import { getEventEndDateTime } from './utils/event-dates.util';
@@ -392,7 +392,7 @@ export class EventsService {
     });
   }
 
-  async findMyWaitlistEntries(userId: string): Promise<WaitlistEntry[]> {
+  async findMyWaitlistEntries(userId: string): Promise<WaitlistEntryWithPosition[]> {
     return this.waitlistService.findMyEntries(userId);
   }
 
@@ -541,7 +541,7 @@ export class EventsService {
 
   // Participant enrollment with atomic, race-safe ticket-type decrement. When the tier
   // is sold out, the request creates a WaitlistEntry instead of failing outright.
-  async enroll(eventId: string, userId: string, ticketTypeId?: string, quantity = 1): Promise<Enrollment | WaitlistEntry> {
+  async enroll(eventId: string, userId: string, ticketTypeId?: string, quantity = 1): Promise<Enrollment | WaitlistEntryWithPosition> {
     const result = await this.dataSource.transaction(async (manager) => {
       let event = await manager.findOne(Event, {
         where: { id: eventId, deletedAt: null as any },
@@ -575,8 +575,17 @@ export class EventsService {
         }
       }
 
-      if (!event.ticketTypes?.some((t) => t.id === resolvedTicketTypeId)) {
+      const resolvedTicketType = event.ticketTypes?.find((t) => t.id === resolvedTicketTypeId);
+      if (!resolvedTicketType) {
         throw new NotFoundException(`Ticket type ${resolvedTicketTypeId} not found on this event`);
+      }
+
+      const now = new Date();
+      if (resolvedTicketType.salesStartAt && now < resolvedTicketType.salesStartAt) {
+        throw new BadRequestException('Ticket sales have not started yet for this ticket type');
+      }
+      if (resolvedTicketType.salesEndAt && now > resolvedTicketType.salesEndAt) {
+        throw new BadRequestException('Ticket sales have ended for this ticket type');
       }
 
       const existing = await manager.findOne(Enrollment, {
@@ -627,7 +636,20 @@ export class EventsService {
         bookingReference,
       });
 
-      let saved = await manager.save(Enrollment, enrollment);
+      // The `existing` check above is an app-level guard, not a lock — two concurrent
+      // enroll() calls for the same user+event can both pass it before either commits.
+      // The Enrollment table's @Unique(['userId','eventId']) constraint is the real
+      // backstop; translate its violation into the same clean 409 the app-level check
+      // gives, instead of letting a raw Postgres error surface as a 500.
+      let saved: Enrollment;
+      try {
+        saved = await manager.save(Enrollment, enrollment);
+      } catch (err) {
+        if ((err as { code?: string })?.code === '23505') {
+          throw new ConflictException('User already enrolled in this event');
+        }
+        throw err;
+      }
 
       // Section 5b: generate signed ticket_code for confirmed events (enclosing enrollmentId and eventId)
       if (saved.status === 'confirmed') {

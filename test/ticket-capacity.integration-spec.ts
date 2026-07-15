@@ -18,6 +18,7 @@ import { Event, EventApprovalStatus, EventStatus } from '../src/entities/event.e
 import { TicketType } from '../src/entities/ticket-type.entity';
 import { Enrollment } from '../src/entities/enrollment.entity';
 import { WaitlistEntry } from '../src/entities/waitlist-entry.entity';
+import { WaitlistEntryWithPosition } from '../src/waitlist/waitlist.service';
 
 const MARKER = `__phase0_test__${Date.now()}`;
 const CAPACITY = 5;
@@ -136,11 +137,11 @@ describe('Ticket capacity oversell protection (integration)', () => {
     expect(rejected).toHaveLength(0);
 
     const fulfilledValues = results
-      .filter((r): r is PromiseFulfilledResult<Enrollment | WaitlistEntry> => r.status === 'fulfilled')
+      .filter((r): r is PromiseFulfilledResult<Enrollment | WaitlistEntryWithPosition> => r.status === 'fulfilled')
       .map((r) => r.value);
 
     const confirmed = fulfilledValues.filter((v): v is Enrollment => v instanceof Enrollment);
-    const waitlisted = fulfilledValues.filter((v): v is WaitlistEntry => v instanceof WaitlistEntry);
+    const waitlisted = fulfilledValues.filter((v): v is WaitlistEntryWithPosition => v instanceof WaitlistEntry);
 
     // Oversell protection invariant carries over unchanged from Phase 0: exactly
     // `capacity` requests are confirmed. Phase 1 adds a waitlist landing spot for the

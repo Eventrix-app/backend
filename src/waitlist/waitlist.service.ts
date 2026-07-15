@@ -1,10 +1,12 @@
 import { ConflictException, Injectable, Logger } from '@nestjs/common';
 import { InjectRepository } from '@nestjs/typeorm';
-import { DataSource, Repository } from 'typeorm';
+import { DataSource, LessThan, Repository } from 'typeorm';
 import { JwtService } from '@nestjs/jwt';
 import { WaitlistEntry, WaitlistStatus } from '../entities/waitlist-entry.entity';
 import { Enrollment } from '../entities/enrollment.entity';
 import { NotificationService } from '../notifications/notification.service';
+
+export type WaitlistEntryWithPosition = WaitlistEntry & { position: number };
 
 @Injectable()
 export class WaitlistService {
@@ -18,7 +20,7 @@ export class WaitlistService {
     private readonly notificationService: NotificationService,
   ) {}
 
-  async join(eventId: string, ticketTypeId: string, userId: string, quantity: number): Promise<WaitlistEntry> {
+  async join(eventId: string, ticketTypeId: string, userId: string, quantity: number): Promise<WaitlistEntryWithPosition> {
     const existing = await this.waitlistRepository.findOne({
       where: { ticketTypeId, userId, status: WaitlistStatus.WAITING },
     });
@@ -36,7 +38,8 @@ export class WaitlistService {
       });
       const saved = await this.waitlistRepository.save(entry);
       this.logger.log(`User ${userId} joined waitlist for ticket type ${ticketTypeId} (qty ${quantity})`);
-      return saved;
+      const position = await this.getPosition(saved);
+      return Object.assign(saved, { position });
     } catch (err) {
       if ((err as { code?: string })?.code === '23505') {
         throw new ConflictException('You are already on the waitlist for this ticket type');
@@ -45,8 +48,30 @@ export class WaitlistService {
     }
   }
 
-  async findMyEntries(userId: string): Promise<WaitlistEntry[]> {
-    return this.waitlistRepository.find({ where: { userId }, order: { createdAt: 'DESC' } });
+  async findMyEntries(userId: string): Promise<WaitlistEntryWithPosition[]> {
+    const entries = await this.waitlistRepository.find({
+      where: { userId },
+      relations: ['event', 'ticketType'],
+      order: { createdAt: 'DESC' },
+    });
+    return Promise.all(
+      entries.map(async (entry) => Object.assign(entry, { position: await this.getPosition(entry) })),
+    );
+  }
+
+  // 1-indexed FIFO position among still-WAITING entries for the same tier. Entries that
+  // have already moved on (promoted/expired/cancelled) report position 0 — there's
+  // nothing to queue for.
+  async getPosition(entry: WaitlistEntry): Promise<number> {
+    if (entry.status !== WaitlistStatus.WAITING) return 0;
+    const aheadCount = await this.waitlistRepository.count({
+      where: {
+        ticketTypeId: entry.ticketTypeId,
+        status: WaitlistStatus.WAITING,
+        createdAt: LessThan(entry.createdAt),
+      },
+    });
+    return aheadCount + 1;
   }
 
   // Called whenever a slot frees up on a ticket type (cancellation or a processed

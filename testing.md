@@ -427,7 +427,114 @@ to later Phase 2 stages and aren't built yet. This pass is a stand-in for the
 data/layout-correctness portion of a real device test, not a substitute for one before
 shipping.
 
-## 7. Sign-off checklist
+## 7. Frontend — Stage 1 mobile screens (ticket-tier authoring)
+
+Companion coverage for Phase 2 item 1: multi-tier ticket creation (`TicketTypeEditor`),
+live fee-estimate preview, and post-creation tier management (`ManageTicketTypesScreen`).
+Same manual-browser-testing setup as §6 — start there first if you haven't already.
+
+### 7.0 Prerequisites
+
+Everything in §6.0, plus: log in as a **brand-new account with no prior events** for at
+least one pass through 7.1 — several of the checks below are regression tests for bugs
+that only reproduce on a first-time organizer (no `Organizer` profile yet).
+
+### 7.1 Create Event — ticket tiers
+
+| Screen / Action | Expect | Check |
+|---|---|---|
+| Create Event → "Ticket Types" section | One blank tier row ("Tier 1") shown by default, no "Remove" link on it | A single-tier event is still the common case — shouldn't require deleting anything to get there |
+| Tap "+ Add Ticket Type" | A second row ("Tier 2") appears | Both rows now show a "Remove" link (only hidden when exactly one tier remains) |
+| Toggle "Free Event" **off** (paid) | Every tier row grows a "Price (INR)" field | |
+| Type a price (e.g. `499`) in a tier's price field, wait ~½s | "You'll receive ₹Y/ticket after fees" appears under that field | Network tab: `GET /payments/fee-estimate?ticketPrice=499`, 200 — text should NOT appear on every keystroke, only after you pause (debounced) |
+| Two tiers with the **same** price | Both show a payout hint | Confirms the fee-estimate cache is shared per price, not refetched per row (not user-visible directly, but the Network tab should show only one request for the shared price) |
+| Toggle "Free Event" back **on** | Price fields disappear from all tiers | Publishing now treats every tier as ₹0 regardless of what was typed earlier |
+| Tap "+ Advanced options" on a tier | Min/Max per order fields + "Sale starts"/"Sale ends" calendar pickers expand | Tapping the date fields opens a real calendar (iOS: inline calendar + Done button; Android: native dialog) — not a text box |
+| Try to Publish with a tier's name left blank | Validation alert: "Every ticket type needs a name" | Blocks save |
+| Try to Publish (paid) with a tier's price left blank/invalid | "Enter a valid price for ..." | |
+| Set Max per order < Min per order on a tier | "Max per order can't be less than min per order for ..." | |
+| Set "Sale ends" earlier than "Sale starts" on a tier | "Sale end date must be after the start date for ..." | |
+| Publish a paid event with 2+ tiers (different prices/quantities) | Success dialog → redirected to My Events | Open the event (or Manage Ticket Types, §7.2) and confirm every tier you configured exists with the right name/price/quantity — this is the core Stage 1 regression test: before this stage, only a single hardcoded "General Admission" tier was ever created |
+| **Cover image + tier creation together (Stage 0 interaction regression)**, brand-new account | Pick a cover image, confirm "Uploaded when you save this event" hint (no network call yet) → tap Publish → event + tiers + image all succeed | Network tab: `POST /events` (201) fires *before* `POST /uploads/signed-url` (200, not 403) — confirms the upload-after-create ordering still holds now that tier creation shares the same save path |
+| **Double-submit regression**: rapidly double-tap "Publish Event" | Only one event is created | Check My Events afterward — should show exactly one new event, not two identically-named ones; only the tapped button should have shown a spinner, the other stayed as plain disabled text |
+| Edit an **existing** event (tap Edit from a draft, or Manage Event → Edit) | "Ticket Types" section is replaced by a note: *"Ticket tiers are managed from 'Manage Ticket Types' on the event page..."* | No tier editor shown in edit mode at all — confirm saving the edit doesn't create/change any tiers (check Manage Ticket Types before/after, count should be unchanged) |
+
+### 7.2 Manage Ticket Types (post-creation)
+
+Reach this from `EventDetailsScreen` as the owning organizer: owner-actions block →
+"Manage Ticket Types" (below "Manage Event").
+
+| Screen / Action | Expect | Check |
+|---|---|---|
+| Open Manage Ticket Types on an event with unsold tiers | Each tier renders as an editable card (name, price, quantity, min/max, sale window, Save Changes, Remove) | |
+| Change a field (e.g. price) and tap "Save Changes" | "Saved" alert; `PATCH /events/:id/ticket-types/:id` in Network tab, 200 | Re-open the screen (or check `GET /events/:id/ticket-types`) and confirm the change persisted |
+| Tap "Remove" on an unsold tier | Confirm dialog ("Remove this tier?" / Cancel / Delete) | **Cancel** → nothing happens, tier still listed. **Delete** → tier disappears from the list |
+| Scroll to "Add a New Tier" at the bottom, fill in name + price, tap "+ Add Ticket Type" | "Tier added" alert; new tier appears in the editable list above; form resets to blank | `POST /events/:id/ticket-types`, 201 |
+| **Double-submit regression**: rapidly double-tap "+ Add Ticket Type" | Only **one** new tier is created | Count tiers before/after — this exact bug (two identical tiers from one double-tap) was caught and fixed during review; if you see two, it's regressed |
+| Book a ticket against a tier (see §8) so its `quantitySold > 0`, then revisit this screen | That tier now renders as a **read-only** card: "🔒 Has sales" badge, no input fields, no Remove link, with a note explaining tiers with sales can't be edited/removed | Other, still-unsold tiers on the same event stay fully editable — the lock is per-tier, not per-event |
+| Try to circumvent the lock by re-fetching after a sale (pull-to-refresh / navigate away and back) | Locked tier stays locked | Confirms this is server-enforced (`quantitySold > 0` check on the backend), not just a client-side hide |
+| **Sale-window round-trip regression**: set "Sale ends" to *today's* date on a tier, Save, then re-open Manage Ticket Types (navigate away and back) | "Sale ends" still shows the **same date** you picked, not the day before | Regression test for a timezone bug found in review: dates used to be sent as UTC-midnight, which both (a) cut sales off up to a full day early, and (b) could display one day earlier than picked when re-opened. Both are fixed — this check confirms the fix holds |
+| **Sale-window edge case (known nuance, not a bug)**: try setting a tier's "Sale ends" to the exact same calendar date as the event itself, on an event whose own end time is earlier in the day | May be rejected: *"salesEndAt cannot be after the event ends"* | This can legitimately happen now that "sale ends" correctly means "through the end of that day" — if you hit it, either pick the day before, or leave "Sale ends" blank (defaults to no cutoff). Not a bug to file, just worth knowing about so it isn't mistaken for one |
+
+## 8. Frontend — Stage 2 mobile screens (tier selection, booking, waitlist)
+
+Companion coverage for Phase 2 item 2. Requires at least one **approved** event with
+2+ ticket tiers from §7 — ideally one tier with `quantityTotal: 1` so you can actually
+drive it to sold-out without needing many test accounts.
+
+### 8.0 Prerequisites
+
+Everything in §6.0/§7.0. You'll need **two** logged-in accounts (or one account plus a
+second browser/incognito window) to exercise sold-out → waitlist.
+
+### 8.1 Tier picker & booking
+
+| Screen / Action | Expect | Check |
+|---|---|---|
+| Open Event Details for a multi-tier event, as a participant (not the owner) | A "Tickets" section lists every tier: name, price, remaining count | Owner viewing their own event should **not** see this section (they get Manage Event/Manage Ticket Types/Check In instead) |
+| Tap a tier row | Row highlights (pink border); a quantity stepper appears below the list, starting at that tier's `minPerOrder` | |
+| Tap the stepper's `+`/`−` | Quantity changes, clamped between `minPerOrder` and `min(maxPerOrder, remaining)` | Buttons visibly dim and stop responding exactly at each boundary |
+| Footer button while an available tier is selected | Reads "Book Now" | |
+| Tap "Book Now" on the `quantityTotal: 1` tier | "Booked!" dialog → on dismiss, redirected to Bookings | Bookings → Upcoming tab shows the new booking |
+| **Stale-cache regression**: without navigating away, look at the same tier's "remaining" count on Event Details | Immediately shows one less (or "Sold out — join waitlist") | This tier list used to only refresh after leaving and returning to the screen — confirm it now updates right after your own booking, same session |
+| **Double-submit regression**: rapidly double-tap "Book Now" on a tier with 1 remaining | Only **one** booking is created | Check Bookings afterward — exactly one entry. If you instead see a raw error/crash, that's the race this fix targets — should get a clean rejection, not a 500 |
+| From a **second** account, select the now-sold-out tier | Row shows "Sold out — join waitlist" in red; footer button reads "Join Waitlist" | |
+| Tap "Join Waitlist" | Dialog: "You're on the Waitlist" — "You're #1 in line for '<tier name>'" → on dismiss, redirected to Bookings | |
+| Bookings → **Waitlist** tab (new 4th tab, between Previous and Cancelled) | Shows the waitlist entry: event title, "#1 in line" badge, tier name, quantity | |
+| Try joining the same tier's waitlist again with the same account | Rejected — "You are already on the waitlist for this ticket type" | No duplicate waitlist entries |
+
+### 8.2 Sale-window-aware tier states
+
+Using a tier configured in §7.1 with a future "Sale starts" date, and one with a past
+"Sale ends" date:
+
+| Screen / Action | Expect | Check |
+|---|---|---|
+| Tier with a future "Sale starts" date | Row shows *"On sale from &lt;date&gt;"* in italic, greyed out, **not tappable** | If it's the only/first tier, the footer should show "Not on Sale Yet" and stay disabled |
+| Tier with a past "Sale ends" date | Row shows *"Sales closed"* in italic, greyed out, not tappable | Footer shows "Sales Closed" if selected |
+| Attempt to force-book a closed/not-yet-open tier anyway (e.g. via direct API call with its `ticketTypeId`, bypassing the UI) | `POST /events/:id/enroll` → 400, *"Ticket sales have not started yet..."* / *"...have ended..."* | Confirms this is enforced server-side, not just hidden in the UI |
+
+### 8.3 Waitlist promotion
+
+Requires a confirmed booking + at least one waitlisted user on the same sold-out tier
+(from §8.1).
+
+| Screen / Action | Expect | Check |
+|---|---|---|
+| Cancel the confirmed booking (from `TicketDetailsScreen`, if a cancel action is wired up — otherwise via `PATCH /events/enrollments/:id/cancel` directly) | The tier's capacity frees up | |
+| Re-check the waitlisted account's Bookings → Waitlist tab | The entry is **gone** from Waitlist | It should now appear as a real confirmed booking under Upcoming instead — this is `WaitlistService.promoteNext()` firing off the cancellation |
+
+### 8.4 Known limitations of this pass
+
+- No "leave waitlist" action exists in the UI (or the backend) — explicitly out of scope
+  per the Phase 2 plan; joining is one-directional until promoted or the event passes.
+- `isHidden` and `accessPassword` tier fields (password-gated/invite-only tiers) are
+  supported by the backend DTO but not exposed anywhere in `TicketTypeEditor` or
+  `ManageTicketTypesScreen` — out of scope for this stage.
+- Camera-based check-in, offline sync, and push notifications are still not built
+  (later Phase 2 stages) — not covered here.
+
+## 9. Sign-off checklist
 
 - [ ] Phase 0 — Health & Public
 - [ ] Phase 1 — Auth (incl. rate limit)
@@ -446,3 +553,11 @@ shipping.
 - [ ] Frontend Stage 0 — browser responsive pass (§6): Home/Explore/Search real-data +
       error states, Event Details real data + error state, cover-image upload,
       My Bookings real data + bucketing, `passwordHash` leak regression check
+- [ ] Frontend Stage 1 — ticket-tier authoring (§7): multi-tier create + fee-estimate
+      preview + validation, cover-image/tier-creation interaction, double-submit
+      regression on Publish, Manage Ticket Types add/edit/delete + lock-on-sale,
+      double-submit regression on Add Ticket Type, sale-window round-trip regression
+- [ ] Frontend Stage 2 — tier selection & waitlist (§8): tier picker + quantity stepper,
+      book a tier to sold-out, stale-cache regression, double-submit regression on Book
+      Now, waitlist join + position display, sale-window-aware tier states (server-side
+      enforced), waitlist auto-promotion on cancellation
