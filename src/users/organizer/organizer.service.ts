@@ -1,7 +1,7 @@
 import { Injectable, NotFoundException, Logger } from '@nestjs/common';
 import { InjectRepository } from '@nestjs/typeorm';
 import { Repository } from 'typeorm';
-import * as bcrypt from 'bcrypt';
+import * as bcrypt from 'bcryptjs';
 import { UpdateOrganizerDto } from './dto/update-organizer.dto';
 import { User } from '../../entities/user.entity';
 import { Organizer, VerificationLevel } from '../../entities/organizer.entity';
