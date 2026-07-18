@@ -39,6 +39,26 @@ export class EventsController {
     private readonly uploadsService: UploadsService,
   ) { }
 
+  // Admin-only testing endpoint: seed N events with a shared cover image.
+  // All events are free → auto-approved and immediately visible in the app.
+  // Declared before @Post() to guarantee NestJS registers it before the base route.
+  @Roles('admin')
+  @Post('bulk-seed')
+  @HttpCode(HttpStatus.CREATED)
+  async bulkSeed(
+    @Body('count') count: number,
+    @Body('coverImageUrl') coverImageUrl: string,
+    @Body('categoryId') categoryId: string,
+    @Request() req: Request & { user: JwtPayload },
+  ) {
+    if (!count || count < 1 || count > 100) {
+      throw new BadRequestException('count must be between 1 and 100');
+    }
+    if (!coverImageUrl) throw new BadRequestException('coverImageUrl is required');
+    if (!categoryId) throw new BadRequestException('categoryId is required');
+    return this.eventsService.bulkSeed(req.user.id, req.user.roles, count, coverImageUrl, categoryId);
+  }
+
   @Post()
   async create(
     @Body() createEventDto: CreateEventDto,

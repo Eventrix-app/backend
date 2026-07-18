@@ -220,6 +220,81 @@ export class EventsService {
     });
   }
 
+  // Testing-only: create N events in one shot, all sharing the same cover image.
+  // Events are free → auto-approved so they show up immediately in the app.
+  async bulkSeed(
+    userId: string,
+    userRoles: string[],
+    count: number,
+    coverImageUrl: string,
+    categoryId: string,
+  ): Promise<Event[]> {
+    await this.validateCategory(categoryId);
+
+    const venues = [
+      { name: 'The Grand Arena', address: 'MG Road, Bangalore' },
+      { name: 'City Convention Centre', address: 'Connaught Place, New Delhi' },
+      { name: 'Skyline Rooftop', address: 'Bandra West, Mumbai' },
+      { name: 'Riverside Pavilion', address: 'Anna Salai, Chennai' },
+      { name: 'Tech Park Auditorium', address: 'Hitech City, Hyderabad' },
+    ];
+
+    const titles = [
+      'Startup Summit', 'Music Fest', 'Art & Culture Expo', 'Food Carnival',
+      'Tech Conference', 'Comedy Night', 'Fitness Bootcamp', 'Photography Walk',
+      'Book Fair', 'Dance Workshop', 'Gaming Tournament', 'Wellness Retreat',
+      'Film Screening', 'Hackathon', 'Fashion Show',
+    ];
+
+    const imageUrls = [
+      'https://zlgvwkdlifdpfncagcuc.supabase.co/storage/v1/object/public/event-images/event-covers/cd485a16-fa8b-485d-b86d-62240662c22f/8642896f-89ab-4bd2-b0cf-df04a065dc5c.png',
+      'https://zlgvwkdlifdpfncagcuc.supabase.co/storage/v1/object/public/event-images/event-covers/cd485a16-fa8b-485d-b86d-62240662c22f/3c2a247c-8e50-4cea-a3cc-e9d5bec21723.jpg',
+      'https://zlgvwkdlifdpfncagcuc.supabase.co/storage/v1/object/public/event-images/event-covers/cd485a16-fa8b-485d-b86d-62240662c22f/a21ae486-d43a-4581-be2d-19bf3e96bed7.png',
+      'https://zlgvwkdlifdpfncagcuc.supabase.co/storage/v1/object/public/event-images/event-covers/cd485a16-fa8b-485d-b86d-62240662c22f/aaef70eb-0d2c-4d25-b801-950104f3d3ad.jpg',
+    ];
+
+    const results: Event[] = [];
+    const today = new Date();
+
+    for (let i = 0; i < count; i++) {
+      const daysAhead = 3 + (i % 30);
+      const eventDate = new Date(today);
+      eventDate.setDate(today.getDate() + daysAhead);
+      const dateStr = eventDate.toISOString().split('T')[0];
+
+      const venue = venues[i % venues.length];
+      const title = `${titles[i % titles.length]} ${i + 1}`;
+      // Cycle through all 4 real cover images; fall back to the caller-supplied URL
+      // only if the built-in pool is somehow exhausted (shouldn't happen in practice).
+      const resolvedCover = imageUrls[i % imageUrls.length] ?? coverImageUrl;
+
+      const dto: CreateEventDto = {
+        title,
+        description: `This is a seeded test event — ${title}. Created for development and QA purposes.`,
+        categoryId,
+        venueName: venue.name,
+        venueAddress: venue.address,
+        eventDate: dateStr,
+        startTime: '10:00',
+        endTime: '18:00',
+        coverImageUrl: resolvedCover,
+        imageUrl: resolvedCover,
+        featured: i % 3 === 0,
+        isOnline: false,
+        pricePerTicket: 0,
+        totalCapacity: 100,
+        availableTickets: 100,
+        ticketTypes: [{ name: 'General Admission', price: 0, quantityTotal: 100 }],
+      };
+
+      const event = await this.createForUser(dto, userId, userRoles);
+      results.push(event);
+    }
+
+    this.logger.log(`Bulk seeded ${results.length} events by user ${userId}`);
+    return results;
+  }
+
   async findAll(page: number = 1, limit: number = 20): Promise<{ events: Event[]; total: number; page: number; totalPages: number }> {
     const skip = (page - 1) * limit;
     
