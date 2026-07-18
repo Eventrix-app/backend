@@ -12,6 +12,8 @@ import { UpdateNotificationPrefsDto } from './dto/update-notification-prefs.dto'
 import { User } from '../../entities/user.entity';
 import { EventCategory } from '../../entities/category.entity';
 import { JwtPayload } from '../../auth/jwt.util';
+import { CacheService } from '../../common/cache/cache.service';
+import { userMeCacheKey } from '../users.service';
 
 const BCRYPT_ROUNDS = 10;
 
@@ -51,6 +53,7 @@ export class ParticipantService {
     @InjectRepository(EventCategory)
     private readonly categoryRepository: Repository<EventCategory>,
     private readonly jwtService: JwtService,
+    private readonly cache: CacheService,
   ) {}
 
   /**
@@ -211,6 +214,9 @@ export class ParticipantService {
 
     const updatedUser = await this.usersRepository.save(user);
     this.logger.log(`Updated participant in database: ${updatedUser.email}`);
+    // Writes here land on the same `users` row GET /users/me (UsersService.findMe) reads
+    // and caches — bust that cache key too or the caller would see stale data for its TTL.
+    await this.cache.del(userMeCacheKey(id));
     return this.mapUserToParticipantRecord(updatedUser);
   }
 
@@ -258,5 +264,6 @@ export class ParticipantService {
     }
     await this.usersRepository.softRemove(user);
     this.logger.log(`Soft-deleted participant in database: ${user.email}`);
+    await this.cache.del(userMeCacheKey(id));
   }
 }

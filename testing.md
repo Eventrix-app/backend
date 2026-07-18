@@ -534,7 +534,444 @@ Requires a confirmed booking + at least one waitlisted user on the same sold-out
 - Camera-based check-in, offline sync, and push notifications are still not built
   (later Phase 2 stages) — not covered here.
 
-## 9. Sign-off checklist
+## 9. Frontend — Stage 3 mobile screens (offline-first check-in, real-device testing)
+
+Companion coverage for Phase 2 item 3: camera QR scanning (`expo-camera`) and
+offline-first check-in with a reconnect sync queue. **Unlike §6-8, this cannot be
+tested in a browser or emulator/simulator alone** — `expo-camera` is native code, and
+airplane-mode/reconnect behavior needs a real radio, which simulators/emulators don't
+reliably provide. Both require an actual physical phone.
+
+### 9.0 Prerequisites
+
+1. **A dev-client build is required — Expo Go will not work.** `expo-camera` is a
+   native module and the app already runs on `expo-dev-client`. From `Frontend/`:
+   - Fastest for local iteration: `npx expo run:android` (device connected via USB with
+     USB debugging on) or `npx expo run:ios` (Mac + cable, or `eas build` for a
+     non-Mac iOS build).
+   - Or a shareable build: `eas build --profile development --platform android` (or
+     `ios`), then install the resulting `.apk`/build on the phone.
+   - If `android/`/`ios/` native folders already existed **before** the `expo-camera`
+     plugin was added to `app.json`, run `npx expo prebuild --clean` first (or just use
+     `eas build`, which always prebuilds fresh) — otherwise the native project won't
+     have the camera permission wired in and the permission prompt in §9.1 will never
+     appear correctly.
+2. Point the device at a **reachable** backend — `localhost` on the phone is not your
+   dev machine. Either run the backend on your machine and set `Frontend/.env.local`'s
+   `EXPO_PUBLIC_API_URL` to your machine's LAN IP (e.g. `http://192.168.1.x:3000/api/`,
+   phone and dev machine on the same Wi-Fi), or point it at the deployed backend URL.
+   Rebuild/reload the app after changing this.
+3. Log in as an **organizer** who owns at least one approved event with a confirmed
+   (`paymentStatus: "paid"`) enrollment — Check In is reached from that event's owner
+   actions (`EventDetailsScreen` → "Check In Attendees"). Create that enrollment via
+   §8's booking flow first if you don't have one.
+4. **Getting a scannable QR code**: `TicketDetailsScreen` does not yet render a real
+   QR image for a ticket (`react-native-qrcode-svg` is a later Stage 6 dependency, not
+   installed yet) — it currently only shows the raw `ticketCode` string as text
+   underneath a placeholder pattern. To actually test the camera path (not just manual
+   entry):
+   - Open `TicketDetailsScreen` for the confirmed enrollment from step 3, copy the
+     `ticketCode` text shown there.
+   - Paste that exact string into any QR generator (e.g. a free online QR-code
+     generator, or `npx qrcode-terminal "<code>"` / the Python `qrcode` package
+     locally) and display the resulting QR on a second screen/monitor, or print it.
+   - Manual entry (pasting the code directly into the "Ticket Code" field) is a fully
+     valid substitute for exercising every check-in behavior below **except** the
+     camera/permission checks in §9.1 — use it freely for §9.2-9.4 if a second screen
+     isn't available.
+
+### 9.1 Camera permission & scanning
+
+| Action | Expect | Check |
+|---|---|---|
+| First time opening Check In → QR/Code tab | OS camera-permission prompt appears | Android/iOS system dialog, text matches `app.json`'s `cameraPermission` string ("Allow Eventrix to use the camera to scan attendee ticket QR codes.") |
+| Deny permission | Placeholder shown instead of a live camera feed: "Camera access is needed to scan QR codes." + a "Grant Camera Access" button | No crash, manual entry field still fully usable below it |
+| Tap "Grant Camera Access" after denying | Re-prompts (or, on Android if "Don't ask again" was checked, does nothing — OS-level, not app-level) | If stuck, grant manually via OS Settings → Apps → Eventrix → Permissions → Camera, then reopen the screen |
+| Grant permission | Live camera preview renders in place of the placeholder | |
+| Point the camera at the QR from §9.0 step 4 | Scan registers automatically — no shutter button to tap | Should fire the same check-in flow as manual entry (see §9.2), with a success/already-used/invalid alert |
+| Hold the same QR in frame for several seconds after a successful scan | Only **one** check-in fires, not repeated ones per frame | Debounced: identical scanned data within ~2.5s of the last scan is ignored (`lastScanRef` in `CheckInScreen.tsx`) |
+| Scan a QR encoding garbage (not a real ticketCode) | "Invalid Ticket" alert, not a crash | |
+
+### 9.2 Online check-in (baseline regression)
+
+With Wi-Fi/cellular on normally:
+
+| Action | Expect | Check |
+|---|---|---|
+| Scan/enter a valid, not-yet-used ticket code | "✅ Checked In" alert | `POST /events/check-in` in this session succeeds; re-check via `GET /events/:id/enrollments` (Postman/DB) that `checkedInAt` is set |
+| Scan/enter the same code again | "Already Checked In" alert | Backend's `ConflictException`, not a silent success |
+| Switch to Search-by-Name tab | The just-checked-in attendee shows a green "✓ In" badge | Confirms `getEventEnrollments` refetches/re-tags correctly after `checkIn` (the `providesTags`/`invalidatesTags` fix) without needing to leave and re-enter the screen |
+
+### 9.3 Offline-first check-in (airplane mode) — the core new capability
+
+1. While still on Check In with the QR/Code tab open, **enable Airplane Mode** on the
+   device.
+2. Confirm the screen **stays visible and usable** — this is the regression test for
+   the `NetworkGate`/`ServerGate` exemption (§3.0 of the implementation). Before that
+   fix, the entire app would blank to a full-screen "You're offline" screen the instant
+   connectivity dropped, making the rest of this section untestable.
+
+| Action | Expect | Check |
+|---|---|---|
+| An orange/yellow banner appears near the top of the screen | "📴 Offline — check-ins are being saved locally" | |
+| Scan/enter a ticket code that's in the cached attendee list and not yet checked in | "✓ Checked In (Offline)" alert — distinct wording from the online success alert | No network request needs to succeed for this — it's validated entirely against the locally cached list (`checkInCacheSlice`) |
+| Switch to Search-by-Name | That attendee now shows "✓ In" immediately, and the banner's pending count increments (e.g. "· 1 pending") | Confirms the local overlay (`pendingSync`) merges into the displayed list without a network round-trip |
+| Try the same ticket code again (still offline) | "Already Checked In" | Sourced from the local cache, not the backend |
+| Try a ticket code that was never fetched into the cache for this event (e.g. a brand-new enrollment created after you last had connectivity) | "Invalid Ticket" with a message about reconnecting to refresh the cache | This is a real, expected limitation — the offline cache is only as fresh as the last successful online `GET /events/:id/enrollments` |
+| Check in **several** different attendees while still offline | Banner's pending count increments each time | |
+| **Kill the app entirely** (swipe away from app switcher) while still offline with a nonzero pending count, then reopen it | Still offline (airplane mode persists across app restarts) — reopen Check In for the same event | The banner still shows the correct pending count and the previously offline-checked-in attendees still show "✓ In" | Confirms `checkInCacheSlice` is actually persisted via `redux-persist`/`AsyncStorage`, not just in-memory |
+
+### 9.4 Reconnect sync drain
+
+Continuing directly from §9.3 (app reopened, still offline, nonzero pending count):
+
+| Action | Expect | Check |
+|---|---|---|
+| **Disable Airplane Mode** (reconnect) | Within a few seconds, the pending count drops to 0 and the offline banner disappears | `useCheckInSyncRetry` fires on the `NetInfo` reconnect event, replaying `POST /events/check-in` for each queued ticket code |
+| While this is happening, check the Network tab (if testing via `expo start` with remote debugging) or the backend logs | One `POST /events/check-in` per previously-queued ticket, each succeeding | |
+| After the drain finishes, verify via `GET /events/:id/enrollments` (Postman/DB) | Every offline-checked-in attendee now shows a real `checkedInAt` timestamp from the backend, not just the locally-set one | This is the actual end-to-end proof the queue landed — a client-side "✓ In" badge alone doesn't prove the backend was updated |
+| **Reconnect while the app is closed**, then reopen it | Pending count is still drained (not stuck at nonzero) | `useCheckInSyncRetry`'s mount-time check (not just its reconnect listener) drains any already-pending queue whenever the app launches online — confirms the sync isn't solely dependent on catching the exact reconnect transition while the app happens to be running |
+| **Conflict case**: from a second device (or Postman, using an admin/organizer token), check in one of the same tickets **online** before the first device reconnects, then reconnect the first device | The first device's queued sync for that ticket resolves silently (no error alert, no retry loop) — the pending count still drops to 0 | The backend's "already checked in" response is treated as an already-resolved outcome by `useCheckInSyncRetry`, not a failure — by design, this does **not** currently surface a distinct "someone else already checked this ticket in" notice to the organizer; just confirm nothing crashes or retries forever |
+
+### 9.5 Scoping regression — the gate exemption must stay narrow
+
+Confirms §3.0's fix didn't accidentally disable the network/server gates app-wide:
+
+| Action | Expect | Check |
+|---|---|---|
+| While offline (airplane mode) on Check In, navigate **back** to any other screen (e.g. Home) | The full-screen "You're offline" gate **does** appear now | Proves the exemption is scoped to the Check In screen only, not a global bypass |
+| Return to Check In while still offline | Gate disappears again, Check In is usable | |
+| With connectivity restored but the **backend stopped** (`Ctrl+C` the `npm run start:dev` process), open/stay on Check In | Screen stays usable (same offline-cache behavior as §9.3, since requests will fail) | `ServerGate`'s exemption |
+| Navigate away from Check In while the backend is still stopped | Full-screen "We can't reach our servers right now" gate appears | Restart the backend before continuing other tests |
+
+### 9.6 Known limitations of this pass
+
+- No real QR is rendered anywhere in the app yet for a tester to scan directly off
+  another Eventrix screen — see the workaround in §9.0 step 4. This closes once
+  `react-native-qrcode-svg` is wired into `TicketDetailsScreen` (Stage 6).
+- A sync conflict (same ticket checked in on two devices before either syncs) resolves
+  silently rather than surfacing a distinct notice to the organizer — see §9.4's last
+  row. Acceptable for v1 per the implementation plan; flag to product if a visible
+  conflict notice becomes a requirement.
+- This section assumes a single active Check In session per device. The sync-drain
+  hook (`useCheckInSyncRetry`) does drain **all** cached events' queues, not just the
+  currently open one, but this pass only exercises one event at a time.
+
+## 10. Frontend (mobile app) — Account, Saved Events & Notifications (real-device testing)
+
+Companion coverage for the account-data bugs fixed in this pass: `ProfileScreen`,
+`EditProfileScreen`, `SavedEventsScreen`, and `NotificationsScreen` previously ran entirely
+on hardcoded mock data (`MOCK_USER`/`MOCK_EVENTS`/`MOCK_NOTIFICATIONS`) with zero connection
+to the real backend — every user saw the same fake identity, and "Save Changes" silently
+discarded whatever was typed. This section verifies the real wiring. Each test below states
+**what** is being verified, **how** to drive it, and the **exact pass condition** — if the
+screen doesn't match the pass condition, the test fails and the bug isn't actually fixed.
+
+Real-device build required (same dev-client build used for §9 — Expo Go is fine for *this*
+section specifically, since nothing here touches `expo-camera` or other native modules, but
+using the same dev-client build you already have is simplest).
+
+### 10.0 Prerequisites
+
+1. Run the two new migrations before testing anything in this section — both `Favorites`
+   and `Notifications` are new tables:
+   ```
+   npm run typeorm migration:run
+   ```
+   Confirm `favorites` and `notification_jobs.read_at` exist (`\d favorites`, `\d
+   notification_jobs` in `psql`, or just proceed — a missing table/column will surface as
+   a 500 on the relevant request, which is itself a clear fail signal).
+2. Point the device at a reachable backend (see §9.0 step 2 if you need the LAN-IP
+   reminder) and log in as a real, non-demo account through the app itself.
+3. Have a **second** test account (or a second device/session) available for the
+   Notifications tests — some of those notifications are only generated by an organizer's
+   action affecting a participant's booking.
+
+### 10.1 Profile screen shows the real logged-in account
+
+**What**: `ProfileScreen` (reached via the avatar icon on Home or Explore) reflects the
+actual logged-in user, not a fixed mock identity.
+
+**How**:
+1. Log in as Account A. Open Profile (Home → top-right avatar, or Explore → avatar icon).
+2. Note the name, email, and city shown.
+3. Log out, log in as a **different** Account B. Open Profile again.
+
+**Pass when**: Account A's profile shows Account A's real name and email (matching what
+they registered with), Account B's shows Account B's — the two are visibly different, and
+neither shows a name/email you didn't set up. The "Events" / "Saved" / "Bookings" numbers
+in the stats row are `0`s (or accurate low counts) for a fresh account, not the old fixed
+mock numbers (4 events attended, 12 saved, etc.). If a `profilePictureUrl` was ever set on
+this account, a real photo renders in the avatar circle; otherwise a single-letter initial
+renders (not an emoji).
+
+### 10.2 Edit Profile actually persists
+
+**What**: `EditProfileScreen`'s "Save Changes" writes to the real account (`PATCH
+/participants/:id`) instead of just calling `navigation.goBack()`.
+
+**How**:
+1. From Profile, tap "Edit Profile".
+2. Confirm the First Name / Last Name / Phone / City fields are pre-filled with your
+   **real** current values (not blank, not a mock name) — this alone is a regression test,
+   since the previous version always pre-filled from `MOCK_USER` regardless of who was
+   logged in.
+3. Change the City field to something new and distinctive (e.g. "TestCity123"). Tap "Save
+   Changes".
+4. Force-close the app entirely (not just background it) and reopen it. Navigate back to
+   Edit Profile.
+
+**Pass when**: Step 3 shows a brief loading state on the button then returns you to
+Profile without an error. Step 4's reopened Edit Profile screen shows **"TestCity123"** —
+proving the value round-tripped through the real backend and wasn't just a local, in-memory
+change that reset on app restart. Also confirm the Email field is shown as **read-only**
+text (not an editable input) — email changes aren't wired here on purpose (see the bug
+report's rationale: changing login email needs its own verification flow).
+
+### 10.3 Save/heart toggle on Event Details + Saved Events list
+
+**What**: The heart icon on `EventDetailsScreen`'s hero image, and `SavedEventsScreen`,
+both used to be pure local UI state / mock data with no backend connection at all.
+
+**How**:
+1. Open any approved event's details as a participant (not the owning organizer — owners
+   don't see the tickets/save UI the same way).
+2. Tap the heart icon in the top-right of the cover image. It should fill in
+   (🤍 → ❤️) immediately.
+3. Navigate back, then go to Profile → "Saved Events".
+4. Return to the same event's details and tap the heart again to un-save it.
+5. Go back to Saved Events.
+6. **Kill the app entirely**, reopen it, log back in (if needed), and check Saved Events
+   once more.
+
+**Pass when**: After step 2, the heart shows filled (❤️). After step 3, that exact event
+appears in the Saved Events list with its real title/cover image/venue (not a mock card).
+After step 4, the heart reverts to empty (🤍). After step 5, the event is gone from Saved
+Events. After step 6, the list still correctly reflects whatever save/unsave state you left
+it in — confirming this is backend-persisted (`GET /events/my-favorites`), not just
+client-side Redux state that resets on a fresh app launch.
+
+### 10.4 Notifications list — real jobs, not mock data
+
+**What**: `NotificationsScreen` now lists real `NotificationJob` rows via `GET
+/notifications` instead of `MOCK_NOTIFICATIONS`, with working mark-as-read.
+
+**How** (generating a real notification — pick any one of these three, using your second
+test account or a Postman/organizer session for the triggering half):
+- **Event-changed**: As Account A, book a ticket to an event owned by an organizer account
+  you control. As the organizer, `PATCH` that event's `eventDate` or `venueName` (via the
+  app's Manage Event screen, or directly via Postman if that screen doesn't exist yet).
+- **Waitlist-promoted**: Book the last available ticket on a `quantityTotal: 1` tier as
+  Account A, then join the waitlist for the same tier as Account B, then cancel Account A's
+  booking. Account B should get promoted.
+- **Refund status**: As Account A, request a refund on a paid, confirmed booking (see
+  Phase 10, §3), then approve or reject it as the organizer/admin.
+
+Then, as the account that should have received the notification:
+1. Open Notifications (Profile → 🔔 Notifications, or the bell icon on Home/Explore).
+2. Observe the new entry.
+3. Tap the unread entry.
+4. If more than one unread entry exists, tap "Mark all" in the header.
+
+**Pass when**: Step 2 shows a new card with a **pink-tinted border**, a **bold title**, and
+a small pink dot — matching one of these titles depending on which trigger you used:
+"Event updated" / "You're in!" / "Refund update". The unread banner above the list
+("N unread notifications") reflects the correct count. The relative time (e.g. "Just now",
+"5m ago") is accurate, not a mock timestamp. Step 3 removes the bold styling and pink dot
+from that card immediately (confirms `PATCH /notifications/:id/read` fired). Step 4 clears
+every remaining unread card and banner at once (confirms `PATCH /notifications/read-all`).
+Force-closing and reopening the app should NOT bring back the "unread" styling on
+already-read notifications — if it does, the read state isn't actually persisting server-side.
+
+---
+
+## 11. eventrix-welcome-flow (Next.js web) — real backend auth (real-device / browser testing)
+
+Companion coverage for the two fixes made to `eventrix-welcome-flow`: the `.env.local`
+`BACKEND_URL` double-`/api` bug (login/register were completely broken against the
+deployed backend before this fix), and `forgot-password`/`reset-password` being rewired
+from a local demo-only user store to the real backend's OTP-based endpoints. "Real device"
+here means a genuine phone/tablet browser hitting the deployed site (or your LAN IP for a
+local dev server) — not just a resized desktop browser window, since mobile Safari/Chrome
+have their own quirks (viewport units, autofill, on-screen keyboard covering inputs) that
+a desktop-only pass won't catch.
+
+### 11.0 Prerequisites
+
+1. Either use the deployed site, or run `npm run dev` from `eventrix-welcome-flow/` and
+   access it from a phone on the same Wi-Fi via your machine's LAN IP (`http://192.168.x.x:3000`) — `localhost` on your dev machine is not reachable from a phone.
+2. Confirm `eventrix-welcome-flow/.env.local`'s `BACKEND_URL` is the **bare origin only**
+   (e.g. `https://backend-one-virid-16.vercel.app`, no trailing `/api`, no trailing slash)
+   — this is the fix from earlier in this pass; if it's misconfigured again, every test
+   below will fail with what looks like a generic network error.
+3. Have a real, already-registered account's credentials on hand, plus access to the
+   backend's server console/logs (Vercel's function logs, or your local terminal running
+   `npm run start:dev`) — the OTP for password reset is only ever printed there, never
+   returned to the browser.
+
+### 11.1 Login / Register — real backend round-trip (regression)
+
+**What**: Confirms the `BACKEND_URL` fix actually holds — this is the bug that made every
+login/register attempt 404 before it was fixed.
+
+**How**:
+1. On the phone, open the login page. Enter valid credentials for a real account. Submit.
+2. Open the register page in a private/incognito tab (so it doesn't reuse the login
+   session). Register a brand-new account with a fresh email.
+3. Try logging in with an intentionally wrong password.
+
+**Pass when**: Step 1 redirects you into the app as the correct user (name/role shown
+matches the real account) — not stuck on the login page, not a generic error toast. Step 2
+succeeds and lands you in the app as the new account. Step 3 shows a clear "invalid
+credentials"-style error, not a network/500 error (a 500 or "service unavailable" at this
+step usually means `BACKEND_URL` has regressed back to the double-`/api` bug).
+
+### 11.2 Forgot Password — now calls the real backend OTP endpoint
+
+**What**: `forgot-password` no longer touches the local in-memory demo store; it calls
+the real `POST /auth/forgot-password`, which silently OTP-logs server-side and always
+responds identically whether or not the email exists (anti-enumeration).
+
+**How**:
+1. On the phone, go to "Forgot password". Enter the email of a real, registered account.
+   Submit.
+2. Repeat the exact same flow, but with an email that has **never** been registered.
+3. Immediately check the backend's server console/logs for a block of text like
+   `PASSWORD RESET OTP FOR <email>: 123456`.
+
+**Pass when**: Both step 1 and step 2 show the **exact same** on-screen confirmation
+message ("If that email exists, a reset code has been sent.") — no visible difference that
+would let someone probe which emails are registered. Neither step shows a "Demo shortcut"
+box with a clickable continue-to-reset link anymore — that shortcut only existed for the
+old local demo store and is correctly gone now that a real backend (which never returns
+the code to the browser) is wired up. Step 3's log line appears **only** for the real,
+registered email from step 1 — nothing is logged for step 2's fake email.
+
+### 11.3 Reset Password — using the real OTP from the backend logs
+
+**What**: `reset-password` now calls the real `POST /auth/reset-password`, validating
+the 6-digit OTP against the backend's in-memory store instead of a local demo token.
+
+**How**:
+1. Continuing from §11.2, copy the 6-digit code from the backend log line.
+2. On the phone, navigate to the reset-password page (manually, since there's no more
+   auto-link — go to `/reset-password` and enter the code by hand when prompted, or
+   however the page collects it).
+3. Enter the copied code and a new password (8+ characters). Submit.
+4. Try the exact same code again immediately afterward with a different new password.
+5. Go back to the login page and log in with the **new** password from step 3.
+6. Separately, try entering the literal digits `123456` on a **fresh** forgot-password →
+   reset-password attempt (don't reuse a real code) for the same account.
+
+**Pass when**: Step 3 succeeds and redirects toward login. Step 4 fails with an
+"invalid or expired" style error — the backend deletes the OTP after first successful use,
+so a same-code replay must not succeed twice. Step 5 logs in successfully with the new
+password (proves the reset actually changed the real account's password on the backend,
+not just a local demo record). Step 6 is a **known dev-only backend behavior, not a bug**:
+`123456` is a hardcoded fallback that matches whichever OTP was most recently issued
+server-side — expect it to succeed if an OTP is currently pending for any account, which is
+a deliberate testing convenience on the backend, not something this frontend pass needs to
+guard against.
+
+---
+
+## 12. Backend fixes from this pass — device-observable + Postman verification
+
+These four fixes were found via code audit rather than a specific screen, so most of them
+are verified through a mix of the mobile app (for the parts a user would actually notice)
+and Postman/server logs (for the parts that aren't visible in any UI). Listed here so a
+full regression pass doesn't skip them just because they don't have a dedicated screen.
+
+### 12.1 Payout sweep now has a way to actually run in production
+
+**What**: `PaymentsService.runPayoutSweep()`'s `@Cron(EVERY_HOUR)` never fires on Vercel
+(no long-lived process). A new `GET /payments/payout-sweep` endpoint, guarded by a
+`CRON_SECRET` bearer token and wired into `vercel.json`'s `crons`, is the fix.
+
+**How** (Postman, not device — there's no UI for this):
+1. Confirm `CRON_SECRET` is set as an env var on your Vercel project (this fix only works
+   once you've done this yourself — it isn't set automatically).
+2. `GET https://<your-backend>/api/payments/payout-sweep` with **no** `Authorization`
+   header.
+3. Same request, with `Authorization: Bearer wrong-value`.
+4. Same request, with `Authorization: Bearer <the real CRON_SECRET value>`.
+
+**Pass when**: Step 2 and step 3 both return `401 Unauthorized` (confirms this endpoint
+can't be triggered by a random public request). Step 4 returns `200` with a body like
+`{"eventsProcessed": N, "payoutsCreated": M}`. If you have a real eligible enrollment
+(paid, confirmed, event ended 3+ days ago, no open refund) sitting unpaid, `M` should be
+`≥1` and a new row should appear in the `payouts` table afterward.
+
+### 12.2 Banning a user now takes effect immediately, not at next login
+
+**What**: `JwtAuthGuard` now re-checks the user's live `isBanned`/`deletedAt` state from
+the DB on every request, not just at login — a still-valid token from before a ban used to
+keep working for up to its full 1-hour lifetime.
+
+**How** (this one **is** device-observable):
+1. Log into the mobile app as a test participant account (not the account you're doing the
+   banning from). Leave the app open and logged in.
+2. From an admin session (Postman, with an admin token), `PATCH
+   /admins/users/:userId/ban` with `{"reason": "test"}`, targeting the logged-in test
+   account's `userId`.
+3. Immediately, on the phone, pull-to-refresh Home (or navigate to any screen that fires
+   an authenticated request — Bookings, Profile, etc.) without logging out first.
+
+**Pass when**: Step 3's request fails — the screen should show an error/loading-failed
+state (exactly how depends on which screen you tested from; at minimum, the request should
+not silently succeed). This proves the ban took effect on the **already-issued token**
+immediately, rather than the user being able to keep using the app normally until their
+token happened to expire an hour later. Afterward, confirm `POST /auth/login` with that
+account's credentials also fails (the pre-existing, already-tested behavior) — then unban
+the account via `PATCH /admins/users/:userId/unban` so it doesn't stay banned.
+
+### 12.3 Refund processing is now atomic (regression check via Postman)
+
+**What**: `processGatewayRefund` now wraps the refund-status update, enrollment-status
+update, and ticket-type capacity decrement in a single DB transaction — previously these
+were three separate writes with no atomicity guarantee.
+
+**How**: This is a correctness fix for a partial-failure scenario that's hard to force
+deliberately (a mid-sequence crash). The practical regression check is just re-running
+Phase 10's existing refund-approval flow (§3) end-to-end and confirming all three
+side effects land together:
+1. Approve a valid, pending refund request (`PATCH /payments/refunds/:id/approve`).
+2. Immediately check all three: `GET /events/enrollments/:enrollmentId` (should show
+   `status: "refunded"`, `paymentStatus: "refunded"`), `GET /events/:id/ticket-types`
+   (the tier's `quantitySold` should have decremented by the refunded quantity), and — if
+   a waitlist existed for that tier — `GET /events/my-waitlist` as the waitlisted user
+   (should show they were promoted).
+
+**Pass when**: All three checks in step 2 are consistent with each other (none lag behind
+or contradict the others) immediately after the approval call returns — there should be no
+window where, say, the enrollment shows refunded but the tier's capacity hasn't freed up
+yet.
+
+### 12.4 Rate limiting via Redis (optional — only if you've provisioned Upstash)
+
+**What**: `ThrottlerModule` now uses a Redis-backed store (via `@upstash/redis`) when
+`UPSTASH_REDIS_REST_URL`/`UPSTASH_REDIS_REST_TOKEN` are set, so rate limits are shared
+across Vercel's separate serverless containers instead of each container keeping its own
+independent in-memory counter. **This fix only takes effect once you've provisioned an
+Upstash Redis instance and set those two env vars yourself** — without them, behavior is
+unchanged from before (in-memory, correct only on a single long-lived process).
+
+**How**: If you haven't set up Upstash, skip this — there's nothing new to verify yet.
+If you have:
+1. Re-run §4's existing rate-limit pass (e.g. 11 requests to `/auth/*` inside 60s) against
+   the deployed Vercel URL specifically (not local dev).
+2. Restart/redeploy the backend (forces a fresh serverless container) mid-way through a
+   burst of requests that hasn't yet hit the limit, then continue the burst past the limit
+   from what Vercel may route to a new container.
+
+**Pass when**: Step 1 still 429s at the same request count as before. Step 2 **still**
+429s at the correct cumulative count even across the container restart — this is the
+actual point of the fix; with the old in-memory-only storage, a fresh container would have
+reset the counter to zero and let the burst continue well past the configured limit.
+
+---
+
+## 13. Sign-off checklist
 
 - [ ] Phase 0 — Health & Public
 - [ ] Phase 1 — Auth (incl. rate limit)
@@ -561,3 +998,25 @@ Requires a confirmed booking + at least one waitlisted user on the same sold-out
       book a tier to sold-out, stale-cache regression, double-submit regression on Book
       Now, waitlist join + position display, sale-window-aware tier states (server-side
       enforced), waitlist auto-promotion on cancellation
+- [ ] Frontend Stage 3 — offline-first check-in, **real device required** (§9): camera
+      permission + QR scanning + scan debounce, online check-in baseline, offline
+      check-in (banner, local validation, persists across app kill), reconnect sync
+      drain (incl. drain-on-launch and same-ticket conflict resolution), NetworkGate/
+      ServerGate exemption scoped to Check In only and nowhere else
+- [ ] Frontend — Account, Saved Events & Notifications, **real device** (§10): Profile
+      shows the real logged-in identity (not mock, differs per account), Edit Profile
+      persists real changes across an app restart with email read-only, heart toggle on
+      Event Details + Saved Events list round-trip through the real Favorites API and
+      survive an app kill, Notifications list shows real jobs (event-changed/
+      waitlist-promoted/refund-status) with working mark-read / mark-all-read that
+      persists server-side
+- [ ] eventrix-welcome-flow — real backend auth, **real device/browser** (§11):
+      login/register `BACKEND_URL` regression check, forgot-password identical response
+      for existing vs. non-existent email with no demo-shortcut box, reset-password with
+      the real OTP from backend logs (incl. one-time-use and new-password login check)
+- [ ] Backend fixes from this pass (§12): payout-sweep trigger endpoint 401s without/with
+      wrong `CRON_SECRET` and 200s with the right one, live ban takes effect on an
+      already-issued token (not just at next login), refund approval's three side effects
+      (enrollment status, ticket-type capacity, waitlist promotion) land consistently
+      together, Redis-backed rate limiting survives a container restart (only if Upstash
+      is provisioned)

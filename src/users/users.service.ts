@@ -6,15 +6,24 @@ import { EventCategory } from '../entities/category.entity';
 import { UpdateInterestsDto } from './participant/dto/update-interests.dto';
 import { UpdateLocationDto } from './participant/dto/update-location.dto';
 import { UpdateNotificationPrefsDto } from './participant/dto/update-notification-prefs.dto';
+import { CacheService } from '../common/cache/cache.service';
+
+// Exported so ParticipantService (a separate service writing to the same `users` row via
+// PATCH /participants/:id) can invalidate the same cache entry this module populates.
+export const userMeCacheKey = (userId: string): string => `users:me:${userId}`;
+const USER_ME_CACHE_TTL_SECONDS = 60;
 
 export type CurrentUserResponse = {
   id: string;
   email: string;
   fullName: string | null;
+  firstName: string;
+  lastName: string;
   phoneNumber: string | null;
   profilePictureUrl: string | null;
   bio: string | null;
   location: string | null;
+  city: string;
   latitude: number | null;
   longitude: number | null;
   notificationPrefs: UpdateNotificationPrefsDto | null;
@@ -32,9 +41,28 @@ export class UsersService {
     private readonly usersRepository: Repository<User>,
     @InjectRepository(EventCategory)
     private readonly categoryRepository: Repository<EventCategory>,
+    private readonly cache: CacheService,
   ) {}
 
+  // Participant-specific fields (city, etc.) are JSON-encoded in the `bio` column (see
+  // ParticipantService.buildMeta) rather than dedicated columns. GET /participants/:id
+  // decodes this but is admin-only (class-level @Roles('admin') on ParticipantController,
+  // no method-level override on findOne) — a plain 'user' has no self-accessible way to
+  // read these back otherwise, even though PATCH /participants/:id *is* self-accessible.
+  // Decoding the same meta here keeps GET/PATCH self-service symmetric for a non-admin.
+  private parseMeta(bio: string | null): Record<string, string> {
+    try {
+      return bio ? JSON.parse(bio) : {};
+    } catch {
+      return {};
+    }
+  }
+
   async findMe(userId: string): Promise<CurrentUserResponse> {
+    const cacheKey = userMeCacheKey(userId);
+    const cached = await this.cache.get<CurrentUserResponse>(cacheKey);
+    if (cached) return cached;
+
     const user = await this.usersRepository.findOne({
       where: { id: userId },
       relations: ['interests'],
@@ -44,14 +72,20 @@ export class UsersService {
       throw new NotFoundException(`User ${userId} not found`);
     }
 
-    return {
+    const meta = this.parseMeta(user.bio ?? null);
+    const [firstName, ...lastNameParts] = (user.fullName || '').split(' ');
+
+    const response: CurrentUserResponse = {
       id: user.id,
       email: user.email,
       fullName: user.fullName ?? null,
+      firstName: firstName || '',
+      lastName: lastNameParts.join(' '),
       phoneNumber: user.phoneNumber ?? null,
       profilePictureUrl: user.profilePictureUrl ?? null,
       bio: user.bio ?? null,
       location: user.location ?? null,
+      city: meta['city'] || '',
       latitude: user.latitude ?? null,
       longitude: user.longitude ?? null,
       notificationPrefs: user.notificationPrefs ?? null,
@@ -61,6 +95,8 @@ export class UsersService {
       createdAt: user.createdAt,
       updatedAt: user.updatedAt,
     };
+    await this.cache.set(cacheKey, response, USER_ME_CACHE_TTL_SECONDS);
+    return response;
   }
 
   async updateInterests(userId: string, dto: UpdateInterestsDto): Promise<void> {
@@ -79,6 +115,7 @@ export class UsersService {
 
     user.interests = categories;
     await this.usersRepository.save(user);
+    await this.cache.del(userMeCacheKey(userId));
   }
 
   async updateLocation(userId: string, dto: UpdateLocationDto): Promise<void> {
@@ -90,6 +127,7 @@ export class UsersService {
     if (result.affected === 0) {
       throw new NotFoundException(`User ${userId} not found`);
     }
+    await this.cache.del(userMeCacheKey(userId));
   }
 
   async updateNotificationPrefs(userId: string, dto: UpdateNotificationPrefsDto): Promise<void> {
@@ -100,5 +138,6 @@ export class UsersService {
     if (result.affected === 0) {
       throw new NotFoundException(`User ${userId} not found`);
     }
+    await this.cache.del(userMeCacheKey(userId));
   }
 }

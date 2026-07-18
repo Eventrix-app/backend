@@ -11,7 +11,7 @@ import { JwtService } from '@nestjs/jwt';
 import { LoginDto } from './dto/login.dto';
 import { CreateUserDto } from './dto/create-user.dto';
 import { AuthResponseDto } from './dto/auth-response.dto';
-import { JwtPayload } from './jwt.util';
+import { JwtPayload, SESSION_TOKEN_TTL_SECONDS } from './jwt.util';
 import { User } from '../entities/user.entity';
 
 const BCRYPT_PREFIXES = ['$2a$', '$2b$', '$2y$'];
@@ -88,7 +88,7 @@ export class AuthService {
       full_name: user.fullName || '',
       roles: userRoles,
       hasCompletedOnboarding: user.hasCompletedOnboarding,
-      expiresIn: 3600,
+      expiresIn: SESSION_TOKEN_TTL_SECONDS,
     };
   }
 
@@ -140,7 +140,38 @@ export class AuthService {
       full_name: saved.fullName || '',
       roles: savedRoles,
       hasCompletedOnboarding: saved.hasCompletedOnboarding,
-      expiresIn: 3600,
+      expiresIn: SESSION_TOKEN_TTL_SECONDS,
+    };
+  }
+
+  // Re-issues a token with a fresh SESSION_TOKEN_TTL_SECONDS expiry for a user who already
+  // holds a currently-valid one — JwtAuthGuard (which runs before this on every non-@Public()
+  // route) has already verified the token's signature/expiry and that the account isn't
+  // banned/deleted, so no password check is needed here. Re-reads the user row (rather than
+  // trusting the old token's payload) so roles/name changes since the last login are picked
+  // up on refresh instead of persisting stale claims for another 2 days.
+  async refresh(userId: string): Promise<AuthResponseDto> {
+    const user = await this.usersRepository.findOne({ where: { id: userId } });
+    if (!user) {
+      throw new UnauthorizedException('Account no longer exists');
+    }
+
+    const userRoles = user.roles?.length ? user.roles : ['user'];
+    const payload: JwtPayload = {
+      id: user.id,
+      email: user.email,
+      roles: userRoles,
+      full_name: user.fullName || '',
+    };
+
+    return {
+      accessToken: this.jwtService.sign(payload),
+      id: user.id,
+      email: user.email,
+      full_name: user.fullName || '',
+      roles: userRoles,
+      hasCompletedOnboarding: user.hasCompletedOnboarding,
+      expiresIn: SESSION_TOKEN_TTL_SECONDS,
     };
   }
 

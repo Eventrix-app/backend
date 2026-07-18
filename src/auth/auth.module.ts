@@ -8,6 +8,7 @@ import { User } from '../entities/user.entity';
 import { AdminModule } from '../users/admin/admin.module';
 import { ParticipantModule } from '../users/participant/participant.module';
 import { OrganizerModule } from '../users/organizer/organizer.module';
+import { SESSION_TOKEN_TTL_SECONDS } from './jwt.util';
 
 @Module({
   imports: [
@@ -23,13 +24,15 @@ import { OrganizerModule } from '../users/organizer/organizer.module';
         secret:
           configService.get<string>('JWT_SECRET') || process.env.JWT_SECRET,
         signOptions: {
-          expiresIn: 3600, // 1 hour in seconds
+          expiresIn: SESSION_TOKEN_TTL_SECONDS,
         },
       }),
     }),
   ],
   controllers: [AuthController],
   providers: [AuthService],
-  exports: [AuthService],
+  // TypeOrmModule re-exported so JwtAuthGuard (registered globally in AppModule, which
+  // imports this module) can inject the User repository for its live ban check.
+  exports: [AuthService, TypeOrmModule],
 })
 export class AuthModule {}

@@ -25,4 +25,11 @@ export default () => ({
   payout: {
     delayDaysAfterEventEnd: Number(process.env.PAYOUT_DELAY_DAYS) || 3,
   },
+  cron: {
+    // Verifies Vercel Cron Jobs' `Authorization: Bearer <CRON_SECRET>` header (see
+    // PaymentsController.triggerPayoutSweep + vercel.json's `crons` entry) — the
+    // @Cron() decorator in PaymentsService never fires on Vercel's serverless model,
+    // which has no long-lived process for it to run inside.
+    secret: process.env.CRON_SECRET,
+  },
 });

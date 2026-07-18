@@ -8,6 +8,7 @@ import { Organizer } from '../entities/organizer.entity';
 import { User } from '../entities/user.entity';
 import { EventCategory } from '../entities/category.entity';
 import { TicketType } from '../entities/ticket-type.entity';
+import { Favorite } from '../entities/favorite.entity';
 import { CreateEventDto } from './dto/create-event.dto';
 import { UpdateEventDto } from './dto/update-event.dto';
 import { CreateTicketTypeDto } from './dto/create-ticket-type.dto';
@@ -17,6 +18,7 @@ import { WaitlistService, WaitlistEntryWithPosition } from '../waitlist/waitlist
 import { WaitlistEntry } from '../entities/waitlist-entry.entity';
 import { NotificationService } from '../notifications/notification.service';
 import { getEventEndDateTime } from './utils/event-dates.util';
+import { CacheService } from '../common/cache/cache.service';
 
 // Loading the 'organizer.user' relation pulls the full User entity by default, including
 // passwordHash and other PII — there's no @Exclude()/serializer scoping it out anywhere in
@@ -57,12 +59,44 @@ export class EventsService {
     private readonly categoriesRepository: Repository<EventCategory>,
     @InjectRepository(TicketType)
     private readonly ticketTypesRepository: Repository<TicketType>,
+    @InjectRepository(Favorite)
+    private readonly favoritesRepository: Repository<Favorite>,
     private readonly dataSource: DataSource,
     private readonly jwtService: JwtService,
     private readonly auditLogService: AuditLogService,
     private readonly waitlistService: WaitlistService,
     private readonly notificationService: NotificationService,
+    private readonly cache: CacheService,
   ) {}
+
+  // Public listings are read far more often than events are written, so they're cached for
+  // a short window. The list is parameterized (category/online/page/limit), so instead of
+  // invalidating every possible key combination on a write, a version number is folded into
+  // the key — bumping it makes every previously-cached list entry unreachable at once.
+  private static readonly EVENTS_LIST_TTL_SECONDS = 45;
+  private static readonly EVENT_DETAIL_TTL_SECONDS = 60;
+  private static readonly EVENTS_LIST_VERSION_KEY = 'events:list:version';
+
+  private eventDetailCacheKey(id: string): string {
+    return `events:detail:${id}`;
+  }
+
+  private async eventsListCacheKey(
+    categoryId: string | undefined,
+    isOnline: boolean | undefined,
+    page: number,
+    limit: number,
+  ): Promise<string> {
+    const version = await this.cache.getVersion(EventsService.EVENTS_LIST_VERSION_KEY);
+    return `events:list:${version}:${categoryId ?? 'all'}:${isOnline ?? 'all'}:${page}:${limit}`;
+  }
+
+  private async invalidateEventCaches(id: string): Promise<void> {
+    await Promise.all([
+      this.cache.del(this.eventDetailCacheKey(id)),
+      this.cache.bumpVersion(EventsService.EVENTS_LIST_VERSION_KEY),
+    ]);
+  }
 
   async create(createEventDto: CreateEventDto): Promise<Event> {
     // Validate category exists
@@ -213,15 +247,19 @@ export class EventsService {
     page: number = 1,
     limit: number = 20,
   ): Promise<{ events: Event[]; total: number; page: number; totalPages: number }> {
+    const cacheKey = await this.eventsListCacheKey(categoryId, isOnline, page, limit);
+    const cached = await this.cache.get<{ events: Event[]; total: number; page: number; totalPages: number }>(cacheKey);
+    if (cached) return cached;
+
     const skip = (page - 1) * limit;
-    const where: any = { 
+    const where: any = {
       deletedAt: null as any,
       approvalStatus: EventApprovalStatus.APPROVED,
     };
-    
+
     if (categoryId) where.categoryId = categoryId;
     if (isOnline !== undefined) where.isOnline = isOnline;
-    
+
     const [events, total] = await this.eventsRepository.findAndCount({
       where,
       relations: ['organizer', 'organizer.user', 'category'],
@@ -231,12 +269,14 @@ export class EventsService {
       take: limit,
     });
 
-    return {
+    const result = {
       events,
       total,
       page,
       totalPages: Math.ceil(total / limit),
     };
+    await this.cache.set(cacheKey, result, EventsService.EVENTS_LIST_TTL_SECONDS);
+    return result;
   }
 
   async findOne(id: string): Promise<Event> {
@@ -258,10 +298,24 @@ export class EventsService {
   // Internal callers that already do their own authorization (update/remove/ticket-type
   // CRUD/etc.) should keep calling findOne() directly — this wrapper is only for that
   // one public route.
-  async findOneForViewer(id: string, userId?: string, userRoles: string[] = []): Promise<Event> {
+  // Cache-wraps findOne() for the public detail read path only — write paths (update,
+  // approve, reject, remove, ticket-type CRUD) keep calling findOne() directly so they
+  // always mutate a fresh row, never a stale cached copy.
+  private async findOneCached(id: string): Promise<Event> {
+    const cacheKey = this.eventDetailCacheKey(id);
+    const cached = await this.cache.get<Event>(cacheKey);
+    if (cached) return cached;
     const event = await this.findOne(id);
+    await this.cache.set(cacheKey, event, EventsService.EVENT_DETAIL_TTL_SECONDS);
+    return event;
+  }
+
+  async findOneForViewer(id: string, userId?: string, userRoles: string[] = []): Promise<Event> {
+    const event = await this.findOneCached(id);
     const isOwnerOrAdmin = userId ? await this.isOwnerOrAdmin(event, userId, userRoles) : false;
-    if (!isOwnerOrAdmin && !event.isApproved()) {
+    // Plain field check rather than event.isApproved() — a cache hit returns a plain
+    // deserialized object, not an Event class instance, so it has no instance methods.
+    if (!isOwnerOrAdmin && event.approvalStatus !== EventApprovalStatus.APPROVED) {
       throw new NotFoundException(`Event with id ${id} not found`);
     }
     return event;
@@ -334,6 +388,7 @@ export class EventsService {
       await this.notifyActiveEnrollees(updatedEvent.id, changes);
     }
 
+    await this.invalidateEventCaches(updatedEvent.id);
     return updatedEvent;
   }
 
@@ -380,6 +435,7 @@ export class EventsService {
 
     await this.eventsRepository.softRemove(event);
     this.logger.log(`Soft-deleted event: ${event.title} (id=${event.id})`);
+    await this.invalidateEventCaches(event.id);
   }
 
   async findMyEvents(userId: string): Promise<Event[]> {
@@ -405,6 +461,36 @@ export class EventsService {
     });
   }
 
+  async findMyFavorites(userId: string): Promise<Event[]> {
+    const favorites = await this.favoritesRepository.find({
+      where: { userId },
+      relations: ['event', 'event.organizer', 'event.organizer.user', 'event.category'],
+      select: { event: { organizer: SAFE_ORGANIZER_SELECT.organizer } as any },
+      order: { createdAt: 'DESC' },
+    });
+    return favorites.map((f) => f.event).filter((e): e is Event => !!e);
+  }
+
+  async addFavorite(eventId: string, userId: string): Promise<void> {
+    const event = await this.eventsRepository.findOne({ where: { id: eventId } });
+    if (!event) throw new NotFoundException(`Event ${eventId} not found`);
+
+    const existing = await this.favoritesRepository.findOne({ where: { userId, eventId } });
+    if (existing) return; // idempotent — saving twice is a no-op, not an error
+
+    const favorite = this.favoritesRepository.create({ userId, eventId });
+    try {
+      await this.favoritesRepository.save(favorite);
+    } catch (err) {
+      // Race: two concurrent "save" taps for the same event both passed the check above.
+      if ((err as { code?: string })?.code !== '23505') throw err;
+    }
+  }
+
+  async removeFavorite(eventId: string, userId: string): Promise<void> {
+    await this.favoritesRepository.delete({ userId, eventId });
+  }
+
   async findByOrganizerId(organizerId: string): Promise<Event[]> {
     return await this.eventsRepository.find({
       where: { organizerId, deletedAt: null as any },
@@ -427,6 +513,7 @@ export class EventsService {
     await this.assertOwnsEvent(event, userId, userRoles);
     this.assertNotRejected(event);
     this.assertSalesEndWithinEvent(event, dto.salesEndAt);
+    await this.syncEventPaidStatusForTierPrice(event, dto.price);
 
     const ticketType = this.ticketTypesRepository.create({
       eventId,
@@ -481,6 +568,7 @@ export class EventsService {
       throw new ForbiddenException('Cannot edit a ticket tier that already has sales');
     }
     if (dto.salesEndAt !== undefined) this.assertSalesEndWithinEvent(event, dto.salesEndAt);
+    if (dto.price !== undefined) await this.syncEventPaidStatusForTierPrice(event, dto.price);
 
     if (dto.salesStartAt !== undefined) ticketType.salesStartAt = dto.salesStartAt ? new Date(dto.salesStartAt) : undefined;
     if (dto.salesEndAt !== undefined) ticketType.salesEndAt = dto.salesEndAt ? new Date(dto.salesEndAt) : undefined;
@@ -537,6 +625,24 @@ export class EventsService {
     if (event.approvalStatus === EventApprovalStatus.REJECTED) {
       throw new BadRequestException('Cannot modify ticket types on a rejected event');
     }
+  }
+
+  // Mirrors update()'s switchingToPaid guard for the legacy flat-price field, but for
+  // the tier-based path: pricing a tier above zero on a currently-free event is the same
+  // "free event skipped admin review, then quietly became paid" gap — nested ticket-type
+  // CRUD is the other place event pricing can change post-creation, so it needs the same
+  // fix: flip isPaid, and if the event was already approved, send it back for review.
+  private async syncEventPaidStatusForTierPrice(event: Event, tierPrice: number): Promise<void> {
+    if (!(Number(tierPrice) > 0) || event.isPaid) return;
+
+    event.isPaid = true;
+    if (event.approvalStatus === EventApprovalStatus.APPROVED) {
+      event.approvalStatus = EventApprovalStatus.PENDING_APPROVAL;
+      event.approvalMethod = undefined;
+      event.approvedAt = undefined;
+      event.approvedBy = undefined;
+    }
+    await this.eventsRepository.save(event);
   }
 
   // Participant enrollment with atomic, race-safe ticket-type decrement. When the tier
@@ -724,10 +830,11 @@ export class EventsService {
     
     const saved = await this.eventsRepository.save(event);
     this.logger.log(`Event ${event.id} approved by admin ${adminUserId}`);
-    
+    await this.invalidateEventCaches(event.id);
+
     // TODO: Send notification to organizer
     // await this.notificationService.notifyEventApproved(event);
-    
+
     return saved;
   }
 
@@ -751,10 +858,11 @@ export class EventsService {
     
     const saved = await this.eventsRepository.save(event);
     this.logger.log(`Event ${event.id} rejected by admin ${adminUserId}`);
-    
+    await this.invalidateEventCaches(event.id);
+
     // TODO: Send notification to organizer
     // await this.notificationService.notifyEventRejected(event, rejectionReason);
-    
+
     return saved;
   }
 

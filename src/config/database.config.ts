@@ -14,6 +14,7 @@ import { WaitlistEntry } from '../entities/waitlist-entry.entity';
 import { AuditLog } from '../entities/audit-log.entity';
 import { Payout } from '../entities/payout.entity';
 import { NotificationJob } from '../entities/notification-job.entity';
+import { Favorite } from '../entities/favorite.entity';
 
 const entities = [
   User,
@@ -30,6 +31,7 @@ const entities = [
   AuditLog,
   Payout,
   NotificationJob,
+  Favorite,
 ];
 
 export const getDatabaseConfig = (

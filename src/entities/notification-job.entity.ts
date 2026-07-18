@@ -44,4 +44,9 @@ export class NotificationJob {
 
   @Column({ name: 'sent_at', type: 'timestamp', nullable: true })
   sentAt?: Date;
+
+  // User-facing read state for GET /notifications — distinct from `status`, which tracks
+  // delivery (pending/sent/failed) rather than whether the recipient has seen it.
+  @Column({ name: 'read_at', type: 'timestamp', nullable: true })
+  readAt?: Date | null;
 }

@@ -1,5 +1,6 @@
-import { Body, Controller, Get, HttpCode, HttpStatus, Param, ParseUUIDPipe, Patch, Post, Query, Request } from '@nestjs/common';
+import { Body, Controller, Get, Headers, HttpCode, HttpStatus, Param, ParseUUIDPipe, Patch, Post, Query, Request, UnauthorizedException } from '@nestjs/common';
 import { ApiTags } from '@nestjs/swagger';
+import { ConfigService } from '@nestjs/config';
 import { Throttle } from '@nestjs/throttler';
 
 import { PaymentsService } from './payments.service';
@@ -14,7 +15,28 @@ import { AuditAction } from '../common/decorators/audit-action.decorator';
 @ApiTags('payments')
 @Controller('payments')
 export class PaymentsController {
-  constructor(private readonly paymentsService: PaymentsService) {}
+  constructor(
+    private readonly paymentsService: PaymentsService,
+    private readonly configService: ConfigService,
+  ) {}
+
+  // @Cron(EVERY_HOUR) in PaymentsService never fires on Vercel — serverless functions
+  // don't keep a process running between requests. Vercel Cron Jobs (configured in
+  // vercel.json's `crons`) hit this endpoint on a schedule instead, and Vercel
+  // automatically attaches `Authorization: Bearer <CRON_SECRET>` when that env var is
+  // set on the project — set CRON_SECRET there for this to actually run in production.
+  @Public()
+  @Get('payout-sweep')
+  async triggerPayoutSweep(@Headers('authorization') authHeader?: string) {
+    const expected = this.configService.get<string>('cron.secret');
+    if (!expected) {
+      throw new UnauthorizedException('Payout sweep trigger is not configured (CRON_SECRET missing)');
+    }
+    if (authHeader !== `Bearer ${expected}`) {
+      throw new UnauthorizedException('Invalid cron secret');
+    }
+    return await this.paymentsService.runPayoutSweep();
+  }
 
   // Standalone fee/payout estimate — callable from the Create Event flow before the
   // event is ever submitted for admin approval (see settled decision #1).

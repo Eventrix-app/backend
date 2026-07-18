@@ -7,6 +7,7 @@ describe('ParticipantService', () => {
   let mockUsersRepo: any;
   let mockCategoryRepo: any;
   let mockJwtService: any;
+  let mockCacheService: any;
 
   const dto: CreateParticipantDto = {
     username: 'newuser',
@@ -37,7 +38,8 @@ describe('ParticipantService', () => {
     };
     mockCategoryRepo = {};
     mockJwtService = { sign: jest.fn(() => 'signed.jwt.token') };
-    service = new ParticipantService(mockUsersRepo, mockCategoryRepo, mockJwtService);
+    mockCacheService = { get: jest.fn(), set: jest.fn(), del: jest.fn(), getVersion: jest.fn(), bumpVersion: jest.fn() };
+    service = new ParticipantService(mockUsersRepo, mockCategoryRepo, mockJwtService, mockCacheService);
   });
 
   // Regression test for testing-bugs.txt #2: POST /participants creates the same kind

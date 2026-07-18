@@ -175,29 +175,41 @@ export class PaymentsService {
   // around it are real.
   private async processGatewayRefund(refund: Refund): Promise<Refund> {
     try {
-      refund.status = RefundStatus.PROCESSED;
-      refund.gatewayRefundId = `mock_refund_${refund.id}`;
-      refund.processedAt = new Date();
-      const saved = await this.refundsRepository.save(refund);
+      // Refund status, enrollment status, and the ticket-type capacity decrement must
+      // land together — a partial failure here previously could leave an enrollment
+      // marked "refunded" while ticket_types.quantity_sold never freed up (permanently
+      // blocking a slot and starving the waitlist), or the reverse.
+      const { savedRefund, ticketTypeId } = await this.dataSource.transaction(async (manager) => {
+        refund.status = RefundStatus.PROCESSED;
+        refund.gatewayRefundId = `mock_refund_${refund.id}`;
+        refund.processedAt = new Date();
+        const savedRefund = await manager.save(Refund, refund);
 
-      const enrollment = await this.enrollmentsRepository.findOne({ where: { id: refund.enrollmentId } });
-      await this.enrollmentsRepository.update(refund.enrollmentId, {
-        status: 'refunded',
-        paymentStatus: 'refunded',
+        const enrollment = await manager.findOne(Enrollment, { where: { id: refund.enrollmentId } });
+        await manager.update(Enrollment, refund.enrollmentId, {
+          status: 'refunded',
+          paymentStatus: 'refunded',
+        });
+
+        if (enrollment?.ticketTypeId) {
+          await manager.query(
+            `UPDATE ticket_types SET quantity_sold = GREATEST(quantity_sold - $1, 0), updated_at = now() WHERE id = $2`,
+            [enrollment.quantity, enrollment.ticketTypeId],
+          );
+        }
+
+        return { savedRefund, ticketTypeId: enrollment?.ticketTypeId };
       });
-
-      // Free the tier's capacity and hand the slot to the next FIFO waitlist entry.
-      if (enrollment?.ticketTypeId) {
-        await this.paymentsRepository.query(
-          `UPDATE ticket_types SET quantity_sold = GREATEST(quantity_sold - $1, 0), updated_at = now() WHERE id = $2`,
-          [enrollment.quantity, enrollment.ticketTypeId],
-        );
-        await this.waitlistService.promoteNext(enrollment.ticketTypeId);
-      }
 
       this.logger.log(`Refund ${refund.id} processed via gateway (${refund.gatewayRefundId})`);
       await this.notificationService.notifyRefundStatus(refund.requestedBy, refund.id, RefundStatus.PROCESSED);
-      return saved;
+
+      // Capacity is now durably committed — safe to hand the slot to the next FIFO
+      // waitlist entry outside the refund's own transaction (promoteNext manages its own).
+      if (ticketTypeId) {
+        await this.waitlistService.promoteNext(ticketTypeId);
+      }
+      return savedRefund;
     } catch (err) {
       refund.status = RefundStatus.FAILED;
       const saved = await this.refundsRepository.save(refund);

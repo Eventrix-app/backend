@@ -22,6 +22,9 @@ import { AuditLogInterceptor } from './common/interceptors/audit-log.interceptor
 import { NotificationModule } from './notifications/notification.module';
 import { ScheduleModule } from '@nestjs/schedule';
 import { ThrottlerModule, ThrottlerGuard } from '@nestjs/throttler';
+import { ConfigService } from '@nestjs/config';
+import { RedisThrottlerStorageService } from './common/throttler/redis-throttler-storage.service';
+import { CacheModule } from './common/cache/cache.module';
 
 @Module({
   imports: [
@@ -31,14 +34,31 @@ import { ThrottlerModule, ThrottlerGuard } from '@nestjs/throttler';
       validate: validateEnv,
     }),
     ScheduleModule.forRoot(),
-    ThrottlerModule.forRoot([
-      {
-        // Default: 20 requests / 10s per client. Enrollment/auth endpoints tighten this
-        // further via @Throttle() to blunt scripted mass-enrollment/scalping.
-        ttl: 10000,
-        limit: 20,
-      },
-    ]),
+    ThrottlerModule.forRootAsync({
+      inject: [ConfigService],
+      useFactory: (configService: ConfigService) => ({
+        throttlers: [
+          {
+            // Default: 20 requests / 10s per client. Enrollment/auth endpoints tighten
+            // this further via @Throttle() to blunt scripted mass-enrollment/scalping.
+            ttl: 10000,
+            limit: 20,
+          },
+        ],
+        // The default in-memory storage only tracks hits within one warm serverless
+        // container — on Vercel, a client's requests can land on several different
+        // containers, each under the limit, defeating the cap entirely. If Upstash's
+        // env vars are present, share counters across containers via Redis instead;
+        // otherwise fall back to the in-memory default (correct for a single
+        // long-lived process, e.g. local dev / `npm run start:dev`).
+        storage: (() => {
+          const url = configService.get<string>('UPSTASH_REDIS_REST_URL');
+          const token = configService.get<string>('UPSTASH_REDIS_REST_TOKEN');
+          return url && token ? new RedisThrottlerStorageService(url, token) : undefined;
+        })(),
+      }),
+    }),
+    CacheModule,
     DatabaseModule,
     AuditLogModule,
     NotificationModule,

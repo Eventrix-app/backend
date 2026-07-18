@@ -7,12 +7,14 @@ import { Organizer } from '../entities/organizer.entity';
 import { User } from '../entities/user.entity';
 import { EventCategory } from '../entities/category.entity';
 import { TicketType } from '../entities/ticket-type.entity';
+import { Favorite } from '../entities/favorite.entity';
 import { DataSource } from 'typeorm';
 import { JwtService } from '@nestjs/jwt';
 import { NotFoundException, BadRequestException, ConflictException } from '@nestjs/common';
 import { AuditLogService } from '../common/audit-log/audit-log.service';
 import { WaitlistService } from '../waitlist/waitlist.service';
 import { NotificationService } from '../notifications/notification.service';
+import { CacheService } from '../common/cache/cache.service';
 
 describe('EventsService - Fixed Issues', () => {
   let service: EventsService;
@@ -22,11 +24,13 @@ describe('EventsService - Fixed Issues', () => {
   let mockUserRepo: any;
   let mockCategoryRepo: any;
   let mockTicketTypeRepo: any;
+  let mockFavoriteRepo: any;
   let mockDataSource: any;
   let mockJwtService: any;
   let mockAuditLogService: any;
   let mockWaitlistService: any;
   let mockNotificationService: any;
+  let mockCacheService: any;
 
   beforeEach(async () => {
     mockEventRepo = {
@@ -65,6 +69,14 @@ describe('EventsService - Fixed Issues', () => {
       remove: jest.fn(),
     };
 
+    mockFavoriteRepo = {
+      create: jest.fn(),
+      save: jest.fn(),
+      find: jest.fn(),
+      findOne: jest.fn(),
+      delete: jest.fn(),
+    };
+
     mockDataSource = {
       transaction: jest.fn(),
     };
@@ -90,6 +102,14 @@ describe('EventsService - Fixed Issues', () => {
       notifyRefundStatus: jest.fn(),
     };
 
+    mockCacheService = {
+      get: jest.fn().mockResolvedValue(null),
+      set: jest.fn().mockResolvedValue(undefined),
+      del: jest.fn().mockResolvedValue(undefined),
+      getVersion: jest.fn().mockResolvedValue(1),
+      bumpVersion: jest.fn().mockResolvedValue(undefined),
+    };
+
     const module: TestingModule = await Test.createTestingModule({
       providers: [
         EventsService,
@@ -99,11 +119,13 @@ describe('EventsService - Fixed Issues', () => {
         { provide: getRepositoryToken(User), useValue: mockUserRepo },
         { provide: getRepositoryToken(EventCategory), useValue: mockCategoryRepo },
         { provide: getRepositoryToken(TicketType), useValue: mockTicketTypeRepo },
+        { provide: getRepositoryToken(Favorite), useValue: mockFavoriteRepo },
         { provide: DataSource, useValue: mockDataSource },
         { provide: JwtService, useValue: mockJwtService },
         { provide: AuditLogService, useValue: mockAuditLogService },
         { provide: WaitlistService, useValue: mockWaitlistService },
         { provide: NotificationService, useValue: mockNotificationService },
+        { provide: CacheService, useValue: mockCacheService },
       ],
     }).compile();
 
@@ -432,6 +454,96 @@ describe('EventsService - Fixed Issues', () => {
       const result = await service.findOneForViewer('event-1', 'user-1', []);
 
       expect(result).toBe(mockEvent);
+    });
+  });
+
+  // Regression tests: update()'s switchingToPaid guard closes the free-to-paid loophole
+  // for the legacy flat pricePerTicket field, but nested ticket-type CRUD is the other
+  // place an event's real pricing can change post-creation, and it wasn't wired to the
+  // same guard — a free, auto-approved event could get a paid tier added/repriced later
+  // with zero admin review and event.isPaid never flipping to true.
+  describe('Issue 12: free-to-paid loophole via nested ticket-type CRUD', () => {
+    it('createTicketType: pricing a new tier above zero on a free, already-approved event flips isPaid and sends it back for review', async () => {
+      const mockEvent = {
+        id: 'event-1',
+        organizerId: 'org-1',
+        isPaid: false,
+        approvalStatus: EventApprovalStatus.APPROVED,
+        approvalMethod: 'auto',
+        approvedAt: new Date('2026-01-01'),
+        approvedBy: 'admin-1',
+      };
+      mockEventRepo.findOne.mockResolvedValue(mockEvent);
+      mockOrganizerRepo.findOne.mockResolvedValue({ id: 'org-1', userId: 'user-1' });
+      mockEventRepo.save.mockImplementation((e: any) => Promise.resolve(e));
+      mockTicketTypeRepo.create.mockImplementation((data: any) => data);
+      mockTicketTypeRepo.save.mockImplementation((data: any) => Promise.resolve(data));
+
+      await service.createTicketType('event-1', { name: 'VIP', price: 500 } as any, 'user-1', []);
+
+      expect(mockEventRepo.save).toHaveBeenCalledWith(
+        expect.objectContaining({
+          isPaid: true,
+          approvalStatus: EventApprovalStatus.PENDING_APPROVAL,
+          approvalMethod: undefined,
+          approvedAt: undefined,
+          approvedBy: undefined,
+        }),
+      );
+    });
+
+    it('createTicketType: a zero-price (free) tier does not touch isPaid or approvalStatus', async () => {
+      const mockEvent = {
+        id: 'event-1',
+        organizerId: 'org-1',
+        isPaid: false,
+        approvalStatus: EventApprovalStatus.APPROVED,
+      };
+      mockEventRepo.findOne.mockResolvedValue(mockEvent);
+      mockOrganizerRepo.findOne.mockResolvedValue({ id: 'org-1', userId: 'user-1' });
+      mockTicketTypeRepo.create.mockImplementation((data: any) => data);
+      mockTicketTypeRepo.save.mockImplementation((data: any) => Promise.resolve(data));
+
+      await service.createTicketType('event-1', { name: 'GA', price: 0 } as any, 'user-1', []);
+
+      expect(mockEventRepo.save).not.toHaveBeenCalled();
+    });
+
+    it('updateTicketType: raising an existing tier from free to paid on an approved event reopens review', async () => {
+      const mockEvent = {
+        id: 'event-1',
+        organizerId: 'org-1',
+        isPaid: false,
+        approvalStatus: EventApprovalStatus.APPROVED,
+      };
+      mockEventRepo.findOne.mockResolvedValue(mockEvent);
+      mockOrganizerRepo.findOne.mockResolvedValue({ id: 'org-1', userId: 'user-1' });
+      mockEventRepo.save.mockImplementation((e: any) => Promise.resolve(e));
+      mockTicketTypeRepo.findOne.mockResolvedValue({ id: 'tt-1', eventId: 'event-1', price: 0, quantitySold: 0 });
+      mockTicketTypeRepo.save.mockImplementation((data: any) => Promise.resolve(data));
+
+      await service.updateTicketType('event-1', 'tt-1', { price: 250 } as any, 'user-1', []);
+
+      expect(mockEventRepo.save).toHaveBeenCalledWith(
+        expect.objectContaining({ isPaid: true, approvalStatus: EventApprovalStatus.PENDING_APPROVAL }),
+      );
+    });
+
+    it('updateTicketType: an already-paid event is not re-sent for review when a tier price simply changes', async () => {
+      const mockEvent = {
+        id: 'event-1',
+        organizerId: 'org-1',
+        isPaid: true,
+        approvalStatus: EventApprovalStatus.APPROVED,
+      };
+      mockEventRepo.findOne.mockResolvedValue(mockEvent);
+      mockOrganizerRepo.findOne.mockResolvedValue({ id: 'org-1', userId: 'user-1' });
+      mockTicketTypeRepo.findOne.mockResolvedValue({ id: 'tt-1', eventId: 'event-1', price: 200, quantitySold: 0 });
+      mockTicketTypeRepo.save.mockImplementation((data: any) => Promise.resolve(data));
+
+      await service.updateTicketType('event-1', 'tt-1', { price: 350 } as any, 'user-1', []);
+
+      expect(mockEventRepo.save).not.toHaveBeenCalled();
     });
   });
 

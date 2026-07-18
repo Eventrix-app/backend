@@ -6,6 +6,7 @@ import { UsersService } from './users.service';
 import { User } from '../entities/user.entity';
 import { EventCategory } from '../entities/category.entity';
 import { UpdateInterestsDto } from './participant/dto/update-interests.dto';
+import { CacheService } from '../common/cache/cache.service';
 
 const CAT_A = { id: 'a0eebc99-9c0b-4ef8-bb6d-6bb9bd380a11', name: 'Music' } as EventCategory;
 const CAT_B = { id: 'b1eebc99-9c0b-4ef8-bb6d-6bb9bd380a22', name: 'Sports' } as EventCategory;
@@ -37,6 +38,7 @@ describe('UsersService', () => {
   let service: UsersService;
   let mockUserRepo: jest.Mocked<any>;
   let mockCategoryRepo: jest.Mocked<any>;
+  let mockCacheService: jest.Mocked<any>;
 
   beforeEach(async () => {
     mockUserRepo = {
@@ -47,12 +49,20 @@ describe('UsersService', () => {
     mockCategoryRepo = {
       findBy: jest.fn(),
     };
+    mockCacheService = {
+      get: jest.fn().mockResolvedValue(null),
+      set: jest.fn().mockResolvedValue(undefined),
+      del: jest.fn().mockResolvedValue(undefined),
+      getVersion: jest.fn().mockResolvedValue(1),
+      bumpVersion: jest.fn().mockResolvedValue(undefined),
+    };
 
     const module: TestingModule = await Test.createTestingModule({
       providers: [
         UsersService,
         { provide: getRepositoryToken(User), useValue: mockUserRepo },
         { provide: getRepositoryToken(EventCategory), useValue: mockCategoryRepo },
+        { provide: CacheService, useValue: mockCacheService },
       ],
     }).compile();
 

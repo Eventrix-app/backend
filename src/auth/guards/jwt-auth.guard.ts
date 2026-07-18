@@ -8,9 +8,12 @@ import {
 import { Reflector } from '@nestjs/core';
 import { ConfigService } from '@nestjs/config';
 import { JwtService } from '@nestjs/jwt';
+import { InjectRepository } from '@nestjs/typeorm';
+import { Repository } from 'typeorm';
 import { Request } from 'express';
 import { IS_PUBLIC_KEY } from '../../common/decorators/public.decorator';
 import { JwtPayload } from '../jwt.util';
+import { User } from '../../entities/user.entity';
 
 @Injectable()
 export class JwtAuthGuard implements CanActivate {
@@ -20,6 +23,8 @@ export class JwtAuthGuard implements CanActivate {
     private readonly reflector: Reflector,
     private readonly jwtService: JwtService,
     private readonly configService: ConfigService,
+    @InjectRepository(User)
+    private readonly usersRepository: Repository<User>,
   ) {}
 
   async canActivate(context: ExecutionContext): Promise<boolean> {
@@ -59,6 +64,20 @@ export class JwtAuthGuard implements CanActivate {
       const payload = await this.jwtService.verifyAsync<JwtPayload>(token, {
         secret,
       });
+
+      // The JWT itself is stateless — banning a user (AdminService.banUser) or soft-
+      // deleting their account only takes effect at their *next login* unless we check
+      // live state here too. A still-valid token from before the ban would otherwise
+      // keep working for up to its full 1h lifetime.
+      const user = await this.usersRepository.findOne({
+        where: { id: payload.id },
+        select: ['id', 'isBanned', 'deletedAt'],
+        withDeleted: true,
+      });
+      if (!user || user.isBanned || user.deletedAt) {
+        throw new UnauthorizedException('Account is no longer active');
+      }
+
       // Attach the verified payload for downstream handlers (e.g. RolesGuard, @GetUser())
       (request as Request & { user?: JwtPayload }).user = payload;
       return true;

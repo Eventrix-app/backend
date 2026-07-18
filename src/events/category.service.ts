@@ -4,8 +4,12 @@ import { In, Repository } from 'typeorm';
 import { EventCategory } from '../entities/category.entity';
 import { BulkCreateCategoriesDto, CreateCategoryDto } from './category.dto';
 import { PartialType } from '@nestjs/mapped-types';
+import { CacheService } from '../common/cache/cache.service';
 
 export class UpdateCategoryDto extends PartialType(CreateCategoryDto) {}
+
+const CATEGORIES_CACHE_KEY = 'categories:all';
+const CATEGORIES_CACHE_TTL_SECONDS = 300;
 
 @Injectable()
 export class CategoryService implements OnModuleInit {
@@ -14,6 +18,7 @@ export class CategoryService implements OnModuleInit {
   constructor(
     @InjectRepository(EventCategory)
     private readonly categoryRepo: Repository<EventCategory>,
+    private readonly cache: CacheService,
   ) {}
 
   async onModuleInit() {
@@ -40,7 +45,9 @@ export class CategoryService implements OnModuleInit {
 
   async create(dto: CreateCategoryDto): Promise<EventCategory> {
     const category = this.categoryRepo.create(dto);
-    return await this.categoryRepo.save(category);
+    const saved = await this.categoryRepo.save(category);
+    await this.cache.del(CATEGORIES_CACHE_KEY);
+    return saved;
   }
 
   async bulkCreate(dto: BulkCreateCategoriesDto): Promise<EventCategory[]> {
@@ -72,14 +79,20 @@ export class CategoryService implements OnModuleInit {
       );
     }
 
-    return await this.categoryRepo.manager.transaction(async (manager) => {
+    const saved = await this.categoryRepo.manager.transaction(async (manager) => {
       const categories = manager.create(EventCategory, normalizedCategories);
       return await manager.save(EventCategory, categories);
     });
+    await this.cache.del(CATEGORIES_CACHE_KEY);
+    return saved;
   }
 
   async findAll(): Promise<EventCategory[]> {
-    return await this.categoryRepo.find();
+    const cached = await this.cache.get<EventCategory[]>(CATEGORIES_CACHE_KEY);
+    if (cached) return cached;
+    const categories = await this.categoryRepo.find();
+    await this.cache.set(CATEGORIES_CACHE_KEY, categories, CATEGORIES_CACHE_TTL_SECONDS);
+    return categories;
   }
 
   async findOne(id: string): Promise<EventCategory> {
@@ -91,11 +104,14 @@ export class CategoryService implements OnModuleInit {
   async update(id: string, dto: UpdateCategoryDto): Promise<EventCategory> {
     const cat = await this.findOne(id);
     Object.assign(cat, dto);
-    return await this.categoryRepo.save(cat);
+    const saved = await this.categoryRepo.save(cat);
+    await this.cache.del(CATEGORIES_CACHE_KEY);
+    return saved;
   }
 
   async remove(id: string): Promise<void> {
     const cat = await this.findOne(id);
     await this.categoryRepo.remove(cat);
+    await this.cache.del(CATEGORIES_CACHE_KEY);
   }
 }

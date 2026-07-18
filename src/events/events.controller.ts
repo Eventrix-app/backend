@@ -84,6 +84,11 @@ export class EventsController {
     return await this.eventsService.findMyEnrollments(req.user.id);
   }
 
+  @Get('my-favorites')
+  async findMyFavorites(@Request() req: Request & { user: JwtPayload }) {
+    return await this.eventsService.findMyFavorites(req.user.id);
+  }
+
   @Public()
   @Get(':id')
   async findOne(
@@ -240,6 +245,24 @@ export class EventsController {
     @Request() req: Request & { user: JwtPayload },
   ) {
     return await this.eventsService.enroll(id, req.user.id, enrollDto?.ticketTypeId, enrollDto?.quantity);
+  }
+
+  @Post(':id/favorite')
+  @HttpCode(HttpStatus.NO_CONTENT)
+  async addFavorite(
+    @Param('id', ParseUUIDPipe) id: string,
+    @Request() req: Request & { user: JwtPayload },
+  ) {
+    await this.eventsService.addFavorite(id, req.user.id);
+  }
+
+  @Delete(':id/favorite')
+  @HttpCode(HttpStatus.NO_CONTENT)
+  async removeFavorite(
+    @Param('id', ParseUUIDPipe) id: string,
+    @Request() req: Request & { user: JwtPayload },
+  ) {
+    await this.eventsService.removeFavorite(id, req.user.id);
   }
 
   // Section 4e / Section 5: get a single enrollment by id (for TicketDetailsScreen)
