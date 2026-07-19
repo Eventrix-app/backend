@@ -2,7 +2,7 @@
   "info": {
     "name": "Eventrix Backend API",
     "schema": "https://schema.getpostman.com/json/collection/v2.1.0/collection.json",
-    "description": "Postman collection for the current Eventrix backend routes.\n\n🔑 TOKEN FLOW:\n1. Bootstrap an admin with POST /admins/bootstrap or create one with POST /admins after login.\n2. Log in with POST /auth/login and store the returned token in {{accessToken}}.\n3. All protected requests reuse {{accessToken}}.\n4. POST /events auto-creates the organizer profile for the logged-in user and returns organizerId for follow-up organizer requests.\n5. Runtime env keys used by the backend include DATABASE_URL, DATABASE_URL_POOLER, JWT_SECRET, JWT_EXPIRES_IN, FRONTEND_URL, GATEWAY_FEE_PERCENT, GATEWAY_FEE_FLAT, REFUND_WINDOW_HOURS, PAYOUT_DELAY_DAYS, SUPABASE_URL, and SUPABASE_SERVICE_ROLE_KEY.\n\n📤 FILE UPLOADS: POST /uploads/signed-url with a purpose (profile-picture | event-image | event-cover | company-logo) to get a signed Supabase PUT URL, PUT the file bytes to it directly, then send the returned publicUrl as a normal string field on the participant/event/organizer create-or-update call. See multipart.md. Requires SUPABASE_URL and SUPABASE_SERVICE_ROLE_KEY (note the _ROLE_ — not SUPABASE_SERVICE_KEY, an older/removed variable name) in your local .env, or this now returns a 503 with a clear message instead of a raw 500.\n\n👤 ORGANIZER SELF-SERVICE: PATCH/DELETE /organizers/:id now accepts an organizer's own token (not just admin) to manage their own profile, gated by ownership in the handler; admin-only fields (commissionRate, commissionFlatFee, verificationLevel, autoApproveEvents) still 403 for non-admins. See the two 'Update Organizer' requests and the admin-only-field negative test below.\n\n💳 PAYMENT STATUS ENFORCEMENT: POST /payments/refunds and POST /events/check-in now both require the enrollment's paymentStatus to be \"paid\" — not just status \"confirmed\". A paid-ticket enrollment starts out paymentStatus:\"pending\" until POST /payments/webhook confirms it (free tickets are marked paymentStatus:\"paid\" immediately at enroll time, no webhook needed). Calling Request Refund or Check In before the webhook now correctly 400s instead of silently succeeding against an unpaid booking. Also: a late/duplicate webhook can no longer resurrect an already-refunded or cancelled enrollment back to confirmed/paid — see the 'Request Refund' + 'Payment Webhook' sequence below.\n\n🧪 RECOMMENDED RUN ORDER:\n1. POST /auth/register for a regular user.\n2. POST /admins/bootstrap to seed the first admin record.\n3. POST /auth/login to capture {{accessToken}}.\n4. POST /admins to create a protected admin record.\n5. POST /categories then POST /categories/bulk to capture 3 distinct category IDs (categoryId, categoryId2, categoryId3) — PUT /users/me/interests requires 3 unique IDs, duplicates now 400.\n6. POST /events to capture eventId and organizerId.\n7. GET /events/my-events and GET /events/pending to verify event visibility.\n8. POST /participants plus the users/me profile routes — Create Participant now returns an accessToken too (same as auth/register), since it creates the same kind of account.\n9. POST /events/:id/enroll captures enrollmentId and ticketCode.\n10. POST /events/check-in and POST /payments/refunds (Request Refund), each run once immediately after enroll on a paid ticket — expect 400 on both, payment isn't confirmed yet.\n11. POST /payments/webhook confirms the payment (paymentStatus -> \"paid\").\n12. Re-run POST /events/check-in — now succeeds. Re-run POST /payments/refunds — now succeeds and captures refundId.\n13. Use the captured IDs for the remaining refund/approve/reject and delete flows."
+    "description": "Postman collection for the current Eventrix backend routes.\n\n🔑 TOKEN FLOW:\n1. Bootstrap an admin with POST /admins/bootstrap or create one with POST /admins after login.\n2. Log in with POST /auth/login and store the returned token in {{accessToken}}.\n3. All protected requests reuse {{accessToken}}.\n4. POST /events auto-creates the organizer profile for the logged-in user and returns organizerId for follow-up organizer requests.\n5. Runtime env keys used by the backend include DATABASE_URL, DATABASE_URL_POOLER, JWT_SECRET, JWT_EXPIRES_IN, FRONTEND_URL, GATEWAY_FEE_PERCENT, GATEWAY_FEE_FLAT, REFUND_WINDOW_HOURS, PAYOUT_DELAY_DAYS, SUPABASE_URL, SUPABASE_SERVICE_ROLE_KEY, CRON_SECRET, RESEND_API_KEY, and EMAIL_FROM.\n\n📧 EMAIL DELIVERY (Resend): POST /auth/forgot-password sends a real email containing the 6-digit OTP instead of only logging it — requires RESEND_API_KEY set, otherwise EmailService no-ops and logs a warning instead (forgot-password/reset-password still work, but no email actually goes out; the OTP is only in the server log in that case). On an unverified Resend sending domain, delivery only succeeds to the Resend account's own email — any other recipient silently fails to receive it even though the endpoint still returns 200 (anti-enumeration). NotificationService.enqueue() also emails the affected user for event-changed/waitlist-promoted/refund-status jobs, reusing the same title/body it generates for the in-app notifications list — same delivery caveats apply. The dev-only '123456' reset-password fallback (see Auth phase below) is gated to non-production via NODE_ENV.\n\n📤 FILE UPLOADS: POST /uploads/signed-url with a purpose (profile-picture | event-image | event-cover | company-logo) to get a signed Supabase PUT URL, PUT the file bytes to it directly, then send the returned publicUrl as a normal string field on the participant/event/organizer create-or-update call. See multipart.md. Requires SUPABASE_URL and SUPABASE_SERVICE_ROLE_KEY (note the _ROLE_ — not SUPABASE_SERVICE_KEY, an older/removed variable name) in your local .env, or this now returns a 503 with a clear message instead of a raw 500.\n\n👤 ORGANIZER SELF-SERVICE: PATCH/DELETE /organizers/:id now accepts an organizer's own token (not just admin) to manage their own profile, gated by ownership in the handler; admin-only fields (commissionRate, commissionFlatFee, verificationLevel, autoApproveEvents) still 403 for non-admins. See the two 'Update Organizer' requests and the admin-only-field negative test below.\n\n💳 PAYMENT STATUS ENFORCEMENT: POST /payments/refunds and POST /events/check-in now both require the enrollment's paymentStatus to be \"paid\" — not just status \"confirmed\". A paid-ticket enrollment starts out paymentStatus:\"pending\" until POST /payments/webhook confirms it (free tickets are marked paymentStatus:\"paid\" immediately at enroll time, no webhook needed). Calling Request Refund or Check In before the webhook now correctly 400s instead of silently succeeding against an unpaid booking. Also: a late/duplicate webhook can no longer resurrect an already-refunded or cancelled enrollment back to confirmed/paid — see the 'Request Refund' + 'Payment Webhook' sequence below.\n\n🧪 RECOMMENDED RUN ORDER:\n1. POST /auth/register for a regular user.\n2. POST /admins/bootstrap to seed the first admin record.\n3. POST /auth/login to capture {{accessToken}}.\n4. POST /admins to create a protected admin record.\n5. POST /categories then POST /categories/bulk to capture 3 distinct category IDs (categoryId, categoryId2, categoryId3) — PUT /users/me/interests requires 3 unique IDs, duplicates now 400.\n6. POST /events to capture eventId and organizerId.\n7. GET /events/my-events and GET /events/pending to verify event visibility.\n8. POST /participants plus the users/me profile routes — Create Participant now returns an accessToken too (same as auth/register), since it creates the same kind of account.\n9. POST /events/:id/enroll captures enrollmentId and ticketCode.\n10. POST /events/check-in and POST /payments/refunds (Request Refund), each run once immediately after enroll on a paid ticket — expect 400 on both, payment isn't confirmed yet.\n11. POST /payments/webhook confirms the payment (paymentStatus -> \"paid\").\n12. Re-run POST /events/check-in — now succeeds. Re-run POST /payments/refunds — now succeeds and captures refundId.\n13. Use the captured IDs for the remaining refund/approve/reject and delete flows."
   },
   "variable": [
     {
@@ -97,6 +97,21 @@
     },
     {
       "key": "name",
+      "value": "",
+      "type": "string"
+    },
+    {
+      "key": "cronSecret",
+      "value": "",
+      "type": "string"
+    },
+    {
+      "key": "mediaId",
+      "value": "",
+      "type": "string"
+    },
+    {
+      "key": "notificationId",
       "value": "",
       "type": "string"
     }
@@ -247,6 +262,43 @@
                   "  pm.environment.set('accessToken', token);",
                   "}",
                   "if (data && data.role) pm.environment.set('userRole', data.role);"
+                ]
+              }
+            }
+          ]
+        },
+        {
+          "name": "Refresh Token",
+          "request": {
+            "method": "POST",
+            "header": [
+              {
+                "key": "Authorization",
+                "value": "Bearer {{accessToken}}"
+              }
+            ],
+            "url": {
+              "raw": "{{baseUrl}}/auth/refresh",
+              "host": [
+                "{{baseUrl}}"
+              ],
+              "path": [
+                "auth",
+                "refresh"
+              ]
+            }
+          },
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "exec": [
+                  "const data = pm.response.json();",
+                  "const token = data && (data.accessToken || data.token);",
+                  "if (token) {",
+                  "  pm.collectionVariables.set('accessToken', token);",
+                  "  pm.environment.set('accessToken', token);",
+                  "}"
                 ]
               }
             }
@@ -1522,6 +1574,50 @@
           }
         },
         {
+          "name": "My Enrollments",
+          "request": {
+            "method": "GET",
+            "header": [
+              {
+                "key": "Authorization",
+                "value": "Bearer {{accessToken}}"
+              }
+            ],
+            "url": {
+              "raw": "{{baseUrl}}/events/my-enrollments",
+              "host": [
+                "{{baseUrl}}"
+              ],
+              "path": [
+                "events",
+                "my-enrollments"
+              ]
+            }
+          }
+        },
+        {
+          "name": "My Favorites",
+          "request": {
+            "method": "GET",
+            "header": [
+              {
+                "key": "Authorization",
+                "value": "Bearer {{accessToken}}"
+              }
+            ],
+            "url": {
+              "raw": "{{baseUrl}}/events/my-favorites",
+              "host": [
+                "{{baseUrl}}"
+              ],
+              "path": [
+                "events",
+                "my-favorites"
+              ]
+            }
+          }
+        },
+        {
           "name": "Get Event By ID",
           "request": {
             "method": "GET",
@@ -1781,6 +1877,95 @@
           }
         },
         {
+          "name": "List Event Media",
+          "request": {
+            "method": "GET",
+            "header": [],
+            "url": {
+              "raw": "{{baseUrl}}/events/{{eventId}}/media",
+              "host": [
+                "{{baseUrl}}"
+              ],
+              "path": [
+                "events",
+                "{{eventId}}",
+                "media"
+              ]
+            }
+          }
+        },
+        {
+          "name": "Add Event Media",
+          "request": {
+            "method": "POST",
+            "header": [
+              {
+                "key": "Content-Type",
+                "value": "application/json"
+              },
+              {
+                "key": "Authorization",
+                "value": "Bearer {{accessToken}}"
+              }
+            ],
+            "body": {
+              "mode": "raw",
+              "raw": "{\n  \"type\": \"image\",\n  \"url\": \"https://example.com/gallery-photo.jpg\",\n  \"position\": 0\n}",
+              "options": {
+                "raw": {
+                  "language": "json"
+                }
+              }
+            },
+            "url": {
+              "raw": "{{baseUrl}}/events/{{eventId}}/media",
+              "host": [
+                "{{baseUrl}}"
+              ],
+              "path": [
+                "events",
+                "{{eventId}}",
+                "media"
+              ]
+            }
+          },
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "exec": [
+                  "const data = pm.response.json();",
+                  "if (data && data.id) pm.environment.set('mediaId', data.id);"
+                ]
+              }
+            }
+          ]
+        },
+        {
+          "name": "Delete Event Media",
+          "request": {
+            "method": "DELETE",
+            "header": [
+              {
+                "key": "Authorization",
+                "value": "Bearer {{accessToken}}"
+              }
+            ],
+            "url": {
+              "raw": "{{baseUrl}}/events/{{eventId}}/media/{{mediaId}}",
+              "host": [
+                "{{baseUrl}}"
+              ],
+              "path": [
+                "events",
+                "{{eventId}}",
+                "media",
+                "{{mediaId}}"
+              ]
+            }
+          }
+        },
+        {
           "name": "Upload Event Image URL (deprecated, use Uploads > Signed URL)",
           "request": {
             "method": "POST",
@@ -1997,12 +2182,80 @@
               ]
             }
           }
+        },
+        {
+          "name": "Save Event (Favorite)",
+          "request": {
+            "method": "POST",
+            "header": [
+              {
+                "key": "Authorization",
+                "value": "Bearer {{accessToken}}"
+              }
+            ],
+            "url": {
+              "raw": "{{baseUrl}}/events/{{eventId}}/favorite",
+              "host": [
+                "{{baseUrl}}"
+              ],
+              "path": [
+                "events",
+                "{{eventId}}",
+                "favorite"
+              ]
+            }
+          }
+        },
+        {
+          "name": "Unsave Event (Unfavorite)",
+          "request": {
+            "method": "DELETE",
+            "header": [
+              {
+                "key": "Authorization",
+                "value": "Bearer {{accessToken}}"
+              }
+            ],
+            "url": {
+              "raw": "{{baseUrl}}/events/{{eventId}}/favorite",
+              "host": [
+                "{{baseUrl}}"
+              ],
+              "path": [
+                "events",
+                "{{eventId}}",
+                "favorite"
+              ]
+            }
+          }
         }
       ]
     },
     {
       "name": "Payments",
       "item": [
+        {
+          "name": "Trigger Payout Sweep (Cron, prod-only)",
+          "request": {
+            "method": "GET",
+            "header": [
+              {
+                "key": "Authorization",
+                "value": "Bearer {{cronSecret}}"
+              }
+            ],
+            "url": {
+              "raw": "{{baseUrl}}/payments/payout-sweep",
+              "host": [
+                "{{baseUrl}}"
+              ],
+              "path": [
+                "payments",
+                "payout-sweep"
+              ]
+            }
+          }
+        },
         {
           "name": "Fee Estimate",
           "request": {
@@ -2192,6 +2445,88 @@
                 "refunds",
                 "{{refundId}}",
                 "reject"
+              ]
+            }
+          }
+        }
+      ]
+    },
+    {
+      "name": "Notifications",
+      "item": [
+        {
+          "name": "List My Notifications",
+          "request": {
+            "method": "GET",
+            "header": [
+              {
+                "key": "Authorization",
+                "value": "Bearer {{accessToken}}"
+              }
+            ],
+            "url": {
+              "raw": "{{baseUrl}}/notifications",
+              "host": [
+                "{{baseUrl}}"
+              ],
+              "path": [
+                "notifications"
+              ]
+            }
+          },
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "exec": [
+                  "const data = pm.response.json();",
+                  "if (Array.isArray(data) && data[0] && data[0].id) pm.environment.set('notificationId', data[0].id);"
+                ]
+              }
+            }
+          ]
+        },
+        {
+          "name": "Mark Notification Read",
+          "request": {
+            "method": "PATCH",
+            "header": [
+              {
+                "key": "Authorization",
+                "value": "Bearer {{accessToken}}"
+              }
+            ],
+            "url": {
+              "raw": "{{baseUrl}}/notifications/{{notificationId}}/read",
+              "host": [
+                "{{baseUrl}}"
+              ],
+              "path": [
+                "notifications",
+                "{{notificationId}}",
+                "read"
+              ]
+            }
+          }
+        },
+        {
+          "name": "Mark All Notifications Read",
+          "request": {
+            "method": "PATCH",
+            "header": [
+              {
+                "key": "Authorization",
+                "value": "Bearer {{accessToken}}"
+              }
+            ],
+            "url": {
+              "raw": "{{baseUrl}}/notifications/read-all",
+              "host": [
+                "{{baseUrl}}"
+              ],
+              "path": [
+                "notifications",
+                "read-all"
               ]
             }
           }

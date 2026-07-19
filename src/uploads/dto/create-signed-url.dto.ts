@@ -13,7 +13,7 @@ export enum UploadPurpose {
 // Deliberately a fixed allow-list, not a generic "image/*" pattern — only the formats
 // clients actually need to upload. UploadsService's extension map (uploads.service.ts)
 // must stay in sync with this exact list.
-export const ALLOWED_UPLOAD_CONTENT_TYPES = ['image/png', 'image/jpeg', 'image/jpg', 'image/heic', 'image/webp'] as const;
+export const ALLOWED_UPLOAD_CONTENT_TYPES = ['image/png', 'image/jpeg', 'image/jpg', 'image/heic', 'image/webp', 'video/mp4', 'video/quicktime'] as const;
 export type AllowedUploadContentType = (typeof ALLOWED_UPLOAD_CONTENT_TYPES)[number];
 
 export class CreateSignedUrlDto {

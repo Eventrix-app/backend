@@ -19,6 +19,19 @@ import { RequestRefundDto } from './dto/request-refund.dto';
 import { PaymentWebhookDto } from './dto/payment-webhook.dto';
 import { getEventStartDateTime, getEventEndDateTime } from '../events/utils/event-dates.util';
 
+// Same leak EventsService's SAFE_ENROLLMENT_USER_SELECT guards against — Enrollment.user is a
+// plain ManyToOne to the full User entity (passwordHash included), so the organizer refund
+// queue must scope it too. Event/user context is eager-loaded (rather than left for the client
+// to separately look up) so the approval screen can show what it's approving.
+const REFUND_SAFE_ENROLLMENT_SELECT = {
+  id: true,
+  bookingReference: true,
+  quantity: true,
+  totalAmount: true,
+  event: { id: true, title: true, eventDate: true, startTime: true, coverImageUrl: true },
+  user: { id: true, email: true, fullName: true },
+} as const;
+
 @Injectable()
 export class PaymentsService {
   private readonly logger = new Logger(PaymentsService.name);
@@ -154,7 +167,12 @@ export class PaymentsService {
 
   async findPendingRefundsForOrganizer(userId: string, userRoles: string[]): Promise<Refund[]> {
     if (userRoles.includes('admin')) {
-      return this.refundsRepository.find({ where: { status: RefundStatus.REQUESTED }, order: { requestedAt: 'ASC' } });
+      return this.refundsRepository.find({
+        where: { status: RefundStatus.REQUESTED },
+        relations: ['enrollment', 'enrollment.event', 'enrollment.user'],
+        select: { enrollment: REFUND_SAFE_ENROLLMENT_SELECT as any },
+        order: { requestedAt: 'ASC' },
+      });
     }
 
     const organizer = await this.organizersRepository.findOne({ where: { userId } });
@@ -163,7 +181,11 @@ export class PaymentsService {
     return this.refundsRepository
       .createQueryBuilder('refund')
       .innerJoin('refund.enrollment', 'enrollment')
+      .addSelect(['enrollment.id', 'enrollment.bookingReference', 'enrollment.quantity', 'enrollment.totalAmount'])
       .innerJoin('enrollment.event', 'event')
+      .addSelect(['event.id', 'event.title', 'event.eventDate', 'event.startTime', 'event.coverImageUrl'])
+      .leftJoin('enrollment.user', 'enrollmentUser')
+      .addSelect(['enrollmentUser.id', 'enrollmentUser.email', 'enrollmentUser.fullName'])
       .where('event.organizerId = :organizerId', { organizerId: organizer.id })
       .andWhere('refund.status = :status', { status: RefundStatus.REQUESTED })
       .orderBy('refund.requestedAt', 'ASC')

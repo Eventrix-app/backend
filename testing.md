@@ -15,12 +15,15 @@ verify the whole backend end-to-end, not just that each endpoint returns 200.
    collection (`baseUrl`, `accessToken`, `userRole`, `userId`, `adminBootstrapId`,
    `adminId`, `organizerId`, `participantId`, `categoryId`, `categoryId2`, `categoryId3`,
    `eventId`, `ticketTypeId`, `enrollmentId`, `refundId`, `contentType`,
-   `companyLogoUrl`, `ticketCode`, `name`) — the collection's `event: test` scripts write
-   into these automatically on the requests that already have one (Register, Login,
-   Bootstrap Admin, Create Admin, Create Participant, Create Category, Create
-   Paid/Free Event, Create Ticket Type, Enroll Participant, Request Refund).
+   `companyLogoUrl`, `ticketCode`, `name`, `cronSecret`, `mediaId`, `notificationId`) — the
+   collection's `event: test` scripts write into these automatically on the requests that
+   already have one (Register, Login, Bootstrap Admin, Create Admin, Create Participant,
+   Create Category, Create Paid/Free Event, Create Ticket Type, Enroll Participant,
+   Request Refund, Refresh Token, Add Event Media, List My Notifications).
    `Enroll Participant` captures both `enrollmentId` and `ticketCode`; `Request Refund`
-   captures `refundId`.
+   captures `refundId`. `cronSecret` has no capture script — set it manually from your
+   `CRON_SECRET` env value, same as any other secret that shouldn't come from a response
+   body.
 5. Requests without a capture script (most `GET`/admin CRUD requests) require you to
    copy an `id` from the previous response into the variable manually the first time —
    after that, later requests in the same folder reuse it.
@@ -64,10 +67,10 @@ on the happy path, and what to specifically check (not just "200 OK").
 | `POST /auth/register` again, same email | 4xx | Duplicate email is rejected, not silently overwritten |
 | `POST /auth/login` (bootstrap admin's credentials, after Phase 2) | 201 | `accessToken` present, `roles` includes `admin` |
 | `POST /auth/login` wrong password | 401 | `"Invalid email or password"` |
-| `POST /auth/forgot-password` (existing email) | 200 | No email is actually sent — the 6-digit OTP is printed to the **server console log**, not returned in the response. Copy it from there. |
-| `POST /auth/forgot-password` (non-existent email) | 200 | Must respond identically to the existing-email case (no user enumeration) — check the body doesn't reveal whether the account exists |
-| `POST /auth/reset-password` with the OTP from the console | 200 | Password actually changes — verify with a fresh `POST /auth/login` using the new password |
-| `POST /auth/reset-password` with literal `"123456"` | 200 | Dev-only fallback: matches the most recently issued OTP regardless of which email it belongs to. Confirm this only works when at least one OTP is currently pending — don't rely on it in a clean-state test |
+| `POST /auth/forgot-password` (existing email) | 200 | **Now sends a real email** (see §12.5) containing the 6-digit OTP via Resend — check the account's inbox. Falls back to printing the OTP to the **server console log** only when `RESEND_API_KEY` isn't configured; once it is, the OTP is deliberately no longer also logged (defeats "sent privately" otherwise) |
+| `POST /auth/forgot-password` (non-existent email) | 200 | Must respond identically to the existing-email case (no user enumeration) — check the body doesn't reveal whether the account exists, and confirm no email attempt is logged for it |
+| `POST /auth/reset-password` with the OTP from the email (or console, if Resend isn't configured) | 200 | Password actually changes — verify with a fresh `POST /auth/login` using the new password. The OTP is stored DB-side (`password_reset_otps`, hashed) now, not in-process memory — see §12.5 for why that matters on a serverless deployment |
+| `POST /auth/reset-password` with literal `"123456"` | 200 in **non-production** (`NODE_ENV !== "production"`), 401 in production | Dev-only fallback: matches the most recently issued OTP regardless of which email it belongs to. Confirm this only works when at least one OTP is currently pending — don't rely on it in a clean-state test. **Fixed** (§12.5): this previously had no environment gate at all and worked in production too — a live account-takeover path for any account with a recently-requested reset |
 | **Rate limit**: fire 11 requests to any `/auth/*` route inside 60s | 11th → 429 | Class-level `@Throttle({ limit: 10, ttl: 60000 })` on `AuthController` — this applies per route *and* is shared across all four auth routes, so 10 total across login+register+forgot+reset in that window trips it |
 
 ### Phase 2 — Admin bootstrap & CRUD
@@ -297,8 +300,9 @@ Log in as the Phase 3 `user` for creation (they'll get auto-promoted to `organiz
 | `POST /payments/refunds` again, same enrollment, **now that `paymentStatus: "paid"`** and **more than 48h before the event start** | 201, refund status `requested` | Captures `refundId` |
 | `POST /payments/refunds` for an enrollment **inside the 48h cutoff** (event date < 48h out, but paid) | 400/403 | Cutoff is anchored to event **start**, not end — confirm the rejection message references the window, and is distinct from the payment-status message above |
 | `POST /payments/refunds` twice for the same enrollment while one is still open | 4xx | `existingOpenRefund` check |
-| `GET /payments/refunds/pending` as the event's organizer | 200 | Only that organizer's events' refunds appear |
+| `GET /payments/refunds/pending` as the event's organizer | 200 | Only that organizer's events' refunds appear. Each row's `enrollment` is now eager-loaded with `bookingReference`/`quantity`/`totalAmount` plus nested `event` (`id`/`title`/`eventDate`/`startTime`/`coverImageUrl`) and `user` (`id`/`email`/`fullName`, **not** `passwordHash`) — added so `RefundApprovalScreen` (Frontend Stage 4, §13) can render what it's approving without a second round-trip. Confirm `passwordHash` doesn't appear anywhere in the response (same PII-leak check as §6.1's last row) |
 | `GET /payments/refunds/pending` as an unrelated organizer | 200, empty | Ownership-scoped, not a 403 |
+| `GET /payments/refunds/pending` as an admin | 200, all organizers' pending refunds | Admin branch also eager-loads the same `enrollment.event`/`enrollment.user` shape as the organizer branch above — confirm both code paths return the same fields, not just the organizer-scoped one |
 | `PATCH /payments/refunds/:id/approve` | 200, refund `status: "processed"` | Also flips the enrollment to `status: "refunded"`, `paymentStatus: "refunded"` — confirm via `GET /events/enrollments/:enrollmentId` |
 | `PATCH /payments/refunds/:id/reject` with a reason | 200 | |
 | `POST /payments/webhook` (`@Public()`, no auth header) | 200 | Gateway callback — confirm it works with **no** `Authorization` header |
@@ -306,7 +310,7 @@ Log in as the Phase 3 `user` for creation (they'll get auto-promoted to `organiz
 | `POST /payments/webhook` with `status: "failed"` | 200 | Confirm it does *not* mark the enrollment as paid |
 | `POST /payments/webhook`, `status: "success"`, for an enrollment whose refund was **already approved/processed** (i.e. `status: "refunded"`) — use a fresh `gatewayEventId` to simulate a late/duplicate gateway retry | 200, but the `Payment` row is still recorded | **New fix** — confirm via `GET /events/enrollments/:enrollmentId` that `status`/`paymentStatus` **stay** `"refunded"`/`"refunded"` and are **not** flipped back to `"confirmed"`/`"paid"`. Check the server log for the `"...which is already \"refunded\"; payment recorded but enrollment left untouched"` warning — this is the exact bug found in `Backend/logs`, see §5 |
 | **Rate limit**: 61 webhook calls inside 60s | 61st → 429 | `@Throttle({ limit: 60, ttl: 60000 })` |
-| **Payout cron** | N/A — `@Cron(CronExpression.EVERY_HOUR)`, no manual-trigger endpoint exists | Can't be tested on-demand via Postman. To verify: create a paid enrollment, mark it paid via the webhook, set the event's date far enough in the past to clear `eventDate/eventEndDate + 3 days`, then either wait for the top of the hour or temporarily lower the interval in a local branch and watch the server log for `"Payout sweep: N payout(s) created across M candidate event(s)"`. The candidate query now also requires `paymentStatus: "paid"` (not just `status: "confirmed"`) — an enrollment stuck at `"pending"`/`"failed"` payment must never be swept into a payout |
+| **Payout cron** | `@Cron(CronExpression.EVERY_HOUR)` in-process, **plus** a manual-trigger route for environments (Vercel) where that never fires — `GET /payments/payout-sweep`, gated by a `CRON_SECRET` bearer token, see §12.1 for the full 401/200 walkthrough | To verify the in-process cron specifically (not the manual trigger): create a paid enrollment, mark it paid via the webhook, set the event's date far enough in the past to clear `eventDate/eventEndDate + 3 days`, then either wait for the top of the hour or temporarily lower the interval in a local branch and watch the server log for `"Payout sweep: N payout(s) created across M candidate event(s)"`. The candidate query also requires `paymentStatus: "paid"` (not just `status: "confirmed"`) — an enrollment stuck at `"pending"`/`"failed"` payment must never be swept into a payout |
 
 ### Phase 11 — Audit log (no query endpoint — verify via DB)
 
@@ -783,6 +787,11 @@ every remaining unread card and banner at once (confirms `PATCH /notifications/r
 Force-closing and reopening the app should NOT bring back the "unread" styling on
 already-read notifications — if it does, the read state isn't actually persisting server-side.
 
+Each of the three triggers above now also sends a real email to the affected account (see
+§12.5) — check that account's inbox alongside the in-app card. This only actually delivers
+if that account's email matches the address verified/allowed in Resend (see §12.5's
+sandbox-mode caveat); the in-app notification itself is unaffected either way.
+
 ---
 
 ## 11. eventrix-welcome-flow (Next.js web) — real backend auth (real-device / browser testing)
@@ -969,9 +978,122 @@ If you have:
 actual point of the fix; with the old in-memory-only storage, a fresh container would have
 reset the counter to zero and let the burst continue well past the configured limit.
 
+### 12.5 Password-reset OTPs and event/waitlist/refund notifications now send real email (Resend)
+
+**What**: Three separate things landed together here, because the first two were blocking
+bugs the email feature exposed rather than optional cleanup:
+
+1. **Real delivery**: `AuthService.forgotPassword()` sends an actual email via Resend
+   (`EmailService`, `Backend/src/email/`) instead of only logging the OTP server-side.
+   `NotificationService.enqueue()` does the same for all three existing notification types
+   (event changed, waitlist promoted, refund status), reusing the same title/body text it
+   already generates for `GET /notifications`.
+2. **Fixed**: the OTP store moved from a `static Map` living in one process's memory to a
+   new `password_reset_otps` DB table (migration `1670000000017`). The old in-memory store
+   silently broke forgot-password/reset-password on any deployment where consecutive
+   requests can land on different processes (e.g. Vercel serverless, where each container
+   is a separate process) — `forgot-password` and `reset-password` could hit different
+   containers and never see the same OTP. A DB row is instance-independent by construction.
+3. **Fixed**: the `'123456'` dev-testing fallback in `resetPassword()` (matches whichever
+   OTP was most recently issued, for any account) previously had **no environment gate at
+   all** and worked identically in production. Combined with (2)'s bug being real, this was
+   a live account-takeover path: request a reset for a target email, then immediately reset
+   it with `"123456"`. Now gated behind `NODE_ENV !== "production"`.
+
+**How**:
+1. Confirm `RESEND_API_KEY` and `EMAIL_FROM` are set (`Backend/.env` locally, and mirrored
+   in your Vercel project env vars for the deployed backend). Without `RESEND_API_KEY`,
+   `EmailService` logs a warning and no-ops on every send — `forgot-password` still works
+   end-to-end via the console-log fallback, but no notification/event-status emails go out
+   anywhere. This is intentional graceful degradation (same pattern as `CacheService`/
+   `UploadsService` when their own config is missing), not a bug to chase if you haven't
+   set up Resend yet.
+2. **Sandbox-mode caveat**: until a sending domain is verified in your Resend dashboard,
+   Resend only delivers to the account's own registered email — any other recipient's send
+   attempt fails silently server-side (check the `EmailService` log line: `"Resend rejected
+   email..."` vs `"Email sent..."`) while the API call itself still returns 200 either way
+   (anti-enumeration for forgot-password; notifications don't leak delivery failure to the
+   frontend by design). Test with an account whose email matches your Resend account's own
+   address until you verify a domain.
+3. `POST /auth/forgot-password` for a real, existing account → check the server log for
+   `[EmailService] Email sent: "Your Eventrix password reset code" to <email>` → check that
+   inbox for the code.
+4. Copy the code from the email, `POST /auth/reset-password` with it → 200 → confirm a
+   fresh `POST /auth/login` with the new password succeeds.
+5. Query `password_reset_otps` directly (`SELECT * FROM password_reset_otps`) immediately
+   after step 4 — the row should be gone (deleted on successful use), not just marked used.
+6. `POST /auth/reset-password` with an obviously-wrong 6-digit code → 401, `"Invalid or
+   expired verification code"`.
+7. Repeat step 6 but with literal `"123456"` while at least one OTP is pending — succeeds
+   locally (`NODE_ENV` unset or `development`). If you have a way to hit a
+   `NODE_ENV=production` deployment safely, confirm the same call 401s there instead — this
+   is the actual regression test for the fix, not just "does the dev shortcut still work".
+8. Trigger any of §10.4's three notification scenarios (event changed / waitlist promoted /
+   refund status) and confirm the affected account's inbox gets an email matching the
+   in-app notification's title, subject to the same sandbox-mode caveat as step 2.
+
+**Pass when**: Steps 3-5 show a real email delivered and the OTP correctly single-use and
+DB-persisted (not in-memory). Step 6 rejects cleanly. Step 7 confirms the dev fallback is
+now environment-gated rather than a standing backdoor. Step 8 confirms the email side of
+notifications fires from the same trigger points already covered in §10.4, without needing
+to duplicate that section's full setup here.
+
 ---
 
-## 13. Sign-off checklist
+## 13. Frontend — Stage 4 mobile screens (refunds UI)
+
+Companion coverage for Phase 2 item 4: participant-facing refund requests and the
+organizer-facing approval queue. Same manual-browser-testing setup as §6-8 (real-device
+testing is not required for this stage — nothing here touches native-only APIs).
+
+### 13.0 Prerequisites
+
+Everything in §6.0. You'll need **two** logged-in accounts: a participant with at least
+one **paid, confirmed** (`paymentStatus: "paid"`) enrollment (see §8.1 for booking, and
+Phase 10 of §3 for confirming payment via the webhook), and the organizer who owns that
+enrollment's event.
+
+### 13.1 Participant — Request Refund
+
+| Screen / Action | Expect | Check |
+|---|---|---|
+| Open Ticket Details for a **confirmed** booking | Footer shows two buttons side by side: "View Event" and "Request Refund" | If the booking's `status` isn't `"confirmed"` (e.g. already cancelled), "Request Refund" must not render at all — only "View Event" (or nothing, if cancelled) |
+| Tap "Request Refund" | Footer swaps to an inline form: a multi-line "Reason for refund (optional)" text box, "Cancel", and "Submit Request" | The two-button row is fully replaced, not stacked below it |
+| Tap "Cancel" in the form | Reverts to the two-button row, no request sent | Network tab: confirm zero `POST /payments/refunds` calls |
+| Leave the reason blank, tap "Submit Request", **more than 48h before the event start** | "Refund Requested" alert → footer replaces "Request Refund" with a greyed-out "Refund Requested" badge | `POST /payments/refunds` with `{ enrollmentId, reason: undefined }` in the Network tab (reason is optional — confirm the backend accepts an omitted field, not just an empty string) |
+| Tap "Request Refund" again on the **same** booking (fresh screen load or same session) | Backend rejects with a 409-style error — surface it via the "Refund Request Failed" alert, not a silent no-op or a generic message | This is the `existingOpenRefund` check from Phase 10 (§3) — confirm the alert shows the backend's own message text, not a hardcoded frontend string |
+| Repeat the whole flow on a booking for an event **inside the 48h cutoff** | "Refund Request Failed" alert showing the backend's exact cutoff message (e.g. *"Refund requests are only accepted until 48h before the event starts"*) | Regression test for the plan's explicit requirement to surface the 48h-cutoff message **directly from the backend**, not re-derive it client-side — confirm the displayed text matches the `message` field in the `POST /payments/refunds` response body exactly |
+| Repeat on a booking whose `paymentStatus` is still `"pending"` (paid ticket, webhook not yet fired) | "Refund Request Failed" alert: *"This booking has no completed payment to refund"* | Same payment-status enforcement Phase 10 already covers — confirm it surfaces correctly through this new UI path too |
+
+### 13.2 Organizer — Refund Approval queue
+
+| Screen / Action | Expect | Check |
+|---|---|---|
+| Log in as the organizer, open My Events | Header shows a "Refunds" button next to "+ Create" | |
+| Tap "Refunds" | Navigates to Refund Requests screen, showing every pending refund across **all** of this organizer's events, not just one | Confirms the plan's finding that `findPendingRefundsForOrganizer` is organizer-wide, not per-event — if you have refunds pending on two different events, both should appear in one list |
+| Each pending refund's card | Shows the event title, event date/time, requester's name (or email if no `fullName`), booking reference, amount, and the participant's typed reason (if any) | This is the payload from §13.0's `REFUND_SAFE_ENROLLMENT_SELECT` enrichment (see Phase 10 note above) — if any of these show blank/undefined instead of real values, the eager-load isn't wired correctly |
+| No pending refunds | Empty state: "No pending refunds" with explanatory subtext | Not a blank screen or stuck spinner |
+| Tap "Approve" on a card | Inline spinner on that button only (other cards stay interactive) → "Refund Approved" alert → card disappears from the list | Confirms `PATCH /payments/refunds/:id/approve` fires and the `PendingRefunds` RTK Query tag invalidates, refetching the list rather than requiring a manual pull-to-refresh |
+| Tap "Reject" on a card | Card's action row is replaced by an inline "Reason for rejecting (required)" text box + "Cancel"/"Confirm Reject" | Mirrors the participant-side refund-request form's UX pattern |
+| Tap "Confirm Reject" with the reason left blank | Alert: "Please provide a reason for rejecting this refund." — no network call fires | `RejectRefundDto.reason` is `@IsNotEmpty()` on the backend; this is the client-side pre-check that saves the round-trip |
+| Fill in a reason, tap "Confirm Reject" | Card disappears from the list, no success alert (silent — matches the plan's minimal-scope UI) | `PATCH /payments/refunds/:id/reject` with `{ reason }` in the Network tab |
+| Approve/reject a refund, then re-open the queue from a cold navigation (leave My Events entirely, come back) | The just-resolved refund does **not** reappear | Confirms the backend actually transitioned the refund out of `requested` status, not just a client-side list-splice that would reappear on refetch |
+| **Cross-check with Phase 10 (§3)**: after approving, `GET /events/enrollments/:enrollmentId` (Postman) | `status: "refunded"`, `paymentStatus: "refunded"` | Same regression this UI exists to drive — the approval's downstream effects (§12.3) are unchanged by adding a screen on top of them |
+
+### 13.3 Known limitations of this pass
+
+- No "cancel my own refund request" action exists for the participant once submitted —
+  matches the plan's Stage 2 note that leaving a request/waitlist voluntarily is
+  out-of-scope unless explicitly requested by product.
+- The organizer's reject flow doesn't currently show a confirmation alert on success
+  (approve does) — intentional per the minimal-scope UI described in the implementation
+  plan, not an oversight; flag to product if a confirmation becomes a requirement.
+- No pull-to-refresh gesture on the Refund Requests list — it only refetches on
+  navigation/mutation-triggered tag invalidation (§13.2). Acceptable for v1.
+
+---
+
+## 14. Sign-off checklist
 
 - [ ] Phase 0 — Health & Public
 - [ ] Phase 1 — Auth (incl. rate limit)
@@ -1019,4 +1141,45 @@ reset the counter to zero and let the burst continue well past the configured li
       already-issued token (not just at next login), refund approval's three side effects
       (enrollment status, ticket-type capacity, waitlist promotion) land consistently
       together, Redis-backed rate limiting survives a container restart (only if Upstash
-      is provisioned)
+      is provisioned), password-reset OTP email actually delivers via Resend and is
+      DB-persisted/single-use (§12.5), the `"123456"` reset fallback 401s in production
+      and only works in dev, event/waitlist/refund notifications also email the affected
+      account
+- [ ] Frontend Stage 4 — refunds UI (§13): participant Request Refund action gated on
+      `status: "confirmed"` with the 48h-cutoff and already-open-refund backend messages
+      surfaced verbatim, organizer Refund Requests queue reachable from My Events'
+      header (organizer-wide, not per-event), approve/reject with required reject reason,
+      `GET /payments/refunds/pending` response enrichment (`enrollment.event`/
+      `enrollment.user`) renders correctly with no `passwordHash` leak
+
+## 15. Postman collection (`api-routes.json`) coverage added this pass
+
+The collection previously had real backend routes with **zero** Postman coverage —
+closed here so `api-routes.json` matches what the controllers actually expose, not just
+what earlier passes happened to add requests for:
+
+- **Auth**: `POST /auth/refresh` (new "Refresh Token" request, `Auth` folder) — used by
+  the mobile app's `AppStateSync` on every foreground/launch (§1 of this doc never had a
+  request for it despite documenting the route in prose).
+- **Events**: `GET /events/my-enrollments`, `GET /events/my-favorites`,
+  `POST`/`DELETE /events/:id/favorite` (the heart-toggle backend from §10.3), and the
+  event-media gallery trio `GET`/`POST /events/:id/media` + `DELETE
+  /events/:id/media/:mediaId` (carousel images shown after the cover image — a newer
+  addition alongside ticket types, organizer-only for write, approval-gated for public
+  read same as ticket types).
+- **Payments**: `GET /payments/payout-sweep` (the §12.1 cron-trigger endpoint — was
+  fully documented in prose but had no runnable Postman request).
+- **Notifications**: an entirely new folder — `GET /notifications`, `PATCH
+  /notifications/:id/read`, `PATCH /notifications/read-all` — backing §10.4's manual
+  test steps, which previously had no corresponding Postman requests at all.
+
+New collection variables: `cronSecret` (set manually — never captured automatically,
+same as `CRON_SECRET` isn't something a test script should ever read off a response),
+`mediaId` (captured by "Add Event Media"), `notificationId` (captured by "List My
+Notifications", using the first row).
+
+**Email wiring (§12.5)** needed no new requests — `POST /auth/forgot-password` and
+`POST /auth/reset-password` already existed in the `Auth` folder from an earlier pass.
+Only the collection's top-level description changed: `RESEND_API_KEY`/`EMAIL_FROM` added
+to the runtime env keys list, plus a new "📧 EMAIL DELIVERY" section explaining the
+sandbox-mode recipient restriction and the notification-email side effect.

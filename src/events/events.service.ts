@@ -9,10 +9,12 @@ import { User } from '../entities/user.entity';
 import { EventCategory } from '../entities/category.entity';
 import { TicketType } from '../entities/ticket-type.entity';
 import { Favorite } from '../entities/favorite.entity';
+import { EventMedia } from '../entities/event-media.entity';
 import { CreateEventDto } from './dto/create-event.dto';
 import { UpdateEventDto } from './dto/update-event.dto';
 import { CreateTicketTypeDto } from './dto/create-ticket-type.dto';
 import { UpdateTicketTypeDto } from './dto/update-ticket-type.dto';
+import { CreateEventMediaDto } from './dto/create-event-media.dto';
 import { AuditLogService } from '../common/audit-log/audit-log.service';
 import { WaitlistService, WaitlistEntryWithPosition } from '../waitlist/waitlist.service';
 import { WaitlistEntry } from '../entities/waitlist-entry.entity';
@@ -61,6 +63,8 @@ export class EventsService {
     private readonly ticketTypesRepository: Repository<TicketType>,
     @InjectRepository(Favorite)
     private readonly favoritesRepository: Repository<Favorite>,
+    @InjectRepository(EventMedia)
+    private readonly eventMediaRepository: Repository<EventMedia>,
     private readonly dataSource: DataSource,
     private readonly jwtService: JwtService,
     private readonly auditLogService: AuditLogService,
@@ -337,7 +341,7 @@ export class EventsService {
 
     const [events, total] = await this.eventsRepository.findAndCount({
       where,
-      relations: ['organizer', 'organizer.user', 'category'],
+      relations: ['organizer', 'organizer.user', 'category', 'ticketTypes'],
       select: SAFE_ORGANIZER_SELECT,
       order: { eventDate: 'ASC', startTime: 'ASC' },
       skip,
@@ -345,7 +349,7 @@ export class EventsService {
     });
 
     const result = {
-      events,
+      events: events.map((e) => this.withComputedSeats(e)),
       total,
       page,
       totalPages: Math.ceil(total / limit),
@@ -354,10 +358,28 @@ export class EventsService {
     return result;
   }
 
+  // Ticket-tier capacity is the live source of truth (TicketType.quantityTotal/quantitySold);
+  // totalCapacity/availableTickets are deprecated static columns that real (non-seeded)
+  // events never populate. Recomputed here, at read time, for list/detail responses only —
+  // never persisted, so it can't clobber those legacy columns for internal write-path callers
+  // that call findOne() directly (update/approve/reject/ticket-type CRUD).
+  private withComputedSeats<T extends Event>(event: T): T {
+    const tiers = event.ticketTypes;
+    const hasFiniteCapacity = !!tiers?.length && tiers.every((t) => t.quantityTotal != null);
+    return {
+      ...event,
+      totalCapacity: hasFiniteCapacity ? tiers!.reduce((sum, t) => sum + t.quantityTotal!, 0) : undefined,
+      availableTickets: hasFiniteCapacity
+        ? tiers!.reduce((sum, t) => sum + Math.max(t.quantityTotal! - t.quantitySold, 0), 0)
+        : undefined,
+      ticketTypes: undefined,
+    } as T;
+  }
+
   async findOne(id: string): Promise<Event> {
     const event = await this.eventsRepository.findOne({
       where: { id, deletedAt: null as any },
-      relations: ['organizer', 'organizer.user', 'category'],
+      relations: ['organizer', 'organizer.user', 'category', 'ticketTypes'],
       select: SAFE_ORGANIZER_SELECT,
     });
     if (!event) {
@@ -393,7 +415,7 @@ export class EventsService {
     if (!isOwnerOrAdmin && event.approvalStatus !== EventApprovalStatus.APPROVED) {
       throw new NotFoundException(`Event with id ${id} not found`);
     }
-    return event;
+    return this.withComputedSeats(event);
   }
 
   async update(id: string, updateEventDto: UpdateEventDto, userId: string, userRoles: string[]): Promise<Event> {
@@ -679,6 +701,46 @@ export class EventsService {
       throw new NotFoundException(`Ticket type ${ticketTypeId} not found on event ${eventId}`);
     }
     return ticketType;
+  }
+
+  // Gallery media (carousel items shown after the cover image on EventDetailsScreen).
+  // Same visibility rule as ticket types: pricing/media for a not-yet-approved event is
+  // only the organizer's/admin's business until it's actually approved for public viewing.
+  async findMedia(eventId: string, userId?: string, userRoles: string[] = []): Promise<EventMedia[]> {
+    const event = await this.findOne(eventId);
+    const isOwnerOrAdmin = userId ? await this.isOwnerOrAdmin(event, userId, userRoles) : false;
+    if (!isOwnerOrAdmin && !event.isApproved()) {
+      return [];
+    }
+    return this.eventMediaRepository.find({ where: { eventId }, order: { position: 'ASC', createdAt: 'ASC' } });
+  }
+
+  async addMedia(eventId: string, dto: CreateEventMediaDto, userId: string, userRoles: string[]): Promise<EventMedia> {
+    const event = await this.findOne(eventId);
+    await this.assertOwnsEvent(event, userId, userRoles);
+    this.assertNotRejected(event);
+
+    const media = this.eventMediaRepository.create({
+      eventId,
+      type: dto.type,
+      url: dto.url,
+      position: dto.position ?? 0,
+    });
+    const saved = await this.eventMediaRepository.save(media);
+    this.logger.log(`Added ${saved.type} media ${saved.id} on event ${eventId}`);
+    return saved;
+  }
+
+  async removeMedia(eventId: string, mediaId: string, userId: string, userRoles: string[]): Promise<void> {
+    const event = await this.findOne(eventId);
+    await this.assertOwnsEvent(event, userId, userRoles);
+
+    const media = await this.eventMediaRepository.findOne({ where: { id: mediaId, eventId } });
+    if (!media) {
+      throw new NotFoundException(`Media ${mediaId} not found on event ${eventId}`);
+    }
+    await this.eventMediaRepository.remove(media);
+    this.logger.log(`Removed media ${mediaId} on event ${eventId}`);
   }
 
   private async isOwnerOrAdmin(event: Event, userId: string, userRoles: string[]): Promise<boolean> {

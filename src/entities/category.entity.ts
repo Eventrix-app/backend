@@ -15,12 +15,6 @@ export class EventCategory {
   @Column({ type: 'varchar', length: 100, unique: true })
   name!: string;
 
-  @Column({ type: 'varchar', length: 10, nullable: true })
-  emoji?: string;
-
-  @Column({ name: 'color_hex', type: 'varchar', length: 7, nullable: true })
-  colorHex?: string;
-
   @Column({ type: 'text', nullable: true })
   description?: string;
 

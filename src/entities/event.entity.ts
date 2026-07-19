@@ -19,6 +19,7 @@ import { User } from './user.entity';
 import { EventCategory } from './category.entity';
 import { Enrollment } from './enrollment.entity';
 import { TicketType } from './ticket-type.entity';
+import { EventMedia } from './event-media.entity';
 
 // Enums for type safety
 export enum EventApprovalStatus {
@@ -223,6 +224,9 @@ export class Event {
 
   @OneToMany(() => TicketType, (ticketType) => ticketType.event)
   ticketTypes!: TicketType[];
+
+  @OneToMany(() => EventMedia, (media) => media.event)
+  media!: EventMedia[];
 
   @BeforeInsert()
   @BeforeUpdate()

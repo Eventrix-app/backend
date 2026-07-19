@@ -24,6 +24,7 @@ import { UpdateEventDto } from './dto/update-event.dto';
 import { EnrollDto } from './dto/enroll.dto';
 import { CreateTicketTypeDto } from './dto/create-ticket-type.dto';
 import { UpdateTicketTypeDto } from './dto/update-ticket-type.dto';
+import { CreateEventMediaDto } from './dto/create-event-media.dto';
 import { JwtPayload } from '../auth/jwt.util';
 import { Roles } from '../common/decorators/roles.decorator';
 import { Public } from '../common/decorators/public.decorator';
@@ -200,6 +201,37 @@ export class EventsController {
     @Request() req: Request & { user: JwtPayload },
   ) {
     await this.eventsService.removeTicketType(id, ticketTypeId, req.user.id, req.user.roles);
+  }
+
+  // Gallery media (organizer-only, own event). The cover image stays a plain field on the
+  // event itself — this only covers the additional carousel images/videos shown after it.
+  @Public()
+  @Get(':id/media')
+  async findMedia(
+    @Param('id', ParseUUIDPipe) id: string,
+    @Request() req: Request & { user?: JwtPayload },
+  ) {
+    return await this.eventsService.findMedia(id, req.user?.id, req.user?.roles ?? []);
+  }
+
+  @Post(':id/media')
+  @HttpCode(HttpStatus.CREATED)
+  async addMedia(
+    @Param('id', ParseUUIDPipe) id: string,
+    @Body() dto: CreateEventMediaDto,
+    @Request() req: Request & { user: JwtPayload },
+  ) {
+    return await this.eventsService.addMedia(id, dto, req.user.id, req.user.roles);
+  }
+
+  @Delete(':id/media/:mediaId')
+  @HttpCode(HttpStatus.NO_CONTENT)
+  async removeMedia(
+    @Param('id', ParseUUIDPipe) id: string,
+    @Param('mediaId', ParseUUIDPipe) mediaId: string,
+    @Request() req: Request & { user: JwtPayload },
+  ) {
+    await this.eventsService.removeMedia(id, mediaId, req.user.id, req.user.roles);
   }
 
   // Deprecated: use POST /uploads/signed-url with purpose: "event-cover" instead

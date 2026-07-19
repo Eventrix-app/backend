@@ -1,9 +1,12 @@
 import { Test, TestingModule } from '@nestjs/testing';
 import { getRepositoryToken } from '@nestjs/typeorm';
 import { JwtService } from '@nestjs/jwt';
+import { ConfigService } from '@nestjs/config';
 import * as bcrypt from 'bcryptjs';
 import { AuthService } from './auth.service';
 import { User } from '../entities/user.entity';
+import { PasswordResetOtp } from '../entities/password-reset-otp.entity';
+import { EmailService } from '../email/email.service';
 
 // Regression tests: reaching /auth/register in this app's flow always follows the full
 // pre-auth onboarding chain (carousel + interests + location + notification prefs), so
@@ -24,7 +27,10 @@ describe('AuthService — hasCompletedOnboarding', () => {
       providers: [
         AuthService,
         { provide: getRepositoryToken(User), useValue: mockUserRepo },
+        { provide: getRepositoryToken(PasswordResetOtp), useValue: {} },
         { provide: JwtService, useValue: { sign: jest.fn(() => 'signed-token') } },
+        { provide: EmailService, useValue: { send: jest.fn(), isConfigured: false } },
+        { provide: ConfigService, useValue: { get: jest.fn() } },
       ],
     }).compile();
 

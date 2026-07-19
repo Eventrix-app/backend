@@ -35,6 +35,8 @@ const EXTENSION_BY_CONTENT_TYPE: Record<AllowedUploadContentType, string> = {
   'image/jpg': 'jpg',
   'image/heic': 'heic',
   'image/webp': 'webp',
+  'video/mp4': 'mp4',
+  'video/quicktime': 'mov',
 };
 
 @Injectable()

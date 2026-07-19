@@ -2,6 +2,8 @@ import { Injectable, Logger, NotFoundException } from '@nestjs/common';
 import { InjectRepository } from '@nestjs/typeorm';
 import { IsNull, Repository } from 'typeorm';
 import { NotificationJob, NotificationJobStatus, NotificationType } from '../entities/notification-job.entity';
+import { User } from '../entities/user.entity';
+import { EmailService } from '../email/email.service';
 
 export interface NotificationRecord {
   id: string;
@@ -19,10 +21,17 @@ export class NotificationService {
   constructor(
     @InjectRepository(NotificationJob)
     private readonly notificationJobsRepository: Repository<NotificationJob>,
+    @InjectRepository(User)
+    private readonly usersRepository: Repository<User>,
+    private readonly emailService: EmailService,
   ) {}
 
-  // No push/email transport is wired up yet (Phase 2 item) — jobs are persisted for
-  // auditability/replay and "delivered" by logging, then marked sent immediately.
+  // Push transport still isn't wired up (that's the Phase 2 push-notifications item), but
+  // email now is — every job additionally fires an email using the same title/body this
+  // generates for the in-app notifications list. Email sending is fire-and-forget on
+  // purpose: EmailService.send() never throws, but even a hypothetical failure here must
+  // never fail the job itself, since callers (e.g. PaymentsService.approveRefund) await
+  // enqueue() as part of a larger state transition that has already committed.
   async enqueue(userId: string, type: NotificationType, payload: Record<string, unknown>): Promise<NotificationJob> {
     const job = this.notificationJobsRepository.create({ userId, type, payload, status: NotificationJobStatus.PENDING });
     const saved = await this.notificationJobsRepository.save(job);
@@ -32,7 +41,19 @@ export class NotificationService {
     await this.notificationJobsRepository.save(saved);
 
     this.logger.log(`Notification [${type}] delivered to user ${userId}: ${JSON.stringify(payload)}`);
+    await this.sendEmailForJob(userId, type, payload);
     return saved;
+  }
+
+  private async sendEmailForJob(userId: string, type: NotificationType, payload: Record<string, unknown>): Promise<void> {
+    try {
+      const user = await this.usersRepository.findOne({ where: { id: userId } });
+      if (!user?.email) return;
+      const { title, body } = this.describe(type, payload);
+      await this.emailService.send(user.email, title, `<p>${body}</p>`);
+    } catch (err) {
+      this.logger.warn(`Failed to email notification [${type}] to user ${userId}: ${err instanceof Error ? err.message : String(err)}`);
+    }
   }
 
   async notifyEventChanged(

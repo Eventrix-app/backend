@@ -26,19 +26,19 @@ export class CategoryService implements OnModuleInit {
     const count = await this.categoryRepo.count();
     if (count === 0) {
       const defaults = [
-        { name: 'Music', emoji: '🎵', colorHex: '#FF3366', description: 'Live music, concerts, and festivals' },
-        { name: 'Tech', emoji: '💻', colorHex: '#3B82F6', description: 'Tech conferences, workshops, and meetups' },
-        { name: 'Sports', emoji: '⚽', colorHex: '#10B981', description: 'Sports events and competitions' },
-        { name: 'Health', emoji: '🧘', colorHex: '#8B5CF6', description: 'Health, wellness, and fitness events' },
-        { name: 'Business', emoji: '💼', colorHex: '#F59E0B', description: 'Business networking and conferences' },
-        { name: 'Education', emoji: '📚', colorHex: '#EC4899', description: 'Workshops, seminars, and courses' },
-        { name: 'Food', emoji: '🍔', colorHex: '#FF6B6B', description: 'Food festivals and culinary events' },
-        { name: 'Art', emoji: '🎨', colorHex: '#9B59B6', description: 'Art exhibitions and cultural events' },
+        { name: 'Music', description: 'Live music, concerts, and festivals' },
+        { name: 'Tech', description: 'Tech conferences, workshops, and meetups' },
+        { name: 'Sports', description: 'Sports events and competitions' },
+        { name: 'Health', description: 'Health, wellness, and fitness events' },
+        { name: 'Business', description: 'Business networking and conferences' },
+        { name: 'Education', description: 'Workshops, seminars, and courses' },
+        { name: 'Food', description: 'Food festivals and culinary events' },
+        { name: 'Art', description: 'Art exhibitions and cultural events' },
       ];
       for (const data of defaults) {
         const cat = this.categoryRepo.create(data);
         await this.categoryRepo.save(cat);
-        this.logger.log(`Seeded default category: ${data.name} ${data.emoji}`);
+        this.logger.log(`Seeded default category: ${data.name}`);
       }
     }
   }

@@ -15,14 +15,6 @@ export class CreateCategoryDto {
 
   @IsOptional()
   @IsString()
-  emoji?: string;
-
-  @IsOptional()
-  @IsString()
-  colorHex?: string;
-
-  @IsOptional()
-  @IsString()
   description?: string;
 }
 

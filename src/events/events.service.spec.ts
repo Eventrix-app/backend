@@ -8,6 +8,7 @@ import { User } from '../entities/user.entity';
 import { EventCategory } from '../entities/category.entity';
 import { TicketType } from '../entities/ticket-type.entity';
 import { Favorite } from '../entities/favorite.entity';
+import { EventMedia } from '../entities/event-media.entity';
 import { DataSource } from 'typeorm';
 import { JwtService } from '@nestjs/jwt';
 import { NotFoundException, BadRequestException, ConflictException } from '@nestjs/common';
@@ -25,6 +26,7 @@ describe('EventsService - Fixed Issues', () => {
   let mockCategoryRepo: any;
   let mockTicketTypeRepo: any;
   let mockFavoriteRepo: any;
+  let mockEventMediaRepo: any;
   let mockDataSource: any;
   let mockJwtService: any;
   let mockAuditLogService: any;
@@ -77,6 +79,14 @@ describe('EventsService - Fixed Issues', () => {
       delete: jest.fn(),
     };
 
+    mockEventMediaRepo = {
+      create: jest.fn(),
+      save: jest.fn(),
+      find: jest.fn(),
+      findOne: jest.fn(),
+      remove: jest.fn(),
+    };
+
     mockDataSource = {
       transaction: jest.fn(),
     };
@@ -120,6 +130,7 @@ describe('EventsService - Fixed Issues', () => {
         { provide: getRepositoryToken(EventCategory), useValue: mockCategoryRepo },
         { provide: getRepositoryToken(TicketType), useValue: mockTicketTypeRepo },
         { provide: getRepositoryToken(Favorite), useValue: mockFavoriteRepo },
+        { provide: getRepositoryToken(EventMedia), useValue: mockEventMediaRepo },
         { provide: DataSource, useValue: mockDataSource },
         { provide: JwtService, useValue: mockJwtService },
         { provide: AuditLogService, useValue: mockAuditLogService },
@@ -453,7 +464,10 @@ describe('EventsService - Fixed Issues', () => {
 
       const result = await service.findOneForViewer('event-1', 'user-1', []);
 
-      expect(result).toBe(mockEvent);
+      // Not toBe: findOneForViewer now returns a fresh object with totalCapacity/
+      // availableTickets recomputed from ticketTypes (withComputedSeats), not the raw
+      // entity instance — same content, new reference.
+      expect(result).toEqual(mockEvent);
     });
   });
 

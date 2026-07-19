@@ -14,6 +14,8 @@ import { WaitlistEntry } from './entities/waitlist-entry.entity';
 import { AuditLog } from './entities/audit-log.entity';
 import { Payout } from './entities/payout.entity';
 import { NotificationJob } from './entities/notification-job.entity';
+import { EventMedia } from './entities/event-media.entity';
+import { PasswordResetOtp } from './entities/password-reset-otp.entity';
 import { AddOnboardingFields1660000000003 } from './database/migrations/1660000000003-AddOnboardingFields';
 
 const entities = [
@@ -31,6 +33,8 @@ const entities = [
   AuditLog,
   Payout,
   NotificationJob,
+  EventMedia,
+  PasswordResetOtp,
 ];
 
 export const AppDataSource = new DataSource({

@@ -32,4 +32,11 @@ export default () => ({
     // which has no long-lived process for it to run inside.
     secret: process.env.CRON_SECRET,
   },
+  email: {
+    // EmailService treats a missing key as "not configured" and no-ops (logs instead of
+    // throwing) — same graceful-degradation pattern as CacheService/UploadsService, so a
+    // local dev environment without a Resend key doesn't break auth/notifications entirely.
+    resendApiKey: process.env.RESEND_API_KEY,
+    from: process.env.EMAIL_FROM || 'onboarding@resend.dev',
+  },
 });

@@ -5,17 +5,22 @@ import {
   UnauthorizedException,
 } from '@nestjs/common';
 import { InjectRepository } from '@nestjs/typeorm';
-import { Repository } from 'typeorm';
+import { MoreThan, Repository } from 'typeorm';
 import * as bcrypt from 'bcryptjs';
+import { createHash, randomInt } from 'crypto';
 import { JwtService } from '@nestjs/jwt';
+import { ConfigService } from '@nestjs/config';
 import { LoginDto } from './dto/login.dto';
 import { CreateUserDto } from './dto/create-user.dto';
 import { AuthResponseDto } from './dto/auth-response.dto';
 import { JwtPayload, SESSION_TOKEN_TTL_SECONDS } from './jwt.util';
 import { User } from '../entities/user.entity';
+import { PasswordResetOtp } from '../entities/password-reset-otp.entity';
+import { EmailService } from '../email/email.service';
 
 const BCRYPT_PREFIXES = ['$2a$', '$2b$', '$2y$'];
 const BCRYPT_ROUNDS = 10;
+const OTP_TTL_MINUTES = 10;
 
 @Injectable()
 export class AuthService {
@@ -24,7 +29,11 @@ export class AuthService {
   constructor(
     @InjectRepository(User)
     private readonly usersRepository: Repository<User>,
+    @InjectRepository(PasswordResetOtp)
+    private readonly otpRepository: Repository<PasswordResetOtp>,
     private readonly jwtService: JwtService,
+    private readonly emailService: EmailService,
+    private readonly configService: ConfigService,
   ) {}
 
   async login(loginDto: LoginDto): Promise<AuthResponseDto> {
@@ -175,8 +184,11 @@ export class AuthService {
     };
   }
 
-  // A temporary in-memory store for OTPs: email -> { otp, expires }
-  private static otps = new Map<string, { otp: string; expires: number }>();
+  // SHA-256 of the plaintext OTP — the code itself only ever exists in the email sent to
+  // the user and transiently in this process; the DB only ever holds the digest.
+  private hashOtp(otp: string): string {
+    return createHash('sha256').update(otp).digest('hex');
+  }
 
   async forgotPassword(email: string): Promise<void> {
     const user = await this.usersRepository.findOne({ where: { email } });
@@ -185,46 +197,71 @@ export class AuthService {
       return;
     }
 
-    // Generate a simple 6-digit OTP
-    const otp = Math.floor(100000 + Math.random() * 900000).toString();
-    // Expire in 10 minutes
-    AuthService.otps.set(email, { otp, expires: Date.now() + 10 * 60 * 1000 });
+    // crypto.randomInt is uniform over [100000, 999999] and, unlike Math.random(), isn't
+    // predictable from observing prior outputs — worth the negligible extra cost for
+    // something that gates an account takeover.
+    const otp = randomInt(100000, 1000000).toString();
 
-    this.logger.log(`*************************************************`);
-    this.logger.log(`PASSWORD RESET OTP FOR ${email}: ${otp}`);
-    this.logger.log(`*************************************************`);
+    // One pending OTP per email — a fresh request supersedes whatever was issued before,
+    // matching the old Map's single-entry-per-key behavior.
+    await this.otpRepository.delete({ email });
+    await this.otpRepository.save(
+      this.otpRepository.create({
+        email,
+        otpHash: this.hashOtp(otp),
+        expiresAt: new Date(Date.now() + OTP_TTL_MINUTES * 60 * 1000),
+      }),
+    );
+
+    await this.emailService.send(
+      email,
+      'Your Eventrix password reset code',
+      `<p>Your password reset code is:</p>` +
+        `<p style="font-size:28px;font-weight:700;letter-spacing:4px;">${otp}</p>` +
+        `<p>This code expires in ${OTP_TTL_MINUTES} minutes. If you didn't request this, you can ignore this email.</p>`,
+    );
+
+    // Local-dev convenience only, and only when no real send was attempted — once email is
+    // configured, the code must never also land in a log, or "send it privately" is moot.
+    if (!this.emailService.isConfigured) {
+      this.logger.log(`*************************************************`);
+      this.logger.log(`PASSWORD RESET OTP FOR ${email}: ${otp}`);
+      this.logger.log(`*************************************************`);
+    }
   }
 
   async resetPassword(token: string, password: string): Promise<void> {
-    let email: string | null = null;
-    const now = Date.now();
-    for (const [key, val] of AuthService.otps.entries()) {
-      if (val.otp === token && val.expires > now) {
-        email = key;
-        break;
-      }
+    const now = new Date();
+    let match = await this.otpRepository.findOne({
+      where: { otpHash: this.hashOtp(token), expiresAt: MoreThan(now) },
+      order: { createdAt: 'DESC' },
+    });
+
+    // Dev-only testing fallback (matches whichever OTP was most recently issued, for
+    // whichever email that was) — exists so a local tester without email configured can
+    // drive the reset flow without tailing server logs. Gated out of production: unlike
+    // the rest of this flow, this specific branch previously had no environment check at
+    // all, making it a live account-takeover backdoor rather than a dev convenience.
+    const isProduction = this.configService.get<string>('NODE_ENV') === 'production';
+    if (!match && token === '123456' && !isProduction) {
+      match = await this.otpRepository.findOne({
+        where: { expiresAt: MoreThan(now) },
+        order: { createdAt: 'DESC' },
+      });
     }
 
-    // Support '123456' as a developer testing fallback
-    if (!email && token === '123456') {
-      const pendingEmails = Array.from(AuthService.otps.keys());
-      if (pendingEmails.length > 0) {
-        email = pendingEmails[pendingEmails.length - 1];
-      }
-    }
-
-    if (!email) {
+    if (!match) {
       throw new UnauthorizedException('Invalid or expired verification code');
     }
 
-    const user = await this.usersRepository.findOne({ where: { email } });
+    const user = await this.usersRepository.findOne({ where: { email: match.email } });
     if (!user) {
       throw new UnauthorizedException('User not found');
     }
 
     user.passwordHash = await bcrypt.hash(password, BCRYPT_ROUNDS);
     await this.usersRepository.save(user);
-    AuthService.otps.delete(email);
-    this.logger.log(`Password reset successfully for user: ${email}`);
+    await this.otpRepository.delete({ email: match.email });
+    this.logger.log(`Password reset successfully for user: ${match.email}`);
   }
 }

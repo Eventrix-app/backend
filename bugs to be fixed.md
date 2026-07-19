@@ -1,0 +1,2 @@
+1.when i logged out from the app in browser and hit the refresh button, it directly logged me in and redirecte to home screen instead of keeping me on the loin page. This is a security issue as it should not allow automatic login after logout.
+2.also when refreshed at login page, the app should give me fresh start showing the splashscreen, video screen and then login page instead of directly showing the login page. This is also a security issue as it should not allow direct access to the login page without going through the splashscreen and video screen.

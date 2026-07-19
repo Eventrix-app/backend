@@ -11,6 +11,7 @@ import { User } from '../entities/user.entity';
 import { EventCategory } from '../entities/category.entity';
 import { TicketType } from '../entities/ticket-type.entity';
 import { Favorite } from '../entities/favorite.entity';
+import { EventMedia } from '../entities/event-media.entity';
 import { CategoryService } from './category.service';
 import { CategoryController } from './category.controller';
 import { WaitlistModule } from '../waitlist/waitlist.module';
@@ -19,7 +20,7 @@ import { UploadsModule } from '../uploads/uploads.module';
 @Module({
   imports: [
     ConfigModule,
-    TypeOrmModule.forFeature([Event, Enrollment, Organizer, User, EventCategory, TicketType, Favorite]),
+    TypeOrmModule.forFeature([Event, Enrollment, Organizer, User, EventCategory, TicketType, Favorite, EventMedia]),
     WaitlistModule,
     UploadsModule,
     JwtModule.registerAsync({
