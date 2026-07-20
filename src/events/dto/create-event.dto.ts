@@ -100,11 +100,6 @@ export class CreateEventDto {
   totalCapacity?: number;
 
   @IsOptional()
-  @IsInt({ message: 'Available tickets must be an integer' })
-  @Min(0, { message: 'Available tickets cannot be negative' })
-  availableTickets?: number;
-
-  @IsOptional()
   @IsBoolean()
   featured?: boolean;
 

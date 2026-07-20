@@ -135,9 +135,11 @@ export class Event {
   @Column({ name: 'total_capacity', type: 'int', nullable: true })
   totalCapacity!: number;
 
-  /** @deprecated superseded by TicketType.quantityTotal - quantitySold; kept for backward compat on legacy events. */
-  @Column({ name: 'available_tickets', type: 'int', nullable: true })
-  availableTickets!: number;
+  // Not a persisted column — EventsService.withComputedSeats() assigns this at read time
+  // (live sum across ticket_types, or event.capacity when set). The old `available_tickets`
+  // DB column this used to read/write was dropped: nothing ever read its stored value —
+  // every response either recomputes it fresh here or never rendered the raw column at all.
+  availableTickets?: number;
 
   // Aggregate cap across all ticket tiers for this event; null = unlimited (per-tier caps still apply).
   @Column({ type: 'int', nullable: true })
@@ -242,14 +244,6 @@ export class Event {
     return (
       this.approvalStatus === EventApprovalStatus.APPROVED &&
       this.status === EventStatus.UPCOMING
-    );
-  }
-
-  hasTicketsAvailable(): boolean {
-    return (
-      this.availableTickets === undefined ||
-      this.availableTickets === null ||
-      this.availableTickets > 0
     );
   }
 

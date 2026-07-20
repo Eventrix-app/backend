@@ -352,7 +352,6 @@ describe('EventsService - Fixed Issues', () => {
         id: 'event-1',
         approvalStatus: EventApprovalStatus.PENDING_APPROVAL,
         status: EventStatus.UPCOMING,
-        availableTickets: 10,
         canEnroll: () => false,
       };
 
@@ -692,7 +691,6 @@ describe('EventsService - Fixed Issues', () => {
       const event = new Event();
       event.approvalStatus = EventApprovalStatus.APPROVED;
       event.status = EventStatus.UPCOMING;
-      event.availableTickets = 10;
 
       expect(event.canEnroll()).toBe(true);
     });
@@ -701,16 +699,8 @@ describe('EventsService - Fixed Issues', () => {
       const event = new Event();
       event.approvalStatus = EventApprovalStatus.PENDING_APPROVAL;
       event.status = EventStatus.UPCOMING;
-      event.availableTickets = 10;
 
       expect(event.canEnroll()).toBe(false);
-    });
-
-    it('hasTicketsAvailable should return false when tickets are 0', () => {
-      const event = new Event();
-      event.availableTickets = 0;
-
-      expect(event.hasTicketsAvailable()).toBe(false);
     });
 
     it('isApproved should return true only for approved status', () => {

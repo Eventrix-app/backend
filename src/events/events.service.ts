@@ -279,7 +279,6 @@ export class EventsService {
         isOnline: false,
         pricePerTicket: 0,
         totalCapacity: 100,
-        availableTickets: 100,
         ticketTypes: [{ name: 'General Admission', price: 0, quantityTotal: 100 }],
       };
 
