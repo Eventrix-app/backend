@@ -5,6 +5,8 @@ import { JwtService } from '@nestjs/jwt';
 import { WaitlistEntry, WaitlistStatus } from '../entities/waitlist-entry.entity';
 import { Enrollment } from '../entities/enrollment.entity';
 import { NotificationService } from '../notifications/notification.service';
+import { CacheService } from '../common/cache/cache.service';
+import { invalidateEventCaches } from '../events/utils/event-cache.util';
 
 export type WaitlistEntryWithPosition = WaitlistEntry & { position: number };
 
@@ -18,6 +20,7 @@ export class WaitlistService {
     private readonly dataSource: DataSource,
     private readonly jwtService: JwtService,
     private readonly notificationService: NotificationService,
+    private readonly cache: CacheService,
   ) {}
 
   async join(eventId: string, ticketTypeId: string, userId: string, quantity: number): Promise<WaitlistEntryWithPosition> {
@@ -149,6 +152,10 @@ export class WaitlistService {
     });
 
     if (!promotedEnrollment) return false;
+
+    // A promotion consumes a seat exactly like a direct enroll() does — same
+    // availableTickets staleness risk if this is skipped.
+    await invalidateEventCaches(this.cache, promotedEnrollment.eventId);
 
     await this.notificationService.notifyWaitlistPromoted(
       promotedEnrollment.userId,

@@ -21,6 +21,7 @@ import { WaitlistService, WaitlistEntryWithPosition } from '../waitlist/waitlist
 import { WaitlistEntry } from '../entities/waitlist-entry.entity';
 import { NotificationService } from '../notifications/notification.service';
 import { getEventEndDateTime } from './utils/event-dates.util';
+import { EVENTS_LIST_VERSION_KEY, eventDetailCacheKey, invalidateEventCaches } from './utils/event-cache.util';
 import { CacheService } from '../common/cache/cache.service';
 
 // Loading the 'organizer.user' relation pulls the full User entity by default, including
@@ -82,11 +83,6 @@ export class EventsService {
   // the key — bumping it makes every previously-cached list entry unreachable at once.
   private static readonly EVENTS_LIST_TTL_SECONDS = 45;
   private static readonly EVENT_DETAIL_TTL_SECONDS = 60;
-  private static readonly EVENTS_LIST_VERSION_KEY = 'events:list:version';
-
-  private eventDetailCacheKey(id: string): string {
-    return `events:detail:${id}`;
-  }
 
   private async eventsListCacheKey(
     categoryId: string | undefined,
@@ -94,15 +90,8 @@ export class EventsService {
     page: number,
     limit: number,
   ): Promise<string> {
-    const version = await this.cache.getVersion(EventsService.EVENTS_LIST_VERSION_KEY);
+    const version = await this.cache.getVersion(EVENTS_LIST_VERSION_KEY);
     return `events:list:${version}:${categoryId ?? 'all'}:${isOnline ?? 'all'}:${page}:${limit}`;
-  }
-
-  private async invalidateEventCaches(id: string): Promise<void> {
-    await Promise.all([
-      this.cache.del(this.eventDetailCacheKey(id)),
-      this.cache.bumpVersion(EventsService.EVENTS_LIST_VERSION_KEY),
-    ]);
   }
 
   async create(createEventDto: CreateEventDto): Promise<Event> {
@@ -406,7 +395,7 @@ export class EventsService {
   // approve, reject, remove, ticket-type CRUD) keep calling findOne() directly so they
   // always mutate a fresh row, never a stale cached copy.
   private async findOneCached(id: string): Promise<Event> {
-    const cacheKey = this.eventDetailCacheKey(id);
+    const cacheKey = eventDetailCacheKey(id);
     const cached = await this.cache.get<Event>(cacheKey);
     if (cached) return cached;
     const event = await this.findOne(id);
@@ -492,7 +481,7 @@ export class EventsService {
       await this.notifyActiveEnrollees(updatedEvent.id, changes);
     }
 
-    await this.invalidateEventCaches(updatedEvent.id);
+    await invalidateEventCaches(this.cache, updatedEvent.id);
     return updatedEvent;
   }
 
@@ -539,7 +528,7 @@ export class EventsService {
 
     await this.eventsRepository.softRemove(event);
     this.logger.log(`Soft-deleted event: ${event.title} (id=${event.id})`);
-    await this.invalidateEventCaches(event.id);
+    await invalidateEventCaches(this.cache, event.id);
   }
 
   async findMyEvents(userId: string): Promise<Event[]> {
@@ -977,6 +966,11 @@ export class EventsService {
       this.logger.log(`Ticket type ${result.ticketTypeId} sold out for event ${eventId}; user ${userId} joining waitlist`);
       return this.waitlistService.join(eventId, result.ticketTypeId, userId, quantity);
     }
+
+    // The confirmed enrollment just changed this ticket type's quantitySold, which
+    // availableTickets (withComputedSeats) is derived from — invalidate so list/detail
+    // reads don't keep serving the pre-booking count for the rest of the cache TTL.
+    await invalidateEventCaches(this.cache, eventId);
     return result.enrollment;
   }
 
@@ -1007,6 +1001,11 @@ export class EventsService {
       return savedEnrollment;
     });
 
+    // Frees up a seat, same as enroll() consuming one — invalidate for the same reason.
+    // promoteNext (below) may immediately re-consume it via a promotion; that path
+    // invalidates again itself, so the cache always ends up reflecting the net result.
+    await invalidateEventCaches(this.cache, enrollment.eventId);
+
     if (enrollment.ticketTypeId) {
       await this.waitlistService.promoteNext(enrollment.ticketTypeId);
     }
@@ -1032,7 +1031,7 @@ export class EventsService {
     
     const saved = await this.eventsRepository.save(event);
     this.logger.log(`Event ${event.id} approved by admin ${adminUserId}`);
-    await this.invalidateEventCaches(event.id);
+    await invalidateEventCaches(this.cache, event.id);
 
     // TODO: Send notification to organizer
     // await this.notificationService.notifyEventApproved(event);
@@ -1060,7 +1059,7 @@ export class EventsService {
     
     const saved = await this.eventsRepository.save(event);
     this.logger.log(`Event ${event.id} rejected by admin ${adminUserId}`);
-    await this.invalidateEventCaches(event.id);
+    await invalidateEventCaches(this.cache, event.id);
 
     // TODO: Send notification to organizer
     // await this.notificationService.notifyEventRejected(event, rejectionReason);

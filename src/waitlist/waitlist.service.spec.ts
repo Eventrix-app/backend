@@ -11,6 +11,7 @@ describe('WaitlistService — promoteNext paymentStatus', () => {
   let mockDataSource: any;
   let mockJwtService: any;
   let mockNotificationService: any;
+  let mockCacheService: any;
 
   let entry: any;
 
@@ -22,7 +23,8 @@ describe('WaitlistService — promoteNext paymentStatus', () => {
     mockDataSource = { transaction: jest.fn() };
     mockJwtService = { sign: jest.fn(() => 'ticket-code') };
     mockNotificationService = { notifyWaitlistPromoted: jest.fn() };
-    service = new WaitlistService(mockWaitlistRepo, mockDataSource, mockJwtService, mockNotificationService);
+    mockCacheService = { del: jest.fn(), bumpVersion: jest.fn() };
+    service = new WaitlistService(mockWaitlistRepo, mockDataSource, mockJwtService, mockNotificationService, mockCacheService);
   });
 
   it('marks a promoted free-ticket enrollment as paid', async () => {

@@ -18,6 +18,8 @@ import { FeeEstimateDto } from './dto/fee-estimate.dto';
 import { RequestRefundDto } from './dto/request-refund.dto';
 import { PaymentWebhookDto } from './dto/payment-webhook.dto';
 import { getEventStartDateTime, getEventEndDateTime } from '../events/utils/event-dates.util';
+import { invalidateEventCaches } from '../events/utils/event-cache.util';
+import { CacheService } from '../common/cache/cache.service';
 
 // Same leak EventsService's SAFE_ENROLLMENT_USER_SELECT guards against — Enrollment.user is a
 // plain ManyToOne to the full User entity (passwordHash included), so the organizer refund
@@ -56,6 +58,7 @@ export class PaymentsService {
     private readonly feeCalculationService: FeeCalculationService,
     private readonly waitlistService: WaitlistService,
     private readonly notificationService: NotificationService,
+    private readonly cache: CacheService,
   ) {}
 
   // ---------------------------------------------------------------------
@@ -219,7 +222,7 @@ export class PaymentsService {
       // land together — a partial failure here previously could leave an enrollment
       // marked "refunded" while ticket_types.quantity_sold never freed up (permanently
       // blocking a slot and starving the waitlist), or the reverse.
-      const { savedRefund, ticketTypeId } = await this.dataSource.transaction(async (manager) => {
+      const { savedRefund, ticketTypeId, eventId } = await this.dataSource.transaction(async (manager) => {
         refund.status = RefundStatus.PROCESSED;
         refund.gatewayRefundId = `mock_refund_${refund.id}`;
         refund.processedAt = new Date();
@@ -238,11 +241,17 @@ export class PaymentsService {
           );
         }
 
-        return { savedRefund, ticketTypeId: enrollment?.ticketTypeId };
+        return { savedRefund, ticketTypeId: enrollment?.ticketTypeId, eventId: enrollment?.eventId };
       });
 
       this.logger.log(`Refund ${refund.id} processed via gateway (${refund.gatewayRefundId})`);
       await this.notificationService.notifyRefundStatus(refund.requestedBy, refund.id, RefundStatus.PROCESSED);
+
+      // Same quantitySold change enroll()/cancelEnrollment() invalidate for — a processed
+      // refund frees a seat just like a cancellation does.
+      if (eventId) {
+        await invalidateEventCaches(this.cache, eventId);
+      }
 
       // Capacity is now durably committed — safe to hand the slot to the next FIFO
       // waitlist entry outside the refund's own transaction (promoteNext manages its own).

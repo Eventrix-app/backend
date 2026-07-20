@@ -20,6 +20,7 @@ describe('PaymentsService — paymentStatus enforcement', () => {
   let mockFeeCalculationService: any;
   let mockWaitlistService: any;
   let mockNotificationService: any;
+  let mockCacheService: any;
 
   const futureEvent = {
     id: 'event-1',
@@ -43,6 +44,7 @@ describe('PaymentsService — paymentStatus enforcement', () => {
     mockFeeCalculationService = { calculate: jest.fn() };
     mockWaitlistService = { promoteNext: jest.fn() };
     mockNotificationService = { notifyRefundStatus: jest.fn() };
+    mockCacheService = { del: jest.fn(), bumpVersion: jest.fn() };
 
     service = new PaymentsService(
       mockPaymentsRepo,
@@ -57,6 +59,7 @@ describe('PaymentsService — paymentStatus enforcement', () => {
       mockFeeCalculationService,
       mockWaitlistService,
       mockNotificationService,
+      mockCacheService,
     );
   });
 
