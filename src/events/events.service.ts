@@ -581,11 +581,24 @@ export class EventsService {
   async findMyFavorites(userId: string): Promise<Event[]> {
     const favorites = await this.favoritesRepository.find({
       where: { userId },
-      relations: ['event', 'event.organizer', 'event.organizer.user', 'event.category'],
-      select: { event: { organizer: SAFE_ORGANIZER_SELECT.organizer } as any },
       order: { createdAt: 'DESC' },
     });
-    return favorites.map((f) => f.event).filter((e): e is Event => !!e);
+    if (favorites.length === 0) return [];
+
+    // A `select` nested under a relation (favorites.event.organizer.*) without also
+    // listing the base Favorite/Event columns silently matched zero rows — TypeORM needs
+    // the root entity's own columns selected too, not just a deeply-nested sub-selection.
+    // Querying eventsRepository directly, the same select shape findAll/findAllFiltered
+    // already use successfully, sidesteps that entirely.
+    const events = await this.eventsRepository.find({
+      where: { id: In(favorites.map((f) => f.eventId)) },
+      relations: ['organizer', 'organizer.user', 'category'],
+      select: SAFE_ORGANIZER_SELECT,
+    });
+    const eventById = new Map(events.map((e) => [e.id, e]));
+    // Preserve favorites' own createdAt DESC order (most-recently-saved first) rather than
+    // whatever order eventsRepository.find(In(...)) happens to return.
+    return favorites.map((f) => eventById.get(f.eventId)).filter((e): e is Event => !!e);
   }
 
   // Backs GET /events/from-following. Deliberately not run through the shared
