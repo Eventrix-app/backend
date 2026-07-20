@@ -137,32 +137,50 @@ export class PaymentsService {
     const refund = await this.findRefundOrFail(refundId);
     await this.assertCanManageRefund(refund, actorUserId, userRoles);
 
-    if (!Refund.canTransition(refund.status, RefundStatus.APPROVED)) {
-      throw new BadRequestException(`Cannot approve a refund in status "${refund.status}"`);
-    }
+    // Row-locked transition: without this, two concurrent approve calls (double-click, two
+    // organizer/admin tabs) can both read status REQUESTED, both pass canTransition, and both
+    // proceed to processGatewayRefund — double-decrementing ticket capacity and
+    // double-promoting the waitlist. Mirrors the same pessimistic_write pattern already used
+    // by tryPromote and settleEventPayout for the identical class of race.
+    const approved = await this.lockAndTransitionRefund(refundId, RefundStatus.APPROVED);
 
-    refund.status = RefundStatus.APPROVED;
-    await this.refundsRepository.save(refund);
-    this.logger.log(`Refund ${refund.id} approved by ${actorUserId}`);
-    await this.notificationService.notifyRefundStatus(refund.requestedBy, refund.id, RefundStatus.APPROVED);
+    this.logger.log(`Refund ${approved.id} approved by ${actorUserId}`);
+    await this.notificationService.notifyRefundStatus(approved.requestedBy, approved.id, RefundStatus.APPROVED);
 
-    return this.processGatewayRefund(refund);
+    return this.processGatewayRefund(approved);
   }
 
   async rejectRefund(refundId: string, reason: string, actorUserId: string, userRoles: string[]): Promise<Refund> {
     const refund = await this.findRefundOrFail(refundId);
     await this.assertCanManageRefund(refund, actorUserId, userRoles);
 
-    if (!Refund.canTransition(refund.status, RefundStatus.REJECTED)) {
-      throw new BadRequestException(`Cannot reject a refund in status "${refund.status}"`);
-    }
+    const rejected = await this.lockAndTransitionRefund(refundId, RefundStatus.REJECTED, { processedAt: new Date() });
 
-    refund.status = RefundStatus.REJECTED;
-    refund.processedAt = new Date();
-    const saved = await this.refundsRepository.save(refund);
-    this.logger.log(`Refund ${refund.id} rejected by ${actorUserId}: ${reason}`);
-    await this.notificationService.notifyRefundStatus(refund.requestedBy, refund.id, RefundStatus.REJECTED);
-    return saved;
+    this.logger.log(`Refund ${rejected.id} rejected by ${actorUserId}: ${reason}`);
+    await this.notificationService.notifyRefundStatus(rejected.requestedBy, rejected.id, RefundStatus.REJECTED);
+    return rejected;
+  }
+
+  // Locks the refund row for the duration of the status check + write so two concurrent
+  // callers can't both observe the pre-transition status and both proceed.
+  private async lockAndTransitionRefund(
+    refundId: string,
+    nextStatus: RefundStatus,
+    extraFields: Partial<Refund> = {},
+  ): Promise<Refund> {
+    return this.dataSource.transaction(async (manager) => {
+      const locked = await manager
+        .createQueryBuilder(Refund, 'refund')
+        .setLock('pessimistic_write')
+        .where('refund.id = :id', { id: refundId })
+        .getOne();
+      if (!locked) throw new NotFoundException(`Refund ${refundId} not found`);
+      if (!Refund.canTransition(locked.status, nextStatus)) {
+        throw new BadRequestException(`Cannot ${nextStatus === RefundStatus.APPROVED ? 'approve' : 'reject'} a refund in status "${locked.status}"`);
+      }
+      Object.assign(locked, extraFields, { status: nextStatus });
+      return manager.save(Refund, locked);
+    });
   }
 
   async findPendingRefundsForOrganizer(userId: string, userRoles: string[]): Promise<Refund[]> {

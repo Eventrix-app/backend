@@ -75,9 +75,10 @@ export class EventsController {
     @Query('isOnline') isOnline?: string,
     @Query('page', new DefaultValuePipe(1), ParseIntPipe) page?: number,
     @Query('limit', new DefaultValuePipe(20), ParseIntPipe) limit?: number,
+    @Query('search') search?: string,
   ) {
     const onlineFlag = isOnline === undefined ? undefined : isOnline === 'true';
-    return await this.eventsService.findAllFiltered(categoryId, onlineFlag, page, limit);
+    return await this.eventsService.findAllFiltered(categoryId, onlineFlag, page, limit, search);
   }
 
   // Admin list pending events (MUST come before :id route)

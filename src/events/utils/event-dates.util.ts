@@ -28,6 +28,14 @@ export function getEventEndDateTime(
   return combineDateAndTime(endDate, event.endTime ?? event.startTime);
 }
 
+// No timezone is captured anywhere on the event (organizers and venues are India-only —
+// Bangalore/Mumbai/Delhi per EventsService), so eventDate/startTime are civil wall-clock
+// values meant to be read as IST. Without an explicit offset, `new Date("...T...")` parses
+// in the *process's* local timezone instead — UTC on Vercel — silently shifting every
+// derived boundary (refund cutoff, sales windows, payout eligibility) by 5.5h. Appending a
+// fixed +05:30 offset makes parsing correct regardless of where the process runs.
+const IST_OFFSET = '+05:30';
+
 function combineDateAndTime(date: string, time: string): Date {
-  return new Date(`${date}T${time}`);
+  return new Date(`${date}T${time}${IST_OFFSET}`);
 }

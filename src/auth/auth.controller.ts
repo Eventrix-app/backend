@@ -5,6 +5,9 @@ import { AuthResponseDto } from './dto/auth-response.dto';
 import { Public } from '../common/decorators/public.decorator';
 import { ApiTags } from '@nestjs/swagger';
 import { CreateUserDto } from './dto/create-user.dto';
+import { ForgotPasswordDto } from './dto/forgot-password.dto';
+import { ResetPasswordDto } from './dto/reset-password.dto';
+import { ChangePasswordDto } from './dto/change-password.dto';
 import { Throttle } from '@nestjs/throttler';
 import { JwtPayload } from './jwt.util';
 
@@ -42,13 +45,24 @@ export class AuthController {
 
   @Public()
   @Post('forgot-password')
-  async forgotPassword(@Body() body: { email: string }): Promise<void> {
+  async forgotPassword(@Body() body: ForgotPasswordDto): Promise<void> {
     return await this.authService.forgotPassword(body.email);
   }
 
   @Public()
   @Post('reset-password')
-  async resetPassword(@Body() body: { token: string; password: string }): Promise<void> {
+  async resetPassword(@Body() body: ResetPasswordDto): Promise<void> {
     return await this.authService.resetPassword(body.token, body.password);
+  }
+
+  // Deliberately not @Public(): the caller must already hold a valid session (proves
+  // account access), then additionally proves knowledge of the current password —
+  // unlike reset-password's OTP, which is for someone who's locked out entirely.
+  @Post('change-password')
+  async changePassword(
+    @Body() body: ChangePasswordDto,
+    @Request() req: Request & { user: JwtPayload },
+  ): Promise<void> {
+    return await this.authService.changePassword(req.user.id, body.currentPassword, body.newPassword);
   }
 }

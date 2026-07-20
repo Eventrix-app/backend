@@ -16,7 +16,7 @@ import { Payout } from './entities/payout.entity';
 import { NotificationJob } from './entities/notification-job.entity';
 import { EventMedia } from './entities/event-media.entity';
 import { PasswordResetOtp } from './entities/password-reset-otp.entity';
-import { AddOnboardingFields1660000000003 } from './database/migrations/1660000000003-AddOnboardingFields';
+import { Favorite } from './entities/favorite.entity';
 
 const entities = [
   User,
@@ -35,6 +35,7 @@ const entities = [
   NotificationJob,
   EventMedia,
   PasswordResetOtp,
+  Favorite,
 ];
 
 export const AppDataSource = new DataSource({

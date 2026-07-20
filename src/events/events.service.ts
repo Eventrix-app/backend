@@ -325,19 +325,36 @@ export class EventsService {
     isOnline?: boolean,
     page: number = 1,
     limit: number = 20,
+    search?: string,
   ): Promise<{ events: Event[]; total: number; page: number; totalPages: number }> {
-    const cacheKey = await this.eventsListCacheKey(categoryId, isOnline, page, limit);
-    const cached = await this.cache.get<{ events: Event[]; total: number; page: number; totalPages: number }>(cacheKey);
-    if (cached) return cached;
+    // Free-text search bypasses the cache: caching would mean one cache entry per distinct
+    // search string ever typed, most never hit again — unbounded cache growth for near-zero
+    // hit rate, unlike the small, reused categoryId/isOnline/page/limit key space below.
+    const trimmedSearch = search?.trim();
+    const cacheKey = trimmedSearch ? null : await this.eventsListCacheKey(categoryId, isOnline, page, limit);
+    if (cacheKey) {
+      const cached = await this.cache.get<{ events: Event[]; total: number; page: number; totalPages: number }>(cacheKey);
+      if (cached) return cached;
+    }
 
     const skip = (page - 1) * limit;
-    const where: any = {
+    const base: any = {
       deletedAt: null as any,
       approvalStatus: EventApprovalStatus.APPROVED,
     };
 
-    if (categoryId) where.categoryId = categoryId;
-    if (isOnline !== undefined) where.isOnline = isOnline;
+    if (categoryId) base.categoryId = categoryId;
+    if (isOnline !== undefined) base.isOnline = isOnline;
+
+    // SearchScreen previously only filtered events already paginated into the client — a
+    // real, bookable event several pages deep in the catalog would never surface. Matching
+    // server-side, before pagination, is what makes the full catalog actually searchable.
+    const where: any = trimmedSearch
+      ? [
+          { ...base, title: ILike(`%${trimmedSearch}%`) },
+          { ...base, venueName: ILike(`%${trimmedSearch}%`) },
+        ]
+      : base;
 
     const [events, total] = await this.eventsRepository.findAndCount({
       where,
@@ -354,7 +371,7 @@ export class EventsService {
       page,
       totalPages: Math.ceil(total / limit),
     };
-    await this.cache.set(cacheKey, result, EventsService.EVENTS_LIST_TTL_SECONDS);
+    if (cacheKey) await this.cache.set(cacheKey, result, EventsService.EVENTS_LIST_TTL_SECONDS);
     return result;
   }
 
@@ -821,6 +838,13 @@ export class EventsService {
       const resolvedTicketType = event.ticketTypes?.find((t) => t.id === resolvedTicketTypeId);
       if (!resolvedTicketType) {
         throw new NotFoundException(`Ticket type ${resolvedTicketTypeId} not found on this event`);
+      }
+
+      if (quantity < resolvedTicketType.minPerOrder) {
+        throw new BadRequestException(`Minimum ${resolvedTicketType.minPerOrder} ticket(s) per order for this ticket type`);
+      }
+      if (resolvedTicketType.maxPerOrder != null && quantity > resolvedTicketType.maxPerOrder) {
+        throw new BadRequestException(`Maximum ${resolvedTicketType.maxPerOrder} ticket(s) per order for this ticket type`);
       }
 
       const now = new Date();

@@ -264,4 +264,23 @@ export class AuthService {
     await this.otpRepository.delete({ email: match.email });
     this.logger.log(`Password reset successfully for user: ${match.email}`);
   }
+
+  // Logged-in password change (vs. resetPassword's forgot-password/OTP flow) — requires
+  // proving the current password rather than a code, so it uses UnauthorizedException the
+  // same way login does for a bad credential.
+  async changePassword(userId: string, currentPassword: string, newPassword: string): Promise<void> {
+    const user = await this.usersRepository.findOne({ where: { id: userId } });
+    if (!user) {
+      throw new UnauthorizedException('Account no longer exists');
+    }
+
+    const matches = await bcrypt.compare(currentPassword, user.passwordHash ?? '');
+    if (!matches) {
+      throw new UnauthorizedException('Current password is incorrect');
+    }
+
+    user.passwordHash = await bcrypt.hash(newPassword, BCRYPT_ROUNDS);
+    await this.usersRepository.save(user);
+    this.logger.log(`Password changed for user: ${user.email}`);
+  }
 }
