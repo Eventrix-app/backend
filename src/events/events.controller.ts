@@ -111,6 +111,18 @@ export class EventsController {
     return await this.eventsService.findMyFavorites(req.user.id);
   }
 
+  // GET /events is @Public() (browsable without auth), so it can never see req.user — a
+  // `following` query param there could never be scoped to a real requester. This is a
+  // separate authenticated endpoint instead, matching the my-events/my-favorites shape.
+  @Get('from-following')
+  async findFromFollowing(
+    @Request() req: Request & { user: JwtPayload },
+    @Query('page', new DefaultValuePipe(1), ParseIntPipe) page?: number,
+    @Query('limit', new DefaultValuePipe(20), ParseIntPipe) limit?: number,
+  ) {
+    return await this.eventsService.findFromFollowing(req.user.id, page, limit);
+  }
+
   @Public()
   @Get(':id')
   async findOne(

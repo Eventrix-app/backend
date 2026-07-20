@@ -1,6 +1,6 @@
 import { Injectable, NotFoundException, ForbiddenException, Logger, ConflictException, BadRequestException } from '@nestjs/common';
 import { InjectRepository } from '@nestjs/typeorm';
-import { Repository, DataSource, ILike } from 'typeorm';
+import { Repository, DataSource, ILike, In } from 'typeorm';
 import { JwtService } from '@nestjs/jwt';
 import { Event, EventApprovalStatus, EventStatus } from '../entities/event.entity';
 import { Enrollment } from '../entities/enrollment.entity';
@@ -9,6 +9,7 @@ import { User } from '../entities/user.entity';
 import { EventCategory } from '../entities/category.entity';
 import { TicketType } from '../entities/ticket-type.entity';
 import { Favorite } from '../entities/favorite.entity';
+import { Follow } from '../entities/follow.entity';
 import { EventMedia } from '../entities/event-media.entity';
 import { CreateEventDto } from './dto/create-event.dto';
 import { UpdateEventDto } from './dto/update-event.dto';
@@ -63,6 +64,8 @@ export class EventsService {
     private readonly ticketTypesRepository: Repository<TicketType>,
     @InjectRepository(Favorite)
     private readonly favoritesRepository: Repository<Favorite>,
+    @InjectRepository(Follow)
+    private readonly followsRepository: Repository<Follow>,
     @InjectRepository(EventMedia)
     private readonly eventMediaRepository: Repository<EventMedia>,
     private readonly dataSource: DataSource,
@@ -583,6 +586,27 @@ export class EventsService {
       order: { createdAt: 'DESC' },
     });
     return favorites.map((f) => f.event).filter((e): e is Event => !!e);
+  }
+
+  // Backs GET /events/from-following. Deliberately not run through the shared
+  // eventsListCacheKey/cache path findAllFiltered uses — that cache is keyed on filter
+  // values that are the same for every requester (categoryId/isOnline/page/limit); this
+  // result is scoped to one user's follow list, so caching it under a shared key would
+  // leak one user's followed events into another user's response.
+  async findFromFollowing(userId: string, page: number = 1, limit: number = 20): Promise<Event[]> {
+    const follows = await this.followsRepository.find({ where: { userId } });
+    if (follows.length === 0) return [];
+
+    const organizerIds = follows.map((f) => f.organizerId);
+    const skip = (page - 1) * limit;
+    return await this.eventsRepository.find({
+      where: { organizerId: In(organizerIds), approvalStatus: EventApprovalStatus.APPROVED, deletedAt: null as any },
+      relations: ['organizer', 'organizer.user', 'category'],
+      select: SAFE_ORGANIZER_SELECT,
+      order: { eventDate: 'ASC', startTime: 'ASC' },
+      skip,
+      take: limit,
+    });
   }
 
   async addFavorite(eventId: string, userId: string): Promise<void> {

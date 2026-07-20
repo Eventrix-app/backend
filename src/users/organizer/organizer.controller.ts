@@ -3,9 +3,12 @@ import {
   Controller,
   Delete,
   Get,
+  HttpCode,
+  HttpStatus,
   Param,
   ParseUUIDPipe,
   Patch,
+  Post,
   Request,
   ForbiddenException,
 } from '@nestjs/common';
@@ -29,9 +32,51 @@ export class OrganizerController {
     return await this.organizerService.findAll();
   }
 
+  // Static-path routes must come before the bare `:id` route below — Nest/Express match
+  // in declaration order, so `GET /organizers/my-following` would otherwise be swallowed
+  // by `:id` first (and 400 on ParseUUIDPipe, since "my-following" isn't a UUID).
+  @Roles()
+  @Get('my-following')
+  async findMyFollowing(@Request() req: Request & { user: JwtPayload }) {
+    return await this.organizerService.getMyFollowing(req.user.id);
+  }
+
   @Get(':id')
   async findOne(@Param('id', ParseUUIDPipe) id: string) {
     return await this.organizerService.findOne(id);
+  }
+
+  // Public-safe profile — deliberately a different endpoint/shape from findOne() above,
+  // which returns PII (email, phone) and business-sensitive fields (commission, auto-
+  // approve) meant for admins/the organizer themselves only. Any authenticated user can
+  // view this one; req.user is always present here since the class isn't @Public().
+  @Roles()
+  @Get(':id/profile')
+  async getPublicProfile(
+    @Param('id', ParseUUIDPipe) id: string,
+    @Request() req: Request & { user: JwtPayload },
+  ) {
+    return await this.organizerService.getPublicProfile(id, req.user.id);
+  }
+
+  @Roles()
+  @Post(':id/follow')
+  @HttpCode(HttpStatus.NO_CONTENT)
+  async follow(
+    @Param('id', ParseUUIDPipe) id: string,
+    @Request() req: Request & { user: JwtPayload },
+  ) {
+    await this.organizerService.follow(id, req.user.id);
+  }
+
+  @Roles()
+  @Delete(':id/follow')
+  @HttpCode(HttpStatus.NO_CONTENT)
+  async unfollow(
+    @Param('id', ParseUUIDPipe) id: string,
+    @Request() req: Request & { user: JwtPayload },
+  ) {
+    await this.organizerService.unfollow(id, req.user.id);
   }
 
   // RolesGuard checks method-level metadata before falling back to the class-level

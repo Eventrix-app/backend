@@ -17,6 +17,7 @@ import { NotificationJob } from './entities/notification-job.entity';
 import { EventMedia } from './entities/event-media.entity';
 import { PasswordResetOtp } from './entities/password-reset-otp.entity';
 import { Favorite } from './entities/favorite.entity';
+import { Follow } from './entities/follow.entity';
 
 const entities = [
   User,
@@ -36,6 +37,7 @@ const entities = [
   EventMedia,
   PasswordResetOtp,
   Favorite,
+  Follow,
 ];
 
 export const AppDataSource = new DataSource({

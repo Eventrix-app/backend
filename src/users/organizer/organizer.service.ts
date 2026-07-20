@@ -1,12 +1,28 @@
-import { Injectable, NotFoundException, Logger } from '@nestjs/common';
+import { BadRequestException, Injectable, NotFoundException, Logger } from '@nestjs/common';
 import { InjectRepository } from '@nestjs/typeorm';
 import { Repository } from 'typeorm';
 import * as bcrypt from 'bcryptjs';
 import { UpdateOrganizerDto } from './dto/update-organizer.dto';
 import { User } from '../../entities/user.entity';
 import { Organizer, VerificationLevel } from '../../entities/organizer.entity';
+import { Event, EventApprovalStatus } from '../../entities/event.entity';
+import { Follow } from '../../entities/follow.entity';
 
 const BCRYPT_ROUNDS = 10;
+
+// Deliberately excludes everything OrganizerRecord carries that a stranger browsing the
+// app has no business seeing: email, phone (PII), commissionRate/commissionFlatFee/
+// autoApproveEvents (internal business terms). Only what a follow/profile UI needs.
+export interface OrganizerPublicProfile {
+  id: string;
+  companyName: string;
+  companyDescription?: string;
+  companyLogoUrl?: string;
+  verified: boolean;
+  eventCount: number;
+  followerCount: number;
+  isFollowing?: boolean;
+}
 
 export interface OrganizerRecord {
   id: string;
@@ -39,6 +55,10 @@ export class OrganizerService {
     private readonly usersRepository: Repository<User>,
     @InjectRepository(Organizer)
     private readonly organizersRepository: Repository<Organizer>,
+    @InjectRepository(Event)
+    private readonly eventsRepository: Repository<Event>,
+    @InjectRepository(Follow)
+    private readonly followsRepository: Repository<Follow>,
   ) {}
 
   private mapToRecord(user: User, organizer: Organizer): OrganizerRecord {
@@ -132,5 +152,65 @@ export class OrganizerService {
     this.logger.log(
       `Soft-deleted organizer user in database: ${organizer.user.email}`,
     );
+  }
+
+  // --- Follow feature ---
+
+  private async loadActiveOrganizer(id: string): Promise<Organizer> {
+    const organizer = await this.organizersRepository.findOne({ where: { id }, relations: ['user'] });
+    if (!organizer || !organizer.user || organizer.user.deletedAt) {
+      throw new NotFoundException(`Organizer with id ${id} not found`);
+    }
+    return organizer;
+  }
+
+  async getPublicProfile(id: string, requestingUserId?: string): Promise<OrganizerPublicProfile> {
+    const organizer = await this.loadActiveOrganizer(id);
+
+    const [eventCount, followerCount, isFollowing] = await Promise.all([
+      this.eventsRepository.count({
+        where: { organizerId: id, approvalStatus: EventApprovalStatus.APPROVED, deletedAt: null as any },
+      }),
+      this.followsRepository.count({ where: { organizerId: id } }),
+      requestingUserId
+        ? this.followsRepository.exist({ where: { organizerId: id, userId: requestingUserId } })
+        : Promise.resolve(undefined),
+    ]);
+
+    return {
+      id: organizer.id,
+      companyName: organizer.companyName,
+      companyDescription: organizer.companyDescription || undefined,
+      companyLogoUrl: organizer.companyLogoUrl || undefined,
+      verified: organizer.verificationLevel !== VerificationLevel.UNVERIFIED,
+      eventCount,
+      followerCount,
+      isFollowing,
+    };
+  }
+
+  async follow(organizerId: string, userId: string): Promise<void> {
+    const organizer = await this.loadActiveOrganizer(organizerId);
+    if (organizer.userId === userId) {
+      throw new BadRequestException('You cannot follow your own organizer profile');
+    }
+    const existing = await this.followsRepository.findOne({ where: { userId, organizerId } });
+    if (existing) return; // already following — idempotent, mirrors Favorite's addFavorite
+    const follow = this.followsRepository.create({ userId, organizerId });
+    try {
+      await this.followsRepository.save(follow);
+    } catch (err: any) {
+      if (err?.code !== '23505') throw err; // lost a concurrent double-tap race — fine, already followed
+    }
+  }
+
+  async unfollow(organizerId: string, userId: string): Promise<void> {
+    await this.followsRepository.delete({ userId, organizerId });
+  }
+
+  async getMyFollowing(userId: string): Promise<OrganizerPublicProfile[]> {
+    const follows = await this.followsRepository.find({ where: { userId }, order: { createdAt: 'DESC' } });
+    if (follows.length === 0) return [];
+    return Promise.all(follows.map((f) => this.getPublicProfile(f.organizerId, userId)));
   }
 }

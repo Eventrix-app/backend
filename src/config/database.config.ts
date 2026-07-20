@@ -15,6 +15,7 @@ import { AuditLog } from '../entities/audit-log.entity';
 import { Payout } from '../entities/payout.entity';
 import { NotificationJob } from '../entities/notification-job.entity';
 import { Favorite } from '../entities/favorite.entity';
+import { Follow } from '../entities/follow.entity';
 import { EventMedia } from '../entities/event-media.entity';
 import { PasswordResetOtp } from '../entities/password-reset-otp.entity';
 
@@ -34,6 +35,7 @@ const entities = [
   Payout,
   NotificationJob,
   Favorite,
+  Follow,
   EventMedia,
   PasswordResetOtp,
 ];

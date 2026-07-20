@@ -8,6 +8,7 @@ import { User } from '../entities/user.entity';
 import { EventCategory } from '../entities/category.entity';
 import { TicketType } from '../entities/ticket-type.entity';
 import { Favorite } from '../entities/favorite.entity';
+import { Follow } from '../entities/follow.entity';
 import { EventMedia } from '../entities/event-media.entity';
 import { DataSource } from 'typeorm';
 import { JwtService } from '@nestjs/jwt';
@@ -26,6 +27,7 @@ describe('EventsService - Fixed Issues', () => {
   let mockCategoryRepo: any;
   let mockTicketTypeRepo: any;
   let mockFavoriteRepo: any;
+  let mockFollowRepo: any;
   let mockEventMediaRepo: any;
   let mockDataSource: any;
   let mockJwtService: any;
@@ -72,6 +74,14 @@ describe('EventsService - Fixed Issues', () => {
     };
 
     mockFavoriteRepo = {
+      create: jest.fn(),
+      save: jest.fn(),
+      find: jest.fn(),
+      findOne: jest.fn(),
+      delete: jest.fn(),
+    };
+
+    mockFollowRepo = {
       create: jest.fn(),
       save: jest.fn(),
       find: jest.fn(),
@@ -130,6 +140,7 @@ describe('EventsService - Fixed Issues', () => {
         { provide: getRepositoryToken(EventCategory), useValue: mockCategoryRepo },
         { provide: getRepositoryToken(TicketType), useValue: mockTicketTypeRepo },
         { provide: getRepositoryToken(Favorite), useValue: mockFavoriteRepo },
+        { provide: getRepositoryToken(Follow), useValue: mockFollowRepo },
         { provide: getRepositoryToken(EventMedia), useValue: mockEventMediaRepo },
         { provide: DataSource, useValue: mockDataSource },
         { provide: JwtService, useValue: mockJwtService },
