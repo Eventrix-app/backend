@@ -84,11 +84,6 @@ export class CreateEventDto {
   endTime?: string;
 
   @IsOptional()
-  @IsInt({ message: 'Duration must be an integer' })
-  @Min(0, { message: 'Duration cannot be negative' })
-  durationMinutes?: number;
-
-  @IsOptional()
   @IsNumber({}, { message: 'Price must be a valid number' })
   @Min(0, { message: 'Price cannot be negative' })
   @Max(1000000, { message: 'Price cannot exceed 1,000,000' })
@@ -133,14 +128,6 @@ export class CreateEventDto {
   @IsOptional()
   @IsEnum(EventStatus, { message: 'Invalid event status' })
   status?: EventStatus;
-
-  @IsOptional()
-  @IsDateString({}, { message: 'Invalid ticket sales open date format' })
-  ticketSalesOpenDate?: string;
-
-  @IsOptional()
-  @IsDateString({}, { message: 'Invalid ticket sales close date format' })
-  ticketSalesCloseDate?: string;
 
   @IsOptional()
   @IsEnum(EventApprovalStatus, { message: 'Invalid approval status' })

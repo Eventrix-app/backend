@@ -266,28 +266,6 @@ describe('EventsService - Fixed Issues', () => {
     });
   });
 
-  describe('Issue 3: Date/Time Handling', () => {
-    it('should auto-calculate duration from start and end times', () => {
-      const event = new Event();
-      event.startTime = '14:00:00';
-      event.endTime = '16:30:00';
-      
-      event.validateAndCalculate();
-      
-      expect(event.durationMinutes).toBe(150); // 2.5 hours
-    });
-
-    it('should handle overnight events correctly', () => {
-      const event = new Event();
-      event.startTime = '22:00:00';
-      event.endTime = '02:00:00';
-      
-      event.validateAndCalculate();
-      
-      expect(event.durationMinutes).toBe(240); // 4 hours
-    });
-  });
-
   describe('Issue 4: Organizer Existence Check', () => {
     it('should validate organizer exists when creating event', async () => {
       mockCategoryRepo.findOne.mockResolvedValue({ id: 'cat-1' });

@@ -117,9 +117,6 @@ export class Event {
   @Column({ name: 'end_time', type: 'time', nullable: true })
   endTime!: string;
 
-  @Column({ name: 'duration_minutes', type: 'int', nullable: true })
-  durationMinutes!: number;
-
   /** @deprecated superseded by TicketType.price; kept for backward compat on legacy events. */
   @Column({
     name: 'price_per_ticket',
@@ -204,12 +201,6 @@ export class Event {
   @Column({ name: 'refund_policy_text', type: 'text', nullable: true })
   refundPolicyText?: string;
 
-  @Column({ name: 'ticket_sales_open_date', type: 'date', nullable: true })
-  ticketSalesOpenDate!: string;
-
-  @Column({ name: 'ticket_sales_close_date', type: 'date', nullable: true })
-  ticketSalesCloseDate!: string;
-
   @CreateDateColumn({ name: 'created_at' })
   createdAt!: Date;
 
@@ -231,11 +222,6 @@ export class Event {
   @BeforeInsert()
   @BeforeUpdate()
   validateAndCalculate() {
-    // Auto-calculate duration from start/end times
-    if (this.startTime && this.endTime && !this.durationMinutes) {
-      this.durationMinutes = this.calculateDuration(this.startTime, this.endTime);
-    }
-    
     // Price validation
     if (this.pricePerTicket && this.pricePerTicket < 0) {
       throw new Error('Price per ticket cannot be negative');
@@ -265,23 +251,6 @@ export class Event {
       this.availableTickets === null ||
       this.availableTickets > 0
     );
-  }
-
-  // Pure derived field calculation (no side effects)
-  private calculateDuration(startTime: string, endTime: string): number {
-    const [startHour, startMin] = startTime.split(':').map(Number);
-    const [endHour, endMin] = endTime.split(':').map(Number);
-
-    const startMinutes = startHour * 60 + startMin;
-    const endMinutes = endHour * 60 + endMin;
-
-    let duration = endMinutes - startMinutes;
-    // Handle overnight events
-    if (duration < 0) {
-      duration += 24 * 60;
-    }
-
-    return duration;
   }
 
   private isValidUrl(url: string): boolean {
