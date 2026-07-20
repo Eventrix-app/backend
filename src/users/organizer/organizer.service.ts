@@ -17,8 +17,10 @@ export interface OrganizerPublicProfile {
   id: string;
   companyName: string;
   companyDescription?: string;
+  companyWebsite?: string;
   companyLogoUrl?: string;
   verified: boolean;
+  memberSince: string;
   eventCount: number;
   followerCount: number;
   isFollowing?: boolean;
@@ -181,8 +183,10 @@ export class OrganizerService {
       id: organizer.id,
       companyName: organizer.companyName,
       companyDescription: organizer.companyDescription || undefined,
+      companyWebsite: organizer.companyWebsite || undefined,
       companyLogoUrl: organizer.companyLogoUrl || undefined,
       verified: organizer.verificationLevel !== VerificationLevel.UNVERIFIED,
+      memberSince: organizer.createdAt.toISOString(),
       eventCount,
       followerCount,
       isFollowing,
@@ -211,6 +215,15 @@ export class OrganizerService {
   async getMyFollowing(userId: string): Promise<OrganizerPublicProfile[]> {
     const follows = await this.followsRepository.find({ where: { userId }, order: { createdAt: 'DESC' } });
     if (follows.length === 0) return [];
-    return Promise.all(follows.map((f) => this.getPublicProfile(f.organizerId, userId)));
+
+    // A followed organizer's account can be soft-deleted after the follow was created
+    // (Follow rows only cascade-delete on a *hard* delete, which OrganizerService.remove()
+    // never does). getPublicProfile() 404s for a deleted organizer, and Promise.all rejects
+    // on the first rejection — one stale follow would otherwise take down this whole list.
+    // Promise.allSettled + filtering drops just that entry instead.
+    const results = await Promise.allSettled(follows.map((f) => this.getPublicProfile(f.organizerId, userId)));
+    return results
+      .filter((r): r is PromiseFulfilledResult<OrganizerPublicProfile> => r.status === 'fulfilled')
+      .map((r) => r.value);
   }
 }

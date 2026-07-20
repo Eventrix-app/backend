@@ -629,6 +629,22 @@ export class EventsService {
     await this.favoritesRepository.delete({ userId, eventId });
   }
 
+  // findByOrganizerId (above) returns every status, including drafts/pending/rejected —
+  // correct for the organizer's own management screen, but exposing it publicly would leak
+  // an organizer's unpublished events to any viewer. This is the public-safe counterpart
+  // backing OrganizerProfileScreen's event list, independent of the viewer's follow status.
+  async findPublicEventsByOrganizer(organizerId: string, page: number = 1, limit: number = 20): Promise<Event[]> {
+    const skip = (page - 1) * limit;
+    return await this.eventsRepository.find({
+      where: { organizerId, approvalStatus: EventApprovalStatus.APPROVED, deletedAt: null as any },
+      relations: ['organizer', 'organizer.user', 'category'],
+      select: SAFE_ORGANIZER_SELECT,
+      order: { eventDate: 'ASC', startTime: 'ASC' },
+      skip,
+      take: limit,
+    });
+  }
+
   async findByOrganizerId(organizerId: string): Promise<Event[]> {
     return await this.eventsRepository.find({
       where: { organizerId, deletedAt: null as any },

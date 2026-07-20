@@ -123,6 +123,19 @@ export class EventsController {
     return await this.eventsService.findFromFollowing(req.user.id, page, limit);
   }
 
+  // Backs OrganizerProfileScreen's event list — deliberately independent of whether the
+  // viewer follows this organizer (unlike from-following above), since the whole point of
+  // a profile page is to let someone decide whether to follow after seeing their events.
+  @Public()
+  @Get('by-organizer/:organizerId')
+  async findPublicEventsByOrganizer(
+    @Param('organizerId', ParseUUIDPipe) organizerId: string,
+    @Query('page', new DefaultValuePipe(1), ParseIntPipe) page?: number,
+    @Query('limit', new DefaultValuePipe(20), ParseIntPipe) limit?: number,
+  ) {
+    return await this.eventsService.findPublicEventsByOrganizer(organizerId, page, limit);
+  }
+
   @Public()
   @Get(':id')
   async findOne(
