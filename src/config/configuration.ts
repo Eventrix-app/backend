@@ -39,4 +39,9 @@ export default () => ({
     resendApiKey: process.env.RESEND_API_KEY,
     from: process.env.EMAIL_FROM || 'onboarding@resend.dev',
   },
+  push: {
+    // Optional — Expo's push API works without one; only needed for enhanced push
+    // security / higher rate limits (see PushService).
+    expoAccessToken: process.env.EXPO_ACCESS_TOKEN,
+  },
 });

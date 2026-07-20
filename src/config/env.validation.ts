@@ -22,6 +22,7 @@ export const validateEnv = (config: Record<string, unknown>) => {
     CRON_SECRET: Joi.string().optional(),
     RESEND_API_KEY: Joi.string().optional(),
     EMAIL_FROM: Joi.string().optional(),
+    EXPO_ACCESS_TOKEN: Joi.string().optional(),
     // Optional — only needed to make rate limiting work correctly across Vercel's
     // serverless containers (see RedisThrottlerStorageService). Falls back to in-memory
     // storage (correct for a single long-lived process) if unset.

@@ -4,6 +4,7 @@ import { IsNull, Repository } from 'typeorm';
 import { NotificationJob, NotificationJobStatus, NotificationType } from '../entities/notification-job.entity';
 import { User } from '../entities/user.entity';
 import { EmailService } from '../email/email.service';
+import { PushService } from '../push/push.service';
 
 export interface NotificationRecord {
   id: string;
@@ -24,14 +25,16 @@ export class NotificationService {
     @InjectRepository(User)
     private readonly usersRepository: Repository<User>,
     private readonly emailService: EmailService,
+    private readonly pushService: PushService,
   ) {}
 
-  // Push transport still isn't wired up (that's the Phase 2 push-notifications item), but
-  // email now is — every job additionally fires an email using the same title/body this
-  // generates for the in-app notifications list. Email sending is fire-and-forget on
-  // purpose: EmailService.send() never throws, but even a hypothetical failure here must
-  // never fail the job itself, since callers (e.g. PaymentsService.approveRefund) await
-  // enqueue() as part of a larger state transition that has already committed.
+  // Every job fires both an email and a push using the same title/body this generates
+  // for the in-app notifications list — the persist-then-mark-sent shape above stays the
+  // audit trail regardless of whether either transport actually reaches the user. Both
+  // sends are fire-and-forget on purpose: neither EmailService.send() nor PushService.send()
+  // ever throws, but even a hypothetical failure here must never fail the job itself,
+  // since callers (e.g. PaymentsService.approveRefund) await enqueue() as part of a larger
+  // state transition that has already committed.
   async enqueue(userId: string, type: NotificationType, payload: Record<string, unknown>): Promise<NotificationJob> {
     const job = this.notificationJobsRepository.create({ userId, type, payload, status: NotificationJobStatus.PENDING });
     const saved = await this.notificationJobsRepository.save(job);
@@ -41,18 +44,36 @@ export class NotificationService {
     await this.notificationJobsRepository.save(saved);
 
     this.logger.log(`Notification [${type}] delivered to user ${userId}: ${JSON.stringify(payload)}`);
-    await this.sendEmailForJob(userId, type, payload);
+
+    const user = await this.usersRepository.findOne({ where: { id: userId } });
+    await Promise.all([
+      this.sendEmailForJob(user, type, payload),
+      this.sendPushForJob(user, type, payload),
+    ]);
+
     return saved;
   }
 
-  private async sendEmailForJob(userId: string, type: NotificationType, payload: Record<string, unknown>): Promise<void> {
+  private async sendEmailForJob(user: User | null, type: NotificationType, payload: Record<string, unknown>): Promise<void> {
     try {
-      const user = await this.usersRepository.findOne({ where: { id: userId } });
       if (!user?.email) return;
       const { title, body } = this.describe(type, payload);
       await this.emailService.send(user.email, title, `<p>${body}</p>`);
     } catch (err) {
-      this.logger.warn(`Failed to email notification [${type}] to user ${userId}: ${err instanceof Error ? err.message : String(err)}`);
+      this.logger.warn(`Failed to email notification [${type}] to user ${user?.id}: ${err instanceof Error ? err.message : String(err)}`);
+    }
+  }
+
+  private async sendPushForJob(user: User | null, type: NotificationType, payload: Record<string, unknown>): Promise<void> {
+    try {
+      if (!user?.pushToken) return;
+      const { title, body } = this.describe(type, payload);
+      // type is included alongside the raw payload so the app's notification-tap handler
+      // can deep-link (EventDetails/Bookings/TicketDetails) without re-deriving it from
+      // title/body text.
+      await this.pushService.send(user.pushToken, title, body, { type, ...payload });
+    } catch (err) {
+      this.logger.warn(`Failed to push notification [${type}] to user ${user?.id}: ${err instanceof Error ? err.message : String(err)}`);
     }
   }
 
@@ -70,8 +91,11 @@ export class NotificationService {
     await this.enqueue(userId, NotificationType.WAITLIST_PROMOTED, { eventId, enrollmentId });
   }
 
-  async notifyRefundStatus(userId: string, refundId: string, status: string): Promise<void> {
-    await this.enqueue(userId, NotificationType.REFUND_STATUS, { refundId, status });
+  // enrollmentId rides along so the frontend's push-tap handler can deep-link straight to
+  // TicketDetailsScreen (which needs a bookingId/enrollmentId, not a refundId) instead of
+  // only being able to fall back to the general Bookings list.
+  async notifyRefundStatus(userId: string, refundId: string, status: string, enrollmentId: string): Promise<void> {
+    await this.enqueue(userId, NotificationType.REFUND_STATUS, { refundId, status, enrollmentId });
   }
 
   // ---------------------------------------------------------------------

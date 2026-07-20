@@ -13,6 +13,7 @@ import { JwtPayload } from '../auth/jwt.util';
 import { UpdateInterestsDto } from './participant/dto/update-interests.dto';
 import { UpdateLocationDto } from './participant/dto/update-location.dto';
 import { UpdateNotificationPrefsDto } from './participant/dto/update-notification-prefs.dto';
+import { UpdatePushTokenDto } from './participant/dto/update-push-token.dto';
 import { UsersService } from './users.service';
 
 @ApiTags('users')
@@ -50,5 +51,14 @@ export class UsersController {
     @Request() req: Request & { user: JwtPayload },
   ) {
     await this.usersService.updateNotificationPrefs(req.user.id, dto);
+  }
+
+  @Patch('me/push-token')
+  @HttpCode(HttpStatus.NO_CONTENT)
+  async updateMyPushToken(
+    @Body() dto: UpdatePushTokenDto,
+    @Request() req: Request & { user: JwtPayload },
+  ) {
+    await this.usersService.updatePushToken(req.user.id, dto.pushToken);
   }
 }

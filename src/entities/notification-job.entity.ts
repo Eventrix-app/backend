@@ -12,10 +12,10 @@ export enum NotificationJobStatus {
   FAILED = 'failed',
 }
 
-// A queued notification for a user. Phase 1 has no push/email transport wired up yet
-// (that's Phase 2 — "reuse existing NotificationService triggers from Phase 1"), so jobs
-// are delivered by logging and marked sent immediately; the queue/table shape is what
-// Phase 2's real push integration will drain from instead of a log line.
+// A queued notification for a user. Persisted first as an audit trail, then marked sent
+// once NotificationService.enqueue() has fired both the email (EmailService) and push
+// (PushService) transports for it — "sent" tracks that delivery was attempted, not that
+// either transport actually reached the user (both are fire-and-forget and never throw).
 @Entity('notification_jobs')
 @Index(['userId', 'status'])
 export class NotificationJob {

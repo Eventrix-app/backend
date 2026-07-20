@@ -26,6 +26,7 @@ import { ConfigService } from '@nestjs/config';
 import { RedisThrottlerStorageService } from './common/throttler/redis-throttler-storage.service';
 import { CacheModule } from './common/cache/cache.module';
 import { EmailModule } from './email/email.module';
+import { PushModule } from './push/push.module';
 
 @Module({
   imports: [
@@ -61,6 +62,7 @@ import { EmailModule } from './email/email.module';
     }),
     CacheModule,
     EmailModule,
+    PushModule,
     DatabaseModule,
     AuditLogModule,
     NotificationModule,

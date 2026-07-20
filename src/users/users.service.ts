@@ -140,4 +140,16 @@ export class UsersService {
     }
     await this.cache.del(userMeCacheKey(userId));
   }
+
+  // Re-registered on every app start/login (see the frontend's push-registration call
+  // site) — the latest device simply overwrites whatever token was stored before, since
+  // this app only supports one active device per account for push purposes.
+  async updatePushToken(userId: string, pushToken: string): Promise<void> {
+    const result = await this.usersRepository.update(userId, { pushToken });
+
+    if (result.affected === 0) {
+      throw new NotFoundException(`User ${userId} not found`);
+    }
+    await this.cache.del(userMeCacheKey(userId));
+  }
 }

@@ -148,7 +148,7 @@ export class PaymentsService {
     const approved = await this.lockAndTransitionRefund(refundId, RefundStatus.APPROVED);
 
     this.logger.log(`Refund ${approved.id} approved by ${actorUserId}`);
-    await this.notificationService.notifyRefundStatus(approved.requestedBy, approved.id, RefundStatus.APPROVED);
+    await this.notificationService.notifyRefundStatus(approved.requestedBy, approved.id, RefundStatus.APPROVED, approved.enrollmentId);
 
     return this.processGatewayRefund(approved);
   }
@@ -160,7 +160,7 @@ export class PaymentsService {
     const rejected = await this.lockAndTransitionRefund(refundId, RefundStatus.REJECTED, { processedAt: new Date() });
 
     this.logger.log(`Refund ${rejected.id} rejected by ${actorUserId}: ${reason}`);
-    await this.notificationService.notifyRefundStatus(rejected.requestedBy, rejected.id, RefundStatus.REJECTED);
+    await this.notificationService.notifyRefundStatus(rejected.requestedBy, rejected.id, RefundStatus.REJECTED, rejected.enrollmentId);
     return rejected;
   }
 
@@ -245,7 +245,7 @@ export class PaymentsService {
       });
 
       this.logger.log(`Refund ${refund.id} processed via gateway (${refund.gatewayRefundId})`);
-      await this.notificationService.notifyRefundStatus(refund.requestedBy, refund.id, RefundStatus.PROCESSED);
+      await this.notificationService.notifyRefundStatus(refund.requestedBy, refund.id, RefundStatus.PROCESSED, refund.enrollmentId);
 
       // Same quantitySold change enroll()/cancelEnrollment() invalidate for — a processed
       // refund frees a seat just like a cancellation does.
@@ -264,7 +264,7 @@ export class PaymentsService {
       const saved = await this.refundsRepository.save(refund);
       const message = err instanceof Error ? err.message : String(err);
       this.logger.error(`Refund ${refund.id} gateway call failed: ${message}`);
-      await this.notificationService.notifyRefundStatus(refund.requestedBy, refund.id, RefundStatus.FAILED);
+      await this.notificationService.notifyRefundStatus(refund.requestedBy, refund.id, RefundStatus.FAILED, refund.enrollmentId);
       return saved;
     }
   }
