@@ -449,7 +449,15 @@ export class EventsService {
       updateEventDto.pricePerTicket !== undefined &&
       Number(updateEventDto.pricePerTicket) > 0 &&
       !event.isPaid;
-    if (wasApproved && switchingToPaid) {
+    // Editing moderated content (title/description/category/cover image) on an
+    // already-approved event sends it back for review, same as the free-to-paid
+    // loophole above — logistics fields (date/time/venue/capacity) stay in the
+    // "safe" bucket below and apply immediately instead.
+    const CONTENT_FIELDS = ['title', 'description', 'categoryId', 'coverImageUrl', 'imageUrl'] as const;
+    const contentChanged = CONTENT_FIELDS.some(
+      (field) => updateEventDto[field] !== undefined && updateEventDto[field] !== event[field],
+    );
+    if (wasApproved && (switchingToPaid || contentChanged)) {
       updateEventDto.approvalStatus = EventApprovalStatus.PENDING_APPROVAL;
       (updateEventDto as any).approvalMethod = null;
       (updateEventDto as any).approvedAt = null;
