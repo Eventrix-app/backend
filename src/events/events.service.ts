@@ -302,26 +302,6 @@ export class EventsService {
     return results;
   }
 
-  async findAll(page: number = 1, limit: number = 20): Promise<{ events: Event[]; total: number; page: number; totalPages: number }> {
-    const skip = (page - 1) * limit;
-    
-    const [events, total] = await this.eventsRepository.findAndCount({
-      relations: ['organizer', 'organizer.user', 'category'],
-      select: SAFE_ORGANIZER_SELECT,
-      where: { deletedAt: null as any },
-      order: { eventDate: 'ASC', startTime: 'ASC' },
-      skip,
-      take: limit,
-    });
-
-    return {
-      events,
-      total,
-      page,
-      totalPages: Math.ceil(total / limit),
-    };
-  }
-
   // Filtered list for public endpoint with pagination
   async findAllFiltered(
     categoryId?: string,
@@ -378,20 +358,27 @@ export class EventsService {
     return result;
   }
 
-  // Ticket-tier capacity is the live source of truth (TicketType.quantityTotal/quantitySold);
   // totalCapacity/availableTickets are deprecated static columns that real (non-seeded)
-  // events never populate. Recomputed here, at read time, for list/detail responses only —
-  // never persisted, so it can't clobber those legacy columns for internal write-path callers
-  // that call findOne() directly (update/approve/reject/ticket-type CRUD).
+  // events never populate — recomputed here, at read time, for list/detail responses only
+  // (never persisted, so it can't clobber those legacy columns for internal write-path
+  // callers that call findOne() directly: update/approve/reject/ticket-type CRUD).
+  // event.capacity (the organizer's explicit event-wide cap, if they set one at
+  // creation/edit) wins when present; otherwise the total falls back to summing every
+  // tier's own quantityTotal, same derivation as before that field existed. Either way,
+  // "sold" is always the live sum across all tiers, so a capacity entered after some
+  // tickets are already sold still nets out correctly.
   private withComputedSeats<T extends Event>(event: T): T {
     const tiers = event.ticketTypes;
-    const hasFiniteCapacity = !!tiers?.length && tiers.every((t) => t.quantityTotal != null);
+    const totalSold = tiers?.length ? tiers.reduce((sum, t) => sum + t.quantitySold, 0) : 0;
+    const tierDerivedCapacity =
+      tiers?.length && tiers.every((t) => t.quantityTotal != null)
+        ? tiers.reduce((sum, t) => sum + t.quantityTotal!, 0)
+        : undefined;
+    const totalCapacity = event.capacity ?? tierDerivedCapacity;
     return {
       ...event,
-      totalCapacity: hasFiniteCapacity ? tiers!.reduce((sum, t) => sum + t.quantityTotal!, 0) : undefined,
-      availableTickets: hasFiniteCapacity
-        ? tiers!.reduce((sum, t) => sum + Math.max(t.quantityTotal! - t.quantitySold, 0), 0)
-        : undefined,
+      totalCapacity,
+      availableTickets: totalCapacity != null ? Math.max(totalCapacity - totalSold, 0) : undefined,
       ticketTypes: undefined,
     } as T;
   }
@@ -612,14 +599,15 @@ export class EventsService {
 
     const organizerIds = follows.map((f) => f.organizerId);
     const skip = (page - 1) * limit;
-    return await this.eventsRepository.find({
+    const events = await this.eventsRepository.find({
       where: { organizerId: In(organizerIds), approvalStatus: EventApprovalStatus.APPROVED, deletedAt: null as any },
-      relations: ['organizer', 'organizer.user', 'category'],
+      relations: ['organizer', 'organizer.user', 'category', 'ticketTypes'],
       select: SAFE_ORGANIZER_SELECT,
       order: { eventDate: 'ASC', startTime: 'ASC' },
       skip,
       take: limit,
     });
+    return events.map((e) => this.withComputedSeats(e));
   }
 
   async addFavorite(eventId: string, userId: string): Promise<void> {

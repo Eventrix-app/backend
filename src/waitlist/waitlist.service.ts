@@ -75,8 +75,11 @@ export class WaitlistService {
   }
 
   // Called whenever a slot frees up on a ticket type (cancellation or a processed
-  // refund). Walks the FIFO queue; an entry whose quantity doesn't fit the freed
-  // capacity is left WAITING (not skipped-forever) so it's retried on the next free-up.
+  // refund). A single free-up can cover more than one waiting entry (a cancelled
+  // enrollment with quantity > 1 frees multiple seats at once), so this keeps walking
+  // the FIFO queue and promoting everyone it can fit — it only stops once an entry
+  // fails to fit the remaining capacity. That entry (and anyone behind it) is left
+  // WAITING (not skipped-forever) so it's retried on the next free-up.
   async promoteNext(ticketTypeId: string): Promise<void> {
     const waitingEntries = await this.waitlistRepository.find({
       where: { ticketTypeId, status: WaitlistStatus.WAITING },
@@ -85,7 +88,7 @@ export class WaitlistService {
 
     for (const entry of waitingEntries) {
       const promoted = await this.tryPromote(entry);
-      if (promoted) return;
+      if (!promoted) return;
     }
   }
 
