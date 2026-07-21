@@ -83,6 +83,9 @@ export class EventsService {
   // the key — bumping it makes every previously-cached list entry unreachable at once.
   private static readonly EVENTS_LIST_TTL_SECONDS = 45;
   private static readonly EVENT_DETAIL_TTL_SECONDS = 60;
+  // Home screen's featured carousel is a small curated rail, not a paginated list — capped
+  // server-side so no client has to defensively truncate an unbounded response.
+  private static readonly MAX_FEATURED_EVENTS = 5;
 
   private async eventsListCacheKey(
     categoryId: string | undefined,
@@ -115,6 +118,9 @@ export class EventsService {
   async createForUser(createEventDto: CreateEventDto, userId: string, userRoles: string[]): Promise<Event> {
     await this.validateCategory(createEventDto.categoryId);
     this.assertValidEventDateRange(createEventDto.eventDate, createEventDto.eventEndDate);
+    if (createEventDto.featured) {
+      await this.assertFeaturedCapAvailable();
+    }
 
     return await this.dataSource.transaction(async (manager) => {
       const user = await manager.findOne(User, { where: { id: userId } });
@@ -252,6 +258,16 @@ export class EventsService {
     const results: Event[] = [];
     const today = new Date();
 
+    // Computed once, up front, rather than relying on assertFeaturedCapAvailable() inside
+    // the loop — that would throw and abort the whole batch partway through (leaving a
+    // partial seed committed) as soon as the 5th featured event was hit. Precomputing the
+    // remaining headroom lets every event in the batch save cleanly, with at most that many
+    // marked featured.
+    const currentFeaturedCount = await this.eventsRepository.count({
+      where: { featured: true, deletedAt: null as any },
+    });
+    let remainingFeaturedSlots = Math.max(0, EventsService.MAX_FEATURED_EVENTS - currentFeaturedCount);
+
     for (let i = 0; i < count; i++) {
       const daysAhead = 3 + (i % 30);
       const eventDate = new Date(today);
@@ -264,6 +280,9 @@ export class EventsService {
       // only if the built-in pool is somehow exhausted (shouldn't happen in practice).
       const resolvedCover = imageUrls[i % imageUrls.length] ?? coverImageUrl;
 
+      const wantsFeatured = i % 3 === 0 && remainingFeaturedSlots > 0;
+      if (wantsFeatured) remainingFeaturedSlots--;
+
       const dto: CreateEventDto = {
         title,
         description: `This is a seeded test event — ${title}. Created for development and QA purposes.`,
@@ -275,7 +294,7 @@ export class EventsService {
         endTime: '18:00',
         coverImageUrl: resolvedCover,
         imageUrl: resolvedCover,
-        featured: i % 3 === 0,
+        featured: wantsFeatured,
         isOnline: false,
         pricePerTicket: 0,
         totalCapacity: 100,
@@ -415,10 +434,16 @@ export class EventsService {
 
   async update(id: string, updateEventDto: UpdateEventDto, userId: string, userRoles: string[]): Promise<Event> {
     const event = await this.findOne(id);
-    
+
     // Validate category if being updated
     if (updateEventDto.categoryId) {
       await this.validateCategory(updateEventDto.categoryId);
+    }
+
+    // Only checked on a false→true transition — resaving an already-featured event
+    // (or explicitly unfeaturing one) must never trip the cap.
+    if (updateEventDto.featured === true && !event.featured) {
+      await this.assertFeaturedCapAvailable();
     }
 
     // Validate organizer if being updated
@@ -1192,6 +1217,21 @@ export class EventsService {
       relations: ['user'],
       select: SAFE_ENROLLMENT_USER_SELECT,
     });
+  }
+
+  // Enforced wherever `featured` can flip false→true (createForUser, update). Not enforced
+  // as a DB constraint — two concurrent requests could both pass this check and briefly
+  // push the count to 6, but this is curation, not a financial/capacity invariant, so a
+  // soft application-level check is an intentional, proportionate tradeoff.
+  private async assertFeaturedCapAvailable(): Promise<void> {
+    const currentCount = await this.eventsRepository.count({
+      where: { featured: true, deletedAt: null as any },
+    });
+    if (currentCount >= EventsService.MAX_FEATURED_EVENTS) {
+      throw new BadRequestException(
+        `Only ${EventsService.MAX_FEATURED_EVENTS} events can be featured at a time. Unfeature another event first.`,
+      );
+    }
   }
 
   // Helper validation methods
