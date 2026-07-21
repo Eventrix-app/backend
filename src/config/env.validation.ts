@@ -30,6 +30,10 @@ export const validateEnv = (config: Record<string, unknown>) => {
     SMTP_USER: Joi.string().optional(),
     SMTP_PASS: Joi.string().optional(),
     SMTP_FROM: Joi.string().optional(),
+    // Server-side only — powers GET /geocode/reverse (GeocodeService). Distinct from the
+    // client-embedded key in Frontend/app.config.js, which authenticates native Maps SDK
+    // tile rendering and is restricted differently (app package + SHA-1, not by API).
+    GOOGLE_MAPS_API_KEY: Joi.string().optional(),
     EXPO_ACCESS_TOKEN: Joi.string().optional(),
     // Optional — only needed to make rate limiting work correctly across Vercel's
     // serverless containers (see RedisThrottlerStorageService). Falls back to in-memory

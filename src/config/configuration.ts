@@ -12,6 +12,15 @@ export default () => ({
     expiresIn: process.env.JWT_EXPIRES_IN || '3600s',
   },
   frontendUrl: process.env.FRONTEND_URL || 'http://localhost:19006',
+  googleMaps: {
+    // Server-side only — GeocodeService proxies reverse-geocode requests through this key
+    // rather than shipping it in the app bundle (see geocode.service.ts). A separate,
+    // app-embedded key covers the native Maps SDK tile rendering itself (app.config.js),
+    // which Google's own model requires to be client-side; that one should be restricted
+    // to the app's package name + SHA-1 fingerprint in Google Cloud Console. This one
+    // should be restricted by API (Geocoding API only) and, where possible, server IP.
+    apiKey: process.env.GOOGLE_MAPS_API_KEY,
+  },
   gatewayFee: {
     // Blended default approximating Razorpay/PayU's published rates (2% + flat ₹3/txn).
     // Organizer-facing "live payout estimate" and actual payment settlement both read

@@ -30,6 +30,7 @@ import { EmailModule } from './email/email.module';
 import { PushModule } from './push/push.module';
 import { ChatModule } from './chat/chat.module';
 import { EventContentModule } from './event-content/event-content.module';
+import { GeocodeModule } from './geocode/geocode.module';
 
 @Module({
   imports: [
@@ -78,6 +79,7 @@ import { EventContentModule } from './event-content/event-content.module';
     UploadsModule,
     ChatModule,
     EventContentModule,
+    GeocodeModule,
   ],
   controllers: [AppController],
   providers: [
