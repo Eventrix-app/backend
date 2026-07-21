@@ -3,6 +3,7 @@ import { InjectRepository } from '@nestjs/typeorm';
 import { Repository } from 'typeorm';
 import { User } from '../entities/user.entity';
 import { EventCategory } from '../entities/category.entity';
+import { Follow } from '../entities/follow.entity';
 import { UpdateInterestsDto } from './participant/dto/update-interests.dto';
 import { UpdateLocationDto } from './participant/dto/update-location.dto';
 import { UpdateNotificationPrefsDto } from './participant/dto/update-notification-prefs.dto';
@@ -33,6 +34,9 @@ export type CurrentUserResponse = {
   roles: string[];
   interests: EventCategory[];
   hasCompletedOnboarding: boolean;
+  // Count of organizers this user follows (the reverse of Organizer.followerCount). Shown
+  // alongside Events/Saved/Bookings on the self-profile stat row.
+  followingCount: number;
   createdAt: Date;
   updatedAt: Date;
 };
@@ -44,6 +48,8 @@ export class UsersService {
     private readonly usersRepository: Repository<User>,
     @InjectRepository(EventCategory)
     private readonly categoryRepository: Repository<EventCategory>,
+    @InjectRepository(Follow)
+    private readonly followsRepository: Repository<Follow>,
     private readonly cache: CacheService,
   ) {}
 
@@ -77,6 +83,7 @@ export class UsersService {
 
     const meta = this.parseMeta(user.bio ?? null);
     const [firstName, ...lastNameParts] = (user.fullName || '').split(' ');
+    const followingCount = await this.followsRepository.count({ where: { userId } });
 
     const response: CurrentUserResponse = {
       id: user.id,
@@ -97,6 +104,7 @@ export class UsersService {
       roles: user.roles ?? [],
       interests: user.interests ?? [],
       hasCompletedOnboarding: user.hasCompletedOnboarding,
+      followingCount,
       createdAt: user.createdAt,
       updatedAt: user.updatedAt,
     };

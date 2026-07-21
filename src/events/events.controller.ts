@@ -76,9 +76,41 @@ export class EventsController {
     @Query('page', new DefaultValuePipe(1), ParseIntPipe) page?: number,
     @Query('limit', new DefaultValuePipe(20), ParseIntPipe) limit?: number,
     @Query('search') search?: string,
+    @Query('priceMin') priceMin?: string,
+    @Query('priceMax') priceMax?: string,
+    @Query('dateFrom') dateFrom?: string,
+    @Query('dateTo') dateTo?: string,
   ) {
     const onlineFlag = isOnline === undefined ? undefined : isOnline === 'true';
-    return await this.eventsService.findAllFiltered(categoryId, onlineFlag, page, limit, search);
+
+    const parsedPriceMin = priceMin !== undefined ? Number(priceMin) : undefined;
+    const parsedPriceMax = priceMax !== undefined ? Number(priceMax) : undefined;
+    if (parsedPriceMin !== undefined && (Number.isNaN(parsedPriceMin) || parsedPriceMin < 0)) {
+      throw new BadRequestException('priceMin must be a non-negative number');
+    }
+    if (parsedPriceMax !== undefined && (Number.isNaN(parsedPriceMax) || parsedPriceMax < 0)) {
+      throw new BadRequestException('priceMax must be a non-negative number');
+    }
+
+    const dateRe = /^\d{4}-\d{2}-\d{2}$/;
+    if (dateFrom !== undefined && !dateRe.test(dateFrom)) {
+      throw new BadRequestException('dateFrom must be YYYY-MM-DD');
+    }
+    if (dateTo !== undefined && !dateRe.test(dateTo)) {
+      throw new BadRequestException('dateTo must be YYYY-MM-DD');
+    }
+
+    return await this.eventsService.findAllFiltered({
+      categoryId,
+      isOnline: onlineFlag,
+      page,
+      limit,
+      search,
+      priceMin: parsedPriceMin,
+      priceMax: parsedPriceMax,
+      dateFrom,
+      dateTo,
+    });
   }
 
   // Admin list pending events (MUST come before :id route)

@@ -373,7 +373,7 @@ describe('EventsService - Fixed Issues', () => {
         25,
       ]);
 
-      const result = await service.findAllFiltered(undefined, undefined, 2, 10);
+      const result = await service.findAllFiltered({ page: 2, limit: 10 });
 
       expect(result.events).toHaveLength(2);
       expect(result.total).toBe(25);

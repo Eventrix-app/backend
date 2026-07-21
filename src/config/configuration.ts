@@ -38,6 +38,17 @@ export default () => ({
     // local dev environment without a Resend key doesn't break auth/notifications entirely.
     resendApiKey: process.env.RESEND_API_KEY,
     from: process.env.EMAIL_FROM || 'onboarding@resend.dev',
+    // SMTP (Nodemailer) is a fallback transport, not a replacement — used only when Resend
+    // is unconfigured or a send through it fails. All optional; EmailService treats a
+    // missing/incomplete SMTP config the same way it treats a missing Resend key.
+    smtp: {
+      host: process.env.SMTP_HOST,
+      port: process.env.SMTP_PORT ? Number(process.env.SMTP_PORT) : 587,
+      secure: process.env.SMTP_SECURE === 'true',
+      user: process.env.SMTP_USER,
+      pass: process.env.SMTP_PASS,
+      from: process.env.SMTP_FROM || process.env.EMAIL_FROM || 'onboarding@resend.dev',
+    },
   },
   push: {
     // Optional — Expo's push API works without one; only needed for enhanced push

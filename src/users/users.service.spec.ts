@@ -5,6 +5,7 @@ import { validate } from 'class-validator';
 import { UsersService } from './users.service';
 import { User } from '../entities/user.entity';
 import { EventCategory } from '../entities/category.entity';
+import { Follow } from '../entities/follow.entity';
 import { UpdateInterestsDto } from './participant/dto/update-interests.dto';
 import { CacheService } from '../common/cache/cache.service';
 
@@ -38,6 +39,7 @@ describe('UsersService', () => {
   let service: UsersService;
   let mockUserRepo: jest.Mocked<any>;
   let mockCategoryRepo: jest.Mocked<any>;
+  let mockFollowRepo: jest.Mocked<any>;
   let mockCacheService: jest.Mocked<any>;
 
   beforeEach(async () => {
@@ -48,6 +50,9 @@ describe('UsersService', () => {
     };
     mockCategoryRepo = {
       findBy: jest.fn(),
+    };
+    mockFollowRepo = {
+      count: jest.fn().mockResolvedValue(0),
     };
     mockCacheService = {
       get: jest.fn().mockResolvedValue(null),
@@ -62,6 +67,7 @@ describe('UsersService', () => {
         UsersService,
         { provide: getRepositoryToken(User), useValue: mockUserRepo },
         { provide: getRepositoryToken(EventCategory), useValue: mockCategoryRepo },
+        { provide: getRepositoryToken(Follow), useValue: mockFollowRepo },
         { provide: CacheService, useValue: mockCacheService },
       ],
     }).compile();

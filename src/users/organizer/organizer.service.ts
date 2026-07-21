@@ -7,6 +7,9 @@ import { User } from '../../entities/user.entity';
 import { Organizer, VerificationLevel } from '../../entities/organizer.entity';
 import { Event, EventApprovalStatus } from '../../entities/event.entity';
 import { Follow } from '../../entities/follow.entity';
+import { CacheService } from '../../common/cache/cache.service';
+import { userMeCacheKey } from '../users.service';
+import { NotificationService } from '../../notifications/notification.service';
 
 const BCRYPT_ROUNDS = 10;
 
@@ -61,6 +64,8 @@ export class OrganizerService {
     private readonly eventsRepository: Repository<Event>,
     @InjectRepository(Follow)
     private readonly followsRepository: Repository<Follow>,
+    private readonly cache: CacheService,
+    private readonly notificationService: NotificationService,
   ) {}
 
   private mapToRecord(user: User, organizer: Organizer): OrganizerRecord {
@@ -206,10 +211,20 @@ export class OrganizerService {
     } catch (err: any) {
       if (err?.code !== '23505') throw err; // lost a concurrent double-tap race — fine, already followed
     }
+    await this.cache.del(userMeCacheKey(userId));
+
+    // Fire-and-forget — a notification hiccup must never fail the follow itself.
+    const follower = await this.usersRepository.findOne({ where: { id: userId } });
+    void this.notificationService.notifyOrganizerFollowed(
+      organizer.userId,
+      userId,
+      follower?.fullName || follower?.email || 'Someone',
+    );
   }
 
   async unfollow(organizerId: string, userId: string): Promise<void> {
     await this.followsRepository.delete({ userId, organizerId });
+    await this.cache.del(userMeCacheKey(userId));
   }
 
   async getMyFollowing(userId: string): Promise<OrganizerPublicProfile[]> {

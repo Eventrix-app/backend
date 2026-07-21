@@ -18,6 +18,12 @@ export class LoggingInterceptor implements NestInterceptor {
   constructor(private readonly configService: ConfigService) {}
 
   intercept(context: ExecutionContext, next: CallHandler): Observable<any> {
+    // This interceptor is registered globally (APP_INTERCEPTOR), so it also fires for WS
+    // gateway handlers — those have no Express request/response to log in this shape.
+    if (context.getType() !== 'http') {
+      return next.handle();
+    }
+
     const ctx = context.switchToHttp();
     const request = ctx.getRequest<Request>();
     const response = ctx.getResponse<Response>();

@@ -1,6 +1,6 @@
 import { Injectable, NotFoundException, ForbiddenException, Logger, ConflictException, BadRequestException } from '@nestjs/common';
 import { InjectRepository } from '@nestjs/typeorm';
-import { Repository, DataSource, ILike, In } from 'typeorm';
+import { Repository, DataSource, ILike, In, Between, MoreThanOrEqual, LessThanOrEqual } from 'typeorm';
 import { JwtService } from '@nestjs/jwt';
 import { Event, EventApprovalStatus, EventStatus } from '../entities/event.entity';
 import { Enrollment } from '../entities/enrollment.entity';
@@ -92,9 +92,13 @@ export class EventsService {
     isOnline: boolean | undefined,
     page: number,
     limit: number,
+    priceMin: number | undefined,
+    priceMax: number | undefined,
+    dateFrom: string | undefined,
+    dateTo: string | undefined,
   ): Promise<string> {
     const version = await this.cache.getVersion(EVENTS_LIST_VERSION_KEY);
-    return `events:list:${version}:${categoryId ?? 'all'}:${isOnline ?? 'all'}:${page}:${limit}`;
+    return `events:list:${version}:${categoryId ?? 'all'}:${isOnline ?? 'all'}:${page}:${limit}:${priceMin ?? '-'}:${priceMax ?? '-'}:${dateFrom ?? '-'}:${dateTo ?? '-'}`;
   }
 
   async create(createEventDto: CreateEventDto): Promise<Event> {
@@ -310,18 +314,30 @@ export class EventsService {
   }
 
   // Filtered list for public endpoint with pagination
-  async findAllFiltered(
-    categoryId?: string,
-    isOnline?: boolean,
-    page: number = 1,
-    limit: number = 20,
-    search?: string,
-  ): Promise<{ events: Event[]; total: number; page: number; totalPages: number }> {
+  async findAllFiltered(filters: {
+    categoryId?: string;
+    isOnline?: boolean;
+    page?: number;
+    limit?: number;
+    search?: string;
+    // Filtered against the flat pricePerTicket column — events priced purely via
+    // ticketTypes tiers (no flat price set) won't match a price-range filter. Acceptable v1
+    // scope; revisit if/when tier-based pricing becomes the primary model.
+    priceMin?: number;
+    priceMax?: number;
+    // 'YYYY-MM-DD', matched against Event.eventDate (a date column, not a timestamp).
+    dateFrom?: string;
+    dateTo?: string;
+  }): Promise<{ events: Event[]; total: number; page: number; totalPages: number }> {
+    const { categoryId, isOnline, page = 1, limit = 20, search, priceMin, priceMax, dateFrom, dateTo } = filters;
+
     // Free-text search bypasses the cache: caching would mean one cache entry per distinct
     // search string ever typed, most never hit again — unbounded cache growth for near-zero
     // hit rate, unlike the small, reused categoryId/isOnline/page/limit key space below.
     const trimmedSearch = search?.trim();
-    const cacheKey = trimmedSearch ? null : await this.eventsListCacheKey(categoryId, isOnline, page, limit);
+    const cacheKey = trimmedSearch
+      ? null
+      : await this.eventsListCacheKey(categoryId, isOnline, page, limit, priceMin, priceMax, dateFrom, dateTo);
     if (cacheKey) {
       const cached = await this.cache.get<{ events: Event[]; total: number; page: number; totalPages: number }>(cacheKey);
       if (cached) return cached;
@@ -335,6 +351,14 @@ export class EventsService {
 
     if (categoryId) base.categoryId = categoryId;
     if (isOnline !== undefined) base.isOnline = isOnline;
+
+    if (priceMin !== undefined && priceMax !== undefined) base.pricePerTicket = Between(priceMin, priceMax);
+    else if (priceMin !== undefined) base.pricePerTicket = MoreThanOrEqual(priceMin);
+    else if (priceMax !== undefined) base.pricePerTicket = LessThanOrEqual(priceMax);
+
+    if (dateFrom && dateTo) base.eventDate = Between(dateFrom, dateTo);
+    else if (dateFrom) base.eventDate = MoreThanOrEqual(dateFrom);
+    else if (dateTo) base.eventDate = LessThanOrEqual(dateTo);
 
     // SearchScreen previously only filtered events already paginated into the client — a
     // real, bookable event several pages deep in the catalog would never surface. Matching

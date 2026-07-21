@@ -86,6 +86,14 @@ export class Event {
   @Column({ type: 'text', nullable: true })
   description!: string;
 
+  // Organizer-entered bullet points for the About tab — replaces what used to be a
+  // hardcoded MOCK_HIGHLIGHTS/MOCK_WHO_SHOULD_ATTEND fallback on the frontend.
+  @Column({ type: 'text', array: true, default: () => "'{}'" })
+  highlights!: string[];
+
+  @Column({ name: 'who_should_attend', type: 'text', array: true, default: () => "'{}'" })
+  whoShouldAttend!: string[];
+
   @Column({ name: 'category_id', type: 'uuid' })
   categoryId!: string;
 

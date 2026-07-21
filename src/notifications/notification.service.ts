@@ -98,6 +98,16 @@ export class NotificationService {
     await this.enqueue(userId, NotificationType.REFUND_STATUS, { refundId, status, enrollmentId });
   }
 
+  async notifyAnnouncement(userIds: string[], eventId: string, announcementId: string, title: string): Promise<void> {
+    await Promise.all(
+      userIds.map((userId) => this.enqueue(userId, NotificationType.ANNOUNCEMENT, { eventId, announcementId, title })),
+    );
+  }
+
+  async notifyOrganizerFollowed(organizerUserId: string, followerUserId: string, followerName: string): Promise<void> {
+    await this.enqueue(organizerUserId, NotificationType.ORGANIZER_FOLLOWED, { followerUserId, followerName });
+  }
+
   // ---------------------------------------------------------------------
   // Read-side for NotificationsScreen — lists the same jobs enqueue() persists,
   // rendered with a human-readable title/body derived from type + payload.
@@ -142,6 +152,14 @@ export class NotificationService {
       case NotificationType.REFUND_STATUS: {
         const status = String(payload['status'] ?? 'updated');
         return { title: 'Refund update', body: `Your refund is now "${status}".` };
+      }
+      case NotificationType.ANNOUNCEMENT: {
+        const title = String(payload['title'] ?? 'New announcement');
+        return { title: 'Event announcement', body: title };
+      }
+      case NotificationType.ORGANIZER_FOLLOWED: {
+        const followerName = String(payload['followerName'] ?? 'Someone');
+        return { title: 'New follower', body: `${followerName} started following you.` };
       }
       default:
         return { title: 'Notification', body: '' };

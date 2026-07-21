@@ -18,6 +18,10 @@ import { EventMedia } from './entities/event-media.entity';
 import { PasswordResetOtp } from './entities/password-reset-otp.entity';
 import { Favorite } from './entities/favorite.entity';
 import { Follow } from './entities/follow.entity';
+import { ChatMessage } from './entities/chat-message.entity';
+import { EventScheduleItem } from './entities/event-schedule.entity';
+import { EventAnnouncement } from './entities/event-announcement.entity';
+import { EventReview } from './entities/event-review.entity';
 
 const entities = [
   User,
@@ -38,6 +42,10 @@ const entities = [
   PasswordResetOtp,
   Favorite,
   Follow,
+  ChatMessage,
+  EventScheduleItem,
+  EventAnnouncement,
+  EventReview,
 ];
 
 export const AppDataSource = new DataSource({

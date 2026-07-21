@@ -4,6 +4,8 @@ export enum NotificationType {
   EVENT_CHANGED = 'event_changed',
   WAITLIST_PROMOTED = 'waitlist_promoted',
   REFUND_STATUS = 'refund_status',
+  ANNOUNCEMENT = 'announcement',
+  ORGANIZER_FOLLOWED = 'organizer_followed',
 }
 
 export enum NotificationJobStatus {

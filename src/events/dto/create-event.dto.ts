@@ -34,6 +34,16 @@ export class CreateEventDto {
   @IsString()
   description?: string;
 
+  @IsOptional()
+  @IsArray()
+  @IsString({ each: true })
+  highlights?: string[];
+
+  @IsOptional()
+  @IsArray()
+  @IsString({ each: true })
+  whoShouldAttend?: string[];
+
   @IsNotEmpty({ message: 'Category is required' })
   @IsUUID('4', { message: 'Invalid category ID format' })
   categoryId!: string;

@@ -16,6 +16,12 @@ export class RolesGuard implements CanActivate {
   constructor(private readonly reflector: Reflector) {}
 
   canActivate(context: ExecutionContext): boolean {
+    // Same reasoning as JwtAuthGuard: this global guard also fires for WS gateway
+    // handlers, which have no HTTP request to read roles off of.
+    if (context.getType() !== 'http') {
+      return true;
+    }
+
     // Skip role check for @Public() routes
     const isPublic = this.reflector.getAllAndOverride<boolean>(IS_PUBLIC_KEY, [
       context.getHandler(),

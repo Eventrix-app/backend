@@ -21,12 +21,15 @@ import { AuditLogModule } from './common/audit-log/audit-log.module';
 import { AuditLogInterceptor } from './common/interceptors/audit-log.interceptor';
 import { NotificationModule } from './notifications/notification.module';
 import { ScheduleModule } from '@nestjs/schedule';
-import { ThrottlerModule, ThrottlerGuard } from '@nestjs/throttler';
+import { ThrottlerModule } from '@nestjs/throttler';
 import { ConfigService } from '@nestjs/config';
 import { RedisThrottlerStorageService } from './common/throttler/redis-throttler-storage.service';
+import { HttpOnlyThrottlerGuard } from './common/throttler/http-only-throttler.guard';
 import { CacheModule } from './common/cache/cache.module';
 import { EmailModule } from './email/email.module';
 import { PushModule } from './push/push.module';
+import { ChatModule } from './chat/chat.module';
+import { EventContentModule } from './event-content/event-content.module';
 
 @Module({
   imports: [
@@ -73,6 +76,8 @@ import { PushModule } from './push/push.module';
     EventsModule,
     PaymentsModule,
     UploadsModule,
+    ChatModule,
+    EventContentModule,
   ],
   controllers: [AppController],
   providers: [
@@ -80,7 +85,7 @@ import { PushModule } from './push/push.module';
     HttpExceptionFilter,
     { provide: APP_GUARD, useClass: JwtAuthGuard },
     { provide: APP_GUARD, useClass: RolesGuard },
-    { provide: APP_GUARD, useClass: ThrottlerGuard },
+    { provide: APP_GUARD, useClass: HttpOnlyThrottlerGuard },
     { provide: APP_INTERCEPTOR, useClass: LoggingInterceptor },
     { provide: APP_INTERCEPTOR, useClass: AuditLogInterceptor },
   ],

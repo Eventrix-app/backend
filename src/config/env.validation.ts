@@ -22,6 +22,14 @@ export const validateEnv = (config: Record<string, unknown>) => {
     CRON_SECRET: Joi.string().optional(),
     RESEND_API_KEY: Joi.string().optional(),
     EMAIL_FROM: Joi.string().optional(),
+    // SMTP fallback transport (Nodemailer) — used only when Resend is unconfigured or a
+    // send through it fails. All optional; unset means the fallback is simply unavailable.
+    SMTP_HOST: Joi.string().optional(),
+    SMTP_PORT: Joi.number().optional(),
+    SMTP_SECURE: Joi.string().optional(),
+    SMTP_USER: Joi.string().optional(),
+    SMTP_PASS: Joi.string().optional(),
+    SMTP_FROM: Joi.string().optional(),
     EXPO_ACCESS_TOKEN: Joi.string().optional(),
     // Optional — only needed to make rate limiting work correctly across Vercel's
     // serverless containers (see RedisThrottlerStorageService). Falls back to in-memory

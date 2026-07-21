@@ -7,13 +7,24 @@ describe('OrganizerService', () => {
   let mockOrganizersRepo: any;
   let mockEventsRepo: any;
   let mockFollowsRepo: any;
+  let mockCacheService: any;
+  let mockNotificationService: any;
 
   beforeEach(() => {
-    mockUsersRepo = { save: jest.fn((u) => Promise.resolve(u)) };
+    mockUsersRepo = { save: jest.fn((u) => Promise.resolve(u)), findOne: jest.fn().mockResolvedValue(null) };
     mockOrganizersRepo = { findOne: jest.fn(), save: jest.fn((o) => Promise.resolve(o)) };
     mockEventsRepo = { count: jest.fn() };
     mockFollowsRepo = { count: jest.fn(), exist: jest.fn(), find: jest.fn(), findOne: jest.fn(), create: jest.fn(), save: jest.fn(), delete: jest.fn() };
-    service = new OrganizerService(mockUsersRepo, mockOrganizersRepo, mockEventsRepo, mockFollowsRepo);
+    mockCacheService = { del: jest.fn().mockResolvedValue(undefined) };
+    mockNotificationService = { notifyOrganizerFollowed: jest.fn().mockResolvedValue(undefined) };
+    service = new OrganizerService(
+      mockUsersRepo,
+      mockOrganizersRepo,
+      mockEventsRepo,
+      mockFollowsRepo,
+      mockCacheService,
+      mockNotificationService,
+    );
   });
 
   // Regression test for multipart.md §3.4 / §4: companyLogoUrl previously existed on
