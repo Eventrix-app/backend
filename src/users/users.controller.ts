@@ -1,6 +1,7 @@
 import {
   Body,
   Controller,
+  Delete,
   Get,
   HttpCode,
   HttpStatus,
@@ -13,6 +14,7 @@ import { JwtPayload } from '../auth/jwt.util';
 import { UpdateInterestsDto } from './participant/dto/update-interests.dto';
 import { UpdateLocationDto } from './participant/dto/update-location.dto';
 import { UpdateNotificationPrefsDto } from './participant/dto/update-notification-prefs.dto';
+import { UpdateNotificationChannelsDto } from './participant/dto/update-notification-channels.dto';
 import { UpdatePushTokenDto } from './participant/dto/update-push-token.dto';
 import { UsersService } from './users.service';
 
@@ -60,5 +62,21 @@ export class UsersController {
     @Request() req: Request & { user: JwtPayload },
   ) {
     await this.usersService.updatePushToken(req.user.id, dto.pushToken);
+  }
+
+  // Called on logout — see UsersService.clearPushToken for why this matters.
+  @Delete('me/push-token')
+  @HttpCode(HttpStatus.NO_CONTENT)
+  async clearMyPushToken(@Request() req: Request & { user: JwtPayload }) {
+    await this.usersService.clearPushToken(req.user.id);
+  }
+
+  @Patch('me/notification-channels')
+  @HttpCode(HttpStatus.NO_CONTENT)
+  async updateMyNotificationChannels(
+    @Body() dto: UpdateNotificationChannelsDto,
+    @Request() req: Request & { user: JwtPayload },
+  ) {
+    await this.usersService.updateNotificationChannels(req.user.id, dto);
   }
 }

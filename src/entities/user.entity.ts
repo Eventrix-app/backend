@@ -82,6 +82,17 @@ export class User {
   @Column({ name: 'push_token', type: 'varchar', nullable: true })
   pushToken?: string | null;
 
+  // Master on/off switches surfaced by SettingsScreen's "Push Notifications"/"Email
+  // Notifications" toggles — distinct from notificationPrefs below, which is a set of
+  // onboarding content categories. These gate every transactional notification
+  // (event_changed/waitlist_promoted/refund_status) regardless of type; see
+  // NotificationService.sendPushForJob/sendEmailForJob.
+  @Column({ name: 'push_enabled', type: 'boolean', default: true })
+  pushEnabled!: boolean;
+
+  @Column({ name: 'email_enabled', type: 'boolean', default: true })
+  emailEnabled!: boolean;
+
   @Column({
     name: 'notification_prefs',
     type: 'jsonb',

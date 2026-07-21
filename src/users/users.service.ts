@@ -6,6 +6,7 @@ import { EventCategory } from '../entities/category.entity';
 import { UpdateInterestsDto } from './participant/dto/update-interests.dto';
 import { UpdateLocationDto } from './participant/dto/update-location.dto';
 import { UpdateNotificationPrefsDto } from './participant/dto/update-notification-prefs.dto';
+import { UpdateNotificationChannelsDto } from './participant/dto/update-notification-channels.dto';
 import { CacheService } from '../common/cache/cache.service';
 
 // Exported so ParticipantService (a separate service writing to the same `users` row via
@@ -27,6 +28,8 @@ export type CurrentUserResponse = {
   latitude: number | null;
   longitude: number | null;
   notificationPrefs: UpdateNotificationPrefsDto | null;
+  pushEnabled: boolean;
+  emailEnabled: boolean;
   roles: string[];
   interests: EventCategory[];
   hasCompletedOnboarding: boolean;
@@ -89,6 +92,8 @@ export class UsersService {
       latitude: user.latitude ?? null,
       longitude: user.longitude ?? null,
       notificationPrefs: user.notificationPrefs ?? null,
+      pushEnabled: user.pushEnabled,
+      emailEnabled: user.emailEnabled,
       roles: user.roles ?? [],
       interests: user.interests ?? [],
       hasCompletedOnboarding: user.hasCompletedOnboarding,
@@ -146,6 +151,33 @@ export class UsersService {
   // this app only supports one active device per account for push purposes.
   async updatePushToken(userId: string, pushToken: string): Promise<void> {
     const result = await this.usersRepository.update(userId, { pushToken });
+
+    if (result.affected === 0) {
+      throw new NotFoundException(`User ${userId} not found`);
+    }
+    await this.cache.del(userMeCacheKey(userId));
+  }
+
+  // Called on logout so a signed-out device stops receiving this account's pushes —
+  // without this, the token (registered per-account, not per-device) would keep
+  // delivering notifications to a device the user is no longer signed into.
+  async clearPushToken(userId: string): Promise<void> {
+    const result = await this.usersRepository.update(userId, { pushToken: null });
+
+    if (result.affected === 0) {
+      throw new NotFoundException(`User ${userId} not found`);
+    }
+    await this.cache.del(userMeCacheKey(userId));
+  }
+
+  // Master per-transport switches behind SettingsScreen's "Push Notifications"/"Email
+  // Notifications" toggles — checked by NotificationService before every send.
+  async updateNotificationChannels(userId: string, dto: UpdateNotificationChannelsDto): Promise<void> {
+    const update: Partial<Pick<User, 'pushEnabled' | 'emailEnabled'>> = {};
+    if (dto.pushEnabled !== undefined) update.pushEnabled = dto.pushEnabled;
+    if (dto.emailEnabled !== undefined) update.emailEnabled = dto.emailEnabled;
+
+    const result = await this.usersRepository.update(userId, update);
 
     if (result.affected === 0) {
       throw new NotFoundException(`User ${userId} not found`);

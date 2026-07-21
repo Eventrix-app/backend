@@ -56,7 +56,7 @@ export class NotificationService {
 
   private async sendEmailForJob(user: User | null, type: NotificationType, payload: Record<string, unknown>): Promise<void> {
     try {
-      if (!user?.email) return;
+      if (!user?.email || user.emailEnabled === false) return;
       const { title, body } = this.describe(type, payload);
       await this.emailService.send(user.email, title, `<p>${body}</p>`);
     } catch (err) {
@@ -66,7 +66,7 @@ export class NotificationService {
 
   private async sendPushForJob(user: User | null, type: NotificationType, payload: Record<string, unknown>): Promise<void> {
     try {
-      if (!user?.pushToken) return;
+      if (!user?.pushToken || user.pushEnabled === false) return;
       const { title, body } = this.describe(type, payload);
       // type is included alongside the raw payload so the app's notification-tap handler
       // can deep-link (EventDetails/Bookings/TicketDetails) without re-deriving it from
