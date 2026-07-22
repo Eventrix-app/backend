@@ -766,6 +766,93 @@ describe('EventsService - Fixed Issues', () => {
     });
   });
 
+  describe('createForUser - organizer verification gate (#7)', () => {
+    const baseDto = {
+      categoryId: 'cat-1',
+      title: 'Test Event',
+      venueName: 'Test Venue',
+      venueAddress: 'Test Address',
+      eventDate: '2099-12-31',
+      startTime: '10:00:00',
+    };
+
+    beforeEach(() => {
+      mockCategoryRepo.findOne.mockResolvedValue({ id: 'cat-1' });
+      mockUserRepo.findOne.mockResolvedValue({ id: 'user-1', roles: ['user'] });
+    });
+
+    it('rejects a user with no organizer profile at all', async () => {
+      mockDataSource.transaction.mockImplementation(async (callback: any) => {
+        const mockManager = {
+          findOne: jest.fn()
+            .mockImplementation((entity: any) => (entity === User
+              ? Promise.resolve({ id: 'user-1', roles: ['user'] })
+              : Promise.resolve(null))), // no Organizer row yet
+        };
+        return callback(mockManager);
+      });
+
+      await expect(service.createForUser({ ...baseDto } as any, 'user-1', ['user'])).rejects.toThrow(
+        ForbiddenException,
+      );
+    });
+
+    it('rejects a user whose organizer profile exists but is not document_verified', async () => {
+      mockDataSource.transaction.mockImplementation(async (callback: any) => {
+        const mockManager = {
+          findOne: jest.fn()
+            .mockImplementation((entity: any) => (entity === User
+              ? Promise.resolve({ id: 'user-1', roles: ['user'] })
+              : Promise.resolve({ id: 'org-1', userId: 'user-1', verificationLevel: 'email_verified' }))),
+        };
+        return callback(mockManager);
+      });
+
+      await expect(service.createForUser({ ...baseDto } as any, 'user-1', ['user'])).rejects.toThrow(
+        ForbiddenException,
+      );
+    });
+
+    it('allows a document_verified organizer to create an event', async () => {
+      mockDataSource.transaction.mockImplementation(async (callback: any) => {
+        const mockManager = {
+          findOne: jest.fn()
+            .mockImplementation((entity: any) => (entity === User
+              ? Promise.resolve({ id: 'user-1', roles: ['user', 'organizer'] })
+              : Promise.resolve({ id: 'org-1', userId: 'user-1', verificationLevel: 'document_verified', autoApproveEvents: false }))),
+          create: jest.fn((_entity: any, data: any) => data),
+          save: jest.fn((_entity: any, data: any) => Promise.resolve({ ...data, id: 'event-1' })),
+        };
+        return callback(mockManager);
+      });
+
+      const result = await service.createForUser({ ...baseDto } as any, 'user-1', ['user']);
+      expect(result.id).toBe('event-1');
+    });
+
+    it('lets an admin creating on behalf of an explicit organizerId bypass the gate', async () => {
+      mockDataSource.transaction.mockImplementation(async (callback: any) => {
+        const mockManager = {
+          findOne: jest.fn()
+            .mockImplementation((entity: any) => (entity === User
+              ? Promise.resolve({ id: 'admin-1', roles: ['admin'] })
+              : Promise.resolve(null))), // admin has no organizer profile of their own
+          create: jest.fn((_entity: any, data: any) => data),
+          save: jest.fn((_entity: any, data: any) => Promise.resolve({ ...data, id: 'event-2' })),
+        };
+        return callback(mockManager);
+      });
+      mockOrganizerRepo.findOne.mockResolvedValue({ id: 'org-target', user: { deletedAt: null } });
+
+      const result = await service.createForUser(
+        { ...baseDto, organizerId: 'org-target' } as any,
+        'admin-1',
+        ['admin'],
+      );
+      expect(result.id).toBe('event-2');
+    });
+  });
+
   describe('Helper Methods', () => {
     it('canEnroll should return true only for approved upcoming events with tickets', () => {
       const event = new Event();

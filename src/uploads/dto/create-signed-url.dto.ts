@@ -8,6 +8,12 @@ export enum UploadPurpose {
   EVENT_IMAGE = 'event-image',
   EVENT_COVER = 'event-cover',
   COMPANY_LOGO = 'company-logo',
+  // KYC documents for organizer verification (#7) — unlike every other purpose above,
+  // these land in a private bucket (see UploadsService's PURPOSE_CONFIG.isPrivate) since
+  // they're sensitive PII, not routinely-displayed public assets.
+  IDENTITY_PROOF = 'identity-proof',
+  ADDRESS_PROOF = 'address-proof',
+  PAN_OR_AADHAAR = 'pan-or-aadhaar',
 }
 
 // Deliberately a fixed allow-list, not a generic "image/*" pattern — only the formats

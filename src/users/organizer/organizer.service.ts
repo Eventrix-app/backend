@@ -10,6 +10,8 @@ import { Follow } from '../../entities/follow.entity';
 import { CacheService } from '../../common/cache/cache.service';
 import { userMeCacheKey } from '../users.service';
 import { NotificationService } from '../../notifications/notification.service';
+import { UploadsService } from '../../uploads/uploads.service';
+import { SubmitVerificationDto } from './dto/submit-verification.dto';
 
 const BCRYPT_ROUNDS = 10;
 
@@ -27,6 +29,26 @@ export interface OrganizerPublicProfile {
   eventCount: number;
   followerCount: number;
   isFollowing?: boolean;
+}
+
+// What the applicant sees of their own submission — never exposes the raw document paths
+// (those only matter to admin review, via getVerificationDocuments's signed read URLs).
+export interface VerificationStatusRecord {
+  status: 'not_submitted' | 'pending' | 'approved' | 'rejected';
+  verificationLevel: VerificationLevel;
+  submittedForReviewAt?: string;
+  rejectionReason?: string;
+}
+
+// Admin-only queue entry — includes just enough identity to review, not the full
+// OrganizerRecord (no commission/auto-approve fields, which are unrelated to KYC).
+export interface PendingVerificationRecord {
+  id: string;
+  userId: string;
+  fullName?: string;
+  companyName: string;
+  upiId?: string;
+  submittedForReviewAt?: string;
 }
 
 export interface OrganizerRecord {
@@ -66,6 +88,7 @@ export class OrganizerService {
     private readonly followsRepository: Repository<Follow>,
     private readonly cache: CacheService,
     private readonly notificationService: NotificationService,
+    private readonly uploadsService: UploadsService,
   ) {}
 
   private mapToRecord(user: User, organizer: Organizer): OrganizerRecord {
@@ -240,5 +263,122 @@ export class OrganizerService {
     return results
       .filter((r): r is PromiseFulfilledResult<OrganizerPublicProfile> => r.status === 'fulfilled')
       .map((r) => r.value);
+  }
+
+  // --- KYC verification (#7) ---
+
+  async getMyVerificationStatus(userId: string): Promise<VerificationStatusRecord> {
+    const organizer = await this.organizersRepository.findOne({ where: { userId } });
+    if (!organizer) {
+      return { status: 'not_submitted', verificationLevel: VerificationLevel.UNVERIFIED };
+    }
+    if (organizer.verificationLevel === VerificationLevel.DOCUMENT_VERIFIED) {
+      return { status: 'approved', verificationLevel: organizer.verificationLevel };
+    }
+    if (organizer.rejectionReason) {
+      return {
+        status: 'rejected',
+        verificationLevel: organizer.verificationLevel,
+        rejectionReason: organizer.rejectionReason,
+      };
+    }
+    if (organizer.submittedForReviewAt) {
+      return {
+        status: 'pending',
+        verificationLevel: organizer.verificationLevel,
+        submittedForReviewAt: organizer.submittedForReviewAt.toISOString(),
+      };
+    }
+    return { status: 'not_submitted', verificationLevel: organizer.verificationLevel };
+  }
+
+  // Creates the Organizer profile on first submission (replacing the old auto-create in
+  // EventsService.createForUser, which granted the role with no check at all) or updates it
+  // on resubmission after a rejection. Never touches verificationLevel or the user's roles
+  // itself — only approveVerification() does that, after an admin actually reviews it.
+  async submitVerification(userId: string, dto: SubmitVerificationDto): Promise<VerificationStatusRecord> {
+    let organizer = await this.organizersRepository.findOne({ where: { userId } });
+    if (!organizer) {
+      organizer = this.organizersRepository.create({ userId, companyName: dto.companyName });
+    }
+    if (organizer.verificationLevel === VerificationLevel.DOCUMENT_VERIFIED) {
+      throw new BadRequestException('This organizer is already verified.');
+    }
+
+    organizer.fullName = dto.fullName;
+    organizer.companyName = dto.companyName;
+    organizer.identityProofUrl = dto.identityProofUrl;
+    organizer.addressProofUrl = dto.addressProofUrl;
+    organizer.panOrAadhaarUrl = dto.panOrAadhaarUrl;
+    organizer.upiId = dto.upiId;
+    organizer.submittedForReviewAt = new Date();
+    organizer.rejectionReason = null as unknown as string;
+
+    await this.organizersRepository.save(organizer);
+    this.logger.log(`Organizer verification submitted for review: user ${userId}`);
+    return this.getMyVerificationStatus(userId);
+  }
+
+  async getPendingVerifications(): Promise<PendingVerificationRecord[]> {
+    const organizers = await this.organizersRepository.find({
+      where: { verificationLevel: VerificationLevel.UNVERIFIED },
+      order: { submittedForReviewAt: 'ASC' },
+    });
+    return organizers
+      .filter((o) => o.submittedForReviewAt != null)
+      .map((o) => ({
+        id: o.id,
+        userId: o.userId,
+        fullName: o.fullName || undefined,
+        companyName: o.companyName,
+        upiId: o.upiId || undefined,
+        submittedForReviewAt: o.submittedForReviewAt?.toISOString(),
+      }));
+  }
+
+  // Mints fresh 5-minute signed read URLs for a submission's three documents — the stored
+  // *Url fields are actually private-bucket storage paths (see UploadsService.isPrivate),
+  // never real public URLs, so an admin needs one of these to actually view them.
+  async getVerificationDocuments(organizerId: string): Promise<Record<string, string>> {
+    const organizer = await this.loadActiveOrganizer(organizerId);
+    if (!organizer.identityProofUrl || !organizer.addressProofUrl || !organizer.panOrAadhaarUrl) {
+      throw new NotFoundException('This organizer has not submitted verification documents.');
+    }
+    const [identityProofUrl, addressProofUrl, panOrAadhaarUrl] = await Promise.all([
+      this.uploadsService.createSignedReadUrl(organizer.identityProofUrl),
+      this.uploadsService.createSignedReadUrl(organizer.addressProofUrl),
+      this.uploadsService.createSignedReadUrl(organizer.panOrAadhaarUrl),
+    ]);
+    return { identityProofUrl, addressProofUrl, panOrAadhaarUrl };
+  }
+
+  async approveVerification(organizerId: string): Promise<OrganizerRecord> {
+    const organizer = await this.loadActiveOrganizer(organizerId);
+    organizer.verificationLevel = VerificationLevel.DOCUMENT_VERIFIED;
+    organizer.verified = true;
+    organizer.verifiedAt = new Date();
+    organizer.rejectionReason = null as unknown as string;
+    await this.organizersRepository.save(organizer);
+
+    if (!organizer.user.roles.includes('organizer')) {
+      organizer.user.roles = [...organizer.user.roles, 'organizer'];
+      await this.usersRepository.save(organizer.user);
+    }
+    await this.cache.del(userMeCacheKey(organizer.userId));
+
+    this.logger.log(`Organizer ${organizerId} verification approved — 'organizer' role granted`);
+    void this.notificationService.notifyOrganizerVerificationApproved(organizer.userId);
+    return this.mapToRecord(organizer.user, organizer);
+  }
+
+  async rejectVerification(organizerId: string, reason: string): Promise<OrganizerRecord> {
+    const organizer = await this.loadActiveOrganizer(organizerId);
+    organizer.rejectionReason = reason;
+    organizer.submittedForReviewAt = null as unknown as Date;
+    await this.organizersRepository.save(organizer);
+
+    this.logger.log(`Organizer ${organizerId} verification rejected: ${reason}`);
+    void this.notificationService.notifyOrganizerVerificationRejected(organizer.userId, reason);
+    return this.mapToRecord(organizer.user, organizer);
   }
 }

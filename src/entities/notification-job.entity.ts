@@ -8,6 +8,8 @@ export enum NotificationType {
   ORGANIZER_FOLLOWED = 'organizer_followed',
   BOOKING_CONFIRMED = 'booking_confirmed',
   EVENT_CANCELLED = 'event_cancelled',
+  ORGANIZER_VERIFICATION_APPROVED = 'organizer_verification_approved',
+  ORGANIZER_VERIFICATION_REJECTED = 'organizer_verification_rejected',
 }
 
 export enum NotificationJobStatus {

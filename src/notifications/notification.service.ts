@@ -108,6 +108,14 @@ export class NotificationService {
     await this.enqueue(organizerUserId, NotificationType.ORGANIZER_FOLLOWED, { followerUserId, followerName });
   }
 
+  async notifyOrganizerVerificationApproved(userId: string): Promise<void> {
+    await this.enqueue(userId, NotificationType.ORGANIZER_VERIFICATION_APPROVED, {});
+  }
+
+  async notifyOrganizerVerificationRejected(userId: string, reason: string): Promise<void> {
+    await this.enqueue(userId, NotificationType.ORGANIZER_VERIFICATION_REJECTED, { reason });
+  }
+
   // Fired once a booking is actually paid-and-confirmed — immediately for free events
   // (EventsService.enroll(), paymentStatus is 'paid' right away), or from the payment
   // webhook for paid events (PaymentsService.handleWebhook(), on gateway success). Never
@@ -204,6 +212,18 @@ export class NotificationService {
         return {
           title: 'Event cancelled',
           body: `${eventTitle} has been cancelled.${reason} If you paid for this booking, request a refund from My Bookings in the app.`,
+        };
+      }
+      case NotificationType.ORGANIZER_VERIFICATION_APPROVED:
+        return {
+          title: "You're verified!",
+          body: 'Your organizer verification was approved — you can now create and publish events.',
+        };
+      case NotificationType.ORGANIZER_VERIFICATION_REJECTED: {
+        const reason = String(payload['reason'] ?? '');
+        return {
+          title: 'Verification needs another look',
+          body: `Your organizer verification wasn't approved. ${reason} You can update your details and resubmit.`,
         };
       }
       case NotificationType.BOOKING_CONFIRMED: {

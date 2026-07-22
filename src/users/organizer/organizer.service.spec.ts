@@ -9,6 +9,7 @@ describe('OrganizerService', () => {
   let mockFollowsRepo: any;
   let mockCacheService: any;
   let mockNotificationService: any;
+  let mockUploadsService: any;
 
   beforeEach(() => {
     mockUsersRepo = { save: jest.fn((u) => Promise.resolve(u)), findOne: jest.fn().mockResolvedValue(null) };
@@ -16,7 +17,12 @@ describe('OrganizerService', () => {
     mockEventsRepo = { count: jest.fn() };
     mockFollowsRepo = { count: jest.fn(), exist: jest.fn(), find: jest.fn(), findOne: jest.fn(), create: jest.fn(), save: jest.fn(), delete: jest.fn() };
     mockCacheService = { del: jest.fn().mockResolvedValue(undefined) };
-    mockNotificationService = { notifyOrganizerFollowed: jest.fn().mockResolvedValue(undefined) };
+    mockNotificationService = {
+      notifyOrganizerFollowed: jest.fn().mockResolvedValue(undefined),
+      notifyOrganizerVerificationApproved: jest.fn().mockResolvedValue(undefined),
+      notifyOrganizerVerificationRejected: jest.fn().mockResolvedValue(undefined),
+    };
+    mockUploadsService = { createSignedReadUrl: jest.fn().mockResolvedValue('https://signed.example.com') };
     service = new OrganizerService(
       mockUsersRepo,
       mockOrganizersRepo,
@@ -24,6 +30,7 @@ describe('OrganizerService', () => {
       mockFollowsRepo,
       mockCacheService,
       mockNotificationService,
+      mockUploadsService,
     );
   });
 

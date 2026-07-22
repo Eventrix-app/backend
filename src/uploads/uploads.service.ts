@@ -15,17 +15,26 @@ interface PurposeConfig {
   // null = any authenticated user may request this purpose; otherwise the caller
   // must hold at least one of these roles. See multipart.md §3.2.
   allowedRoles: string[] | null;
+  // true for KYC documents (identity/address proof, PAN/Aadhaar) — sensitive PII, not a
+  // routinely-displayed public asset. createSignedUrl() skips getPublicUrl() for these and
+  // returns the raw storage path instead; viewing one later requires a fresh short-lived
+  // signed read URL (see createSignedReadUrl()), not a permanent public link.
+  isPrivate?: boolean;
 }
 
-// All four buckets are public — these are low-sensitivity, routinely-displayed
-// assets, so public buckets get the best CDN cache hit rate with no signed-URL
-// complexity on the read side (multipart.md §3.3). Buckets are provisioned in
+// Every purpose except the KYC ones below is a public bucket — low-sensitivity,
+// routinely-displayed assets, so public buckets get the best CDN cache hit rate with no
+// signed-URL complexity on the read side (multipart.md §3.3). Buckets are provisioned in
 // Supabase out-of-band; this map only decides which bucket+prefix a purpose lands in.
 const PURPOSE_CONFIG: Record<UploadPurpose, PurposeConfig> = {
   [UploadPurpose.PROFILE_PICTURE]: { bucket: 'profile-pictures', pathPrefix: 'users', allowedRoles: null },
   [UploadPurpose.EVENT_IMAGE]: { bucket: 'event-images', pathPrefix: 'events', allowedRoles: ['organizer', 'admin'] },
   [UploadPurpose.EVENT_COVER]: { bucket: 'event-images', pathPrefix: 'event-covers', allowedRoles: ['organizer', 'admin'] },
   [UploadPurpose.COMPANY_LOGO]: { bucket: 'organizer-logos', pathPrefix: 'organizers', allowedRoles: ['organizer', 'admin'] },
+  // allowedRoles: null — applicants aren't organizers yet at the point they submit these.
+  [UploadPurpose.IDENTITY_PROOF]: { bucket: 'organizer-kyc-docs', pathPrefix: 'identity-proof', allowedRoles: null, isPrivate: true },
+  [UploadPurpose.ADDRESS_PROOF]: { bucket: 'organizer-kyc-docs', pathPrefix: 'address-proof', allowedRoles: null, isPrivate: true },
+  [UploadPurpose.PAN_OR_AADHAAR]: { bucket: 'organizer-kyc-docs', pathPrefix: 'pan-or-aadhaar', allowedRoles: null, isPrivate: true },
 };
 
 // Kept in exact 1:1 correspondence with ALLOWED_UPLOAD_CONTENT_TYPES in the DTO.
@@ -84,10 +93,41 @@ export class UploadsService {
       throw new InternalServerErrorException(`Failed to create upload URL: ${error.message}`);
     }
 
+    // Private (KYC) purposes: the bucket has no public read access, so getPublicUrl() would
+    // return a URL that 404s. Return the raw storage path instead — the caller stores this
+    // opaque path in the DB and must go through createSignedReadUrl() below to ever view it.
+    if (config.isPrivate) {
+      return { uploadUrl: data.signedUrl, publicUrl: path };
+    }
+
     const {
       data: { publicUrl },
     } = supabase.storage.from(config.bucket).getPublicUrl(path);
 
     return { uploadUrl: data.signedUrl, publicUrl };
+  }
+
+  // Mints a short-lived (5 min) signed read URL for a stored KYC document path, so an
+  // admin reviewing a verification submission can view the actual image without the
+  // document ever being publicly/permanently accessible. Only IDENTITY_PROOF/
+  // ADDRESS_PROOF/PAN_OR_AADHAAR are stored as paths (see isPrivate above); any other
+  // string passed in here is already a real public URL and has no business going through
+  // this method, so the caller (OrganizerController, admin-only) is what scopes this down
+  // to actual stored document paths.
+  async createSignedReadUrl(path: string): Promise<string> {
+    const supabaseUrl = this.configService.get<string>('SUPABASE_URL');
+    const supabaseKey = this.configService.get<string>('SUPABASE_SERVICE_ROLE_KEY');
+    if (!supabaseUrl || !supabaseKey) {
+      throw new ServiceUnavailableException(
+        'File uploads are not configured on this server (missing SUPABASE_URL / SUPABASE_SERVICE_ROLE_KEY).',
+      );
+    }
+    const supabase = createClient(supabaseUrl, supabaseKey);
+    const bucket = PURPOSE_CONFIG[UploadPurpose.IDENTITY_PROOF].bucket; // all three KYC purposes share one bucket
+    const { data, error } = await supabase.storage.from(bucket).createSignedUrl(path, 300);
+    if (error) {
+      throw new InternalServerErrorException(`Failed to create signed read URL: ${error.message}`);
+    }
+    return data.signedUrl;
   }
 }

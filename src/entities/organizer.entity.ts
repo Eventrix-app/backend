@@ -46,6 +46,34 @@ export class Organizer {
   @Column({ name: 'company_logo_url', type: 'varchar', nullable: true })
   companyLogoUrl!: string;
 
+  // --- KYC verification (see #7: an unverified user must not be able to organize events) ---
+
+  @Column({ name: 'full_name', type: 'varchar', nullable: true })
+  fullName!: string;
+
+  @Column({ name: 'identity_proof_url', type: 'varchar', nullable: true })
+  identityProofUrl!: string;
+
+  @Column({ name: 'address_proof_url', type: 'varchar', nullable: true })
+  addressProofUrl!: string;
+
+  // Either a PAN card or Aadhaar card image — one combined field since the app only
+  // requires one of the two as government ID, not both.
+  @Column({ name: 'pan_or_aadhaar_url', type: 'varchar', nullable: true })
+  panOrAadhaarUrl!: string;
+
+  @Column({ name: 'upi_id', type: 'varchar', nullable: true })
+  upiId!: string;
+
+  // Set when the organizer (re)submits their KYC documents for review, cleared on
+  // rejection so `submittedForReviewAt == null` unambiguously means "nothing pending" —
+  // distinct from verificationLevel, which only flips once an admin actually approves.
+  @Column({ name: 'submitted_for_review_at', type: 'timestamp', nullable: true })
+  submittedForReviewAt!: Date;
+
+  @Column({ name: 'rejection_reason', type: 'text', nullable: true })
+  rejectionReason!: string;
+
   /** @deprecated superseded by verificationLevel; kept for backward compat / rollback safety. */
   @Column({ default: false })
   verified!: boolean;

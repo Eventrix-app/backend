@@ -4,7 +4,7 @@ import { Repository, DataSource, ILike, In, Between, MoreThanOrEqual, LessThanOr
 import { JwtService } from '@nestjs/jwt';
 import { Event, EventApprovalStatus, EventStatus } from '../entities/event.entity';
 import { Enrollment } from '../entities/enrollment.entity';
-import { Organizer } from '../entities/organizer.entity';
+import { Organizer, VerificationLevel } from '../entities/organizer.entity';
 import { User } from '../entities/user.entity';
 import { EventCategory } from '../entities/category.entity';
 import { TicketType } from '../entities/ticket-type.entity';
@@ -130,27 +130,30 @@ export class EventsService {
       const user = await manager.findOne(User, { where: { id: userId } });
       if (!user) throw new NotFoundException('User not found');
 
-      let organizer = await manager.findOne(Organizer, { where: { userId } });
+      const organizer = await manager.findOne(Organizer, { where: { userId } });
+      const isAdmin = userRoles.includes('admin');
 
-      if (!organizer) {
-        organizer = manager.create(Organizer, {
-          userId,
-          companyName: user.fullName || user.email,
-        });
-        organizer = await manager.save(Organizer, organizer);
-        this.logger.log(`Auto-created organizer profile for user ${userId}`);
+      // Previously this auto-created an Organizer profile and silently granted the
+      // 'organizer' role to any user on their first event — no identity/KYC check at all.
+      // Per #7, a user must submit and pass admin-reviewed verification (identity proof,
+      // address proof, PAN/Aadhaar, UPI ID — see OrganizerController's verification
+      // endpoints) before they gain authority to organize events. Admins creating on behalf
+      // of an existing organizer (createEventDto.organizerId) are exempt from this gate.
+      if (!isAdmin && organizer?.verificationLevel !== VerificationLevel.DOCUMENT_VERIFIED) {
+        throw new ForbiddenException(
+          'You must complete organizer verification before you can create events. Submit your details for review from your profile.',
+        );
       }
 
-      if (!user.roles.includes('organizer')) {
-        user.roles = [...user.roles, 'organizer'];
-        await manager.save(User, user);
-        this.logger.log(`Added 'organizer' role to user ${userId}`);
-      }
-
-      if (userRoles.includes('admin') && createEventDto.organizerId) {
+      if (isAdmin && createEventDto.organizerId) {
         await this.validateOrganizer(createEventDto.organizerId);
-      } else {
+      } else if (organizer) {
         createEventDto.organizerId = organizer.id;
+      } else {
+        // Only reachable for an admin with no organizer profile of their own and no
+        // organizerId in the request — the non-admin path above already guarantees a
+        // verified organizer exists by this point.
+        throw new BadRequestException('organizerId is required to create an event as an admin.');
       }
 
       const { ticketTypes, ...eventFields } = createEventDto;
@@ -164,7 +167,7 @@ export class EventsService {
       // Auto-approval branch: organizers at document_verified level with a clean track
       // record (organizer.autoApproveEvents, set by admin) skip the admin queue even for
       // paid events. The event is still recorded as auto-approved for audit purposes.
-      const autoApprovedByOrganizer = !isFree && organizer.autoApproveEvents;
+      const autoApprovedByOrganizer = !isFree && !!organizer?.autoApproveEvents;
       const isAutoApproved = isFree || autoApprovedByOrganizer;
 
       const approvalStatus = isAutoApproved ? EventApprovalStatus.APPROVED : EventApprovalStatus.PENDING_APPROVAL;

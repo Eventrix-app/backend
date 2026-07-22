@@ -14,6 +14,7 @@ import {
 } from '@nestjs/common';
 import { OrganizerService } from './organizer.service';
 import { UpdateOrganizerDto } from './dto/update-organizer.dto';
+import { SubmitVerificationDto, RejectVerificationDto } from './dto/submit-verification.dto';
 import { ApiTags } from '@nestjs/swagger';
 import { JwtPayload } from '../../auth/jwt.util';
 import { Roles } from '../../common/decorators/roles.decorator';
@@ -39,6 +40,28 @@ export class OrganizerController {
   @Get('my-following')
   async findMyFollowing(@Request() req: Request & { user: JwtPayload }) {
     return await this.organizerService.getMyFollowing(req.user.id);
+  }
+
+  // --- KYC verification (#7) — static paths, must stay above the bare `:id` route below ---
+
+  @Roles()
+  @Get('verification/me')
+  async getMyVerificationStatus(@Request() req: Request & { user: JwtPayload }) {
+    return await this.organizerService.getMyVerificationStatus(req.user.id);
+  }
+
+  @Roles()
+  @Post('verification')
+  async submitVerification(
+    @Body() dto: SubmitVerificationDto,
+    @Request() req: Request & { user: JwtPayload },
+  ) {
+    return await this.organizerService.submitVerification(req.user.id, dto);
+  }
+
+  @Get('verification/pending')
+  async getPendingVerifications() {
+    return await this.organizerService.getPendingVerifications();
   }
 
   @Get(':id')
@@ -77,6 +100,26 @@ export class OrganizerController {
     @Request() req: Request & { user: JwtPayload },
   ) {
     await this.organizerService.unfollow(id, req.user.id);
+  }
+
+  @Get(':id/verification/documents')
+  async getVerificationDocuments(@Param('id', ParseUUIDPipe) id: string) {
+    return await this.organizerService.getVerificationDocuments(id);
+  }
+
+  @AuditAction('organizer.verification.approve', 'organizer')
+  @Post(':id/verification/approve')
+  async approveVerification(@Param('id', ParseUUIDPipe) id: string) {
+    return await this.organizerService.approveVerification(id);
+  }
+
+  @AuditAction('organizer.verification.reject', 'organizer')
+  @Post(':id/verification/reject')
+  async rejectVerification(
+    @Param('id', ParseUUIDPipe) id: string,
+    @Body() dto: RejectVerificationDto,
+  ) {
+    return await this.organizerService.rejectVerification(id, dto.reason);
   }
 
   // RolesGuard checks method-level metadata before falling back to the class-level
