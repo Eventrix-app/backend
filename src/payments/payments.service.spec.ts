@@ -24,6 +24,7 @@ describe('PaymentsService — paymentStatus enforcement', () => {
 
   const futureEvent = {
     id: 'event-1',
+    title: 'Future Concert',
     organizerId: 'org-1',
     eventDate: '2099-01-01',
     startTime: '10:00:00',
@@ -43,7 +44,7 @@ describe('PaymentsService — paymentStatus enforcement', () => {
     mockConfigService = { get: jest.fn((key: string, def: any) => def) };
     mockFeeCalculationService = { calculate: jest.fn() };
     mockWaitlistService = { promoteNext: jest.fn() };
-    mockNotificationService = { notifyRefundStatus: jest.fn() };
+    mockNotificationService = { notifyRefundStatus: jest.fn(), notifyBookingConfirmed: jest.fn() };
     mockCacheService = { del: jest.fn(), bumpVersion: jest.fn() };
 
     service = new PaymentsService(
@@ -80,7 +81,7 @@ describe('PaymentsService — paymentStatus enforcement', () => {
       expect(mockRefundsRepo.save).not.toHaveBeenCalled();
     });
 
-    it('allows a refund request once the enrollment is actually paid', async () => {
+    it('allows a refund request once the enrollment is actually paid, and emails a "request received" notice', async () => {
       mockEnrollmentsRepo.findOne.mockResolvedValue({
         id: 'enr-1',
         userId: 'user-1',
@@ -95,6 +96,12 @@ describe('PaymentsService — paymentStatus enforcement', () => {
 
       expect(result.status).toBe(RefundStatus.REQUESTED);
       expect(mockRefundsRepo.save).toHaveBeenCalled();
+      expect(mockNotificationService.notifyRefundStatus).toHaveBeenCalledWith(
+        'user-1',
+        'refund-1',
+        RefundStatus.REQUESTED,
+        'enr-1',
+      );
     });
   });
 
@@ -130,9 +137,13 @@ describe('PaymentsService — paymentStatus enforcement', () => {
       expect(enrollment.paymentStatus).toBe('refunded');
     });
 
-    it('still confirms a normal (non-terminal) enrollment on a success webhook', async () => {
+    it('still confirms a normal (non-terminal) enrollment on a success webhook and emails a booking confirmation', async () => {
       const enrollment = {
         id: 'enr-2',
+        userId: 'user-2',
+        eventId: 'event-1',
+        bookingReference: 'BK-2',
+        quantity: 2,
         status: 'confirmed',
         paymentStatus: 'pending',
         event: futureEvent,
@@ -163,6 +174,45 @@ describe('PaymentsService — paymentStatus enforcement', () => {
 
       expect(enrollment.status).toBe('confirmed');
       expect(enrollment.paymentStatus).toBe('paid');
+      expect(mockNotificationService.notifyBookingConfirmed).toHaveBeenCalledWith(
+        'user-2',
+        'event-1',
+        'enr-2',
+        'Future Concert',
+        'BK-2',
+        2,
+      );
+    });
+
+    it('does not email a booking confirmation on a failed payment webhook', async () => {
+      const enrollment = {
+        id: 'enr-3',
+        userId: 'user-3',
+        eventId: 'event-1',
+        bookingReference: 'BK-3',
+        quantity: 1,
+        status: 'confirmed',
+        paymentStatus: 'pending',
+        event: futureEvent,
+      };
+      const manager = {
+        findOne: jest.fn().mockResolvedValueOnce(null).mockResolvedValueOnce(enrollment),
+        create: jest.fn((entity: any, data: any) => data),
+        save: jest.fn((entity: any, data: any) => Promise.resolve({ id: 'payment-2', ...data })),
+      };
+      mockDataSource.transaction.mockImplementation((cb: any) => cb(manager));
+
+      await service.handleWebhook({
+        gateway: 'razorpay',
+        gatewayEventId: 'evt-2',
+        gatewayPaymentId: 'pay-2',
+        enrollmentId: 'enr-3',
+        amount: 99.99,
+        status: 'failed',
+      } as any);
+
+      expect(enrollment.paymentStatus).toBe('failed');
+      expect(mockNotificationService.notifyBookingConfirmed).not.toHaveBeenCalled();
     });
   });
 

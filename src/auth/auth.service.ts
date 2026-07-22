@@ -130,6 +130,13 @@ export class AuthService {
 
     const saved = await this.usersRepository.save(user);
     this.logger.log(`Registered new user: ${saved.email} (roles=${saved.roles})`);
+    await this.emailService.send(
+      saved.email,
+      'Welcome to Eventrix!',
+      `<p>Hi ${dto.firstName || 'there'},</p>` +
+        `<p>Welcome to Eventrix — your account is ready to go. Start exploring events near you, ` +
+        `or create your own event to share with the community.</p>`,
+    );
 
     const savedRoles = saved.roles?.length ? saved.roles : ['user'];
 
@@ -263,6 +270,7 @@ export class AuthService {
     await this.usersRepository.save(user);
     await this.otpRepository.delete({ email: match.email });
     this.logger.log(`Password reset successfully for user: ${match.email}`);
+    await this.sendPasswordResetEmail(match.email);
   }
 
   // Logged-in password change (vs. resetPassword's forgot-password/OTP flow) — requires
@@ -282,5 +290,32 @@ export class AuthService {
     user.passwordHash = await bcrypt.hash(newPassword, BCRYPT_ROUNDS);
     await this.usersRepository.save(user);
     this.logger.log(`Password changed for user: ${user.email}`);
+    await this.sendPasswordChangedEmail(user.email);
+  }
+
+  // Logged-in self-service change — the account owner proved they know the current
+  // password, so this is lower-suspicion than a reset, but still worth a notice.
+  private async sendPasswordChangedEmail(email: string): Promise<void> {
+    await this.emailService.send(
+      email,
+      'Your Eventrix password was changed',
+      `<p>Your password was just changed.</p>` +
+        `<p>If this was you, no action is needed. If you didn't make this change, please reset your ` +
+        `password immediately and contact support.</p>`,
+    );
+  }
+
+  // Forgot-password/OTP flow — doesn't require proving the current password, so this is
+  // the higher-suspicion path (anyone who intercepted the OTP could trigger it). Worded
+  // and flagged distinctly from sendPasswordChangedEmail so a recipient who didn't request
+  // a reset immediately recognizes this as the more serious of the two notices.
+  private async sendPasswordResetEmail(email: string): Promise<void> {
+    await this.emailService.send(
+      email,
+      'Your Eventrix password was reset',
+      `<p>Your password was just reset using the "Forgot password" flow.</p>` +
+        `<p>If this was you, no action is needed. If you didn't request this, your account may be ` +
+        `compromised — contact support immediately.</p>`,
+    );
   }
 }

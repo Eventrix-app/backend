@@ -12,7 +12,7 @@ import { Follow } from '../entities/follow.entity';
 import { EventMedia } from '../entities/event-media.entity';
 import { DataSource } from 'typeorm';
 import { JwtService } from '@nestjs/jwt';
-import { NotFoundException, BadRequestException, ConflictException } from '@nestjs/common';
+import { NotFoundException, BadRequestException, ConflictException, ForbiddenException } from '@nestjs/common';
 import { AuditLogService } from '../common/audit-log/audit-log.service';
 import { WaitlistService } from '../waitlist/waitlist.service';
 import { NotificationService } from '../notifications/notification.service';
@@ -120,6 +120,8 @@ describe('EventsService - Fixed Issues', () => {
       notifyEventChanged: jest.fn(),
       notifyWaitlistPromoted: jest.fn(),
       notifyRefundStatus: jest.fn(),
+      notifyBookingConfirmed: jest.fn(),
+      notifyEventCancelled: jest.fn(),
     };
 
     mockCacheService = {
@@ -402,6 +404,73 @@ describe('EventsService - Fixed Issues', () => {
 
       expect(mockEventRepo.softRemove).toHaveBeenCalledWith(mockEvent);
     });
+  });
+
+  describe('cancelEvent', () => {
+    const futureEventFields = {
+      eventDate: '2099-01-01',
+      startTime: '10:00:00',
+      eventEndDate: null,
+      endTime: null,
+    };
+
+    it('rejects a non-owner, non-admin organizer', async () => {
+      const mockEvent = { id: 'event-1', organizerId: 'org-1', status: EventStatus.UPCOMING, ...futureEventFields };
+      mockEventRepo.findOne.mockResolvedValue(mockEvent);
+      mockOrganizerRepo.findOne.mockResolvedValue({ id: 'org-2', userId: 'other-user' });
+
+      await expect(service.cancelEvent('event-1', 'other-user', [])).rejects.toThrow(ForbiddenException);
+      expect(mockEventRepo.save).not.toHaveBeenCalled();
+    });
+
+    it('rejects cancelling an already-cancelled event', async () => {
+      const mockEvent = { id: 'event-1', organizerId: 'org-1', status: EventStatus.CANCELLED, ...futureEventFields };
+      mockEventRepo.findOne.mockResolvedValue(mockEvent);
+
+      await expect(service.cancelEvent('event-1', 'admin-1', ['admin'])).rejects.toThrow(BadRequestException);
+      expect(mockEventRepo.save).not.toHaveBeenCalled();
+    });
+
+    it('rejects cancelling an event that has already ended', async () => {
+      const mockEvent = {
+        id: 'event-1',
+        organizerId: 'org-1',
+        status: EventStatus.UPCOMING,
+        eventDate: '2000-01-01',
+        startTime: '10:00:00',
+        eventEndDate: null,
+        endTime: null,
+      };
+      mockEventRepo.findOne.mockResolvedValue(mockEvent);
+
+      await expect(service.cancelEvent('event-1', 'admin-1', ['admin'])).rejects.toThrow(BadRequestException);
+      expect(mockEventRepo.save).not.toHaveBeenCalled();
+    });
+
+    it('cancels an upcoming event and notifies every active attendee, deduplicated by user', async () => {
+      const mockEvent = { id: 'event-1', title: 'Big Show', organizerId: 'org-1', status: EventStatus.UPCOMING, ...futureEventFields };
+      mockEventRepo.findOne.mockResolvedValue(mockEvent);
+      mockEventRepo.save.mockImplementation((e: any) => Promise.resolve(e));
+      mockEnrollmentRepo.find.mockResolvedValue([
+        { userId: 'user-1', status: 'confirmed' },
+        { userId: 'user-2', status: 'pending' },
+        { userId: 'user-1', status: 'confirmed' }, // duplicate ticket, same user
+      ]);
+
+      const result = await service.cancelEvent('event-1', 'admin-1', ['admin'], 'Venue unavailable');
+
+      expect(result.status).toBe(EventStatus.CANCELLED);
+      expect(mockEventRepo.save).toHaveBeenCalledWith(expect.objectContaining({ status: EventStatus.CANCELLED }));
+      // Fire-and-forget notification — flush pending microtasks before asserting.
+      await new Promise((resolve) => setImmediate(resolve));
+      expect(mockNotificationService.notifyEventCancelled).toHaveBeenCalledWith(
+        expect.arrayContaining(['user-1', 'user-2']),
+        'event-1',
+        'Big Show',
+        'Venue unavailable',
+      );
+      expect((mockNotificationService.notifyEventCancelled as jest.Mock).mock.calls[0][0]).toHaveLength(2);
+    });
 
     it('rejects creating a new ticket type on a rejected event', async () => {
       const mockEvent = { id: 'event-1', organizerId: 'org-1', approvalStatus: EventApprovalStatus.REJECTED };
@@ -554,9 +623,10 @@ describe('EventsService - Fixed Issues', () => {
   // fired yet), and a later webhook then resurrected the refunded booking. paymentStatus
   // must be set correctly at enroll time and enforced at check-in.
   describe('Issue 11: paymentStatus enforcement', () => {
-    it('marks a free ticket enrollment as paid immediately (no gateway/webhook will ever confirm it)', async () => {
+    it('marks a free ticket enrollment as paid immediately (no gateway/webhook will ever confirm it) and emails a booking confirmation', async () => {
       const mockEvent = {
         id: 'event-1',
+        title: 'Free Meetup',
         approvalStatus: EventApprovalStatus.APPROVED,
         status: EventStatus.UPCOMING,
         capacity: null,
@@ -572,6 +642,7 @@ describe('EventsService - Fixed Issues', () => {
           save: jest.fn().mockImplementation((entity: any, data: any) => {
             if (entity === Enrollment) {
               expect(data.paymentStatus).toBe('paid');
+              return Promise.resolve({ id: 'enr-1', quantity: 1, ...data });
             }
             return Promise.resolve(data);
           }),
@@ -580,6 +651,15 @@ describe('EventsService - Fixed Issues', () => {
       });
 
       await service.enroll('event-1', 'user-1', 'tt-1');
+
+      expect(mockNotificationService.notifyBookingConfirmed).toHaveBeenCalledWith(
+        'user-1',
+        'event-1',
+        'enr-1',
+        'Free Meetup',
+        expect.stringMatching(/^BK-/),
+        1,
+      );
     });
 
     it('leaves a paid ticket enrollment pending until the payment webhook confirms it', async () => {

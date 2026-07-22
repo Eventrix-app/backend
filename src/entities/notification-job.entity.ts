@@ -6,6 +6,8 @@ export enum NotificationType {
   REFUND_STATUS = 'refund_status',
   ANNOUNCEMENT = 'announcement',
   ORGANIZER_FOLLOWED = 'organizer_followed',
+  BOOKING_CONFIRMED = 'booking_confirmed',
+  EVENT_CANCELLED = 'event_cancelled',
 }
 
 export enum NotificationJobStatus {

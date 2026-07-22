@@ -108,6 +108,37 @@ export class NotificationService {
     await this.enqueue(organizerUserId, NotificationType.ORGANIZER_FOLLOWED, { followerUserId, followerName });
   }
 
+  // Fired once a booking is actually paid-and-confirmed — immediately for free events
+  // (EventsService.enroll(), paymentStatus is 'paid' right away), or from the payment
+  // webhook for paid events (PaymentsService.handleWebhook(), on gateway success). Never
+  // fired for a paid enrollment still awaiting payment — that would tell someone they're
+  // "confirmed" for a booking they haven't actually paid for yet.
+  // Fired for every active (confirmed/pending) attendee when an organizer/admin cancels an
+  // event outright — distinct from notifyEventChanged, which is for logistics edits
+  // (date/time/venue) to an event that's still happening.
+  async notifyEventCancelled(userIds: string[], eventId: string, eventTitle: string, reason?: string): Promise<void> {
+    await Promise.all(
+      userIds.map((userId) => this.enqueue(userId, NotificationType.EVENT_CANCELLED, { eventId, eventTitle, reason })),
+    );
+  }
+
+  async notifyBookingConfirmed(
+    userId: string,
+    eventId: string,
+    enrollmentId: string,
+    eventTitle: string,
+    bookingReference: string,
+    quantity: number,
+  ): Promise<void> {
+    await this.enqueue(userId, NotificationType.BOOKING_CONFIRMED, {
+      eventId,
+      enrollmentId,
+      eventTitle,
+      bookingReference,
+      quantity,
+    });
+  }
+
   // ---------------------------------------------------------------------
   // Read-side for NotificationsScreen — lists the same jobs enqueue() persists,
   // rendered with a human-readable title/body derived from type + payload.
@@ -151,6 +182,12 @@ export class NotificationService {
         return { title: "You're in!", body: "A spot opened up and you've been moved off the waitlist." };
       case NotificationType.REFUND_STATUS: {
         const status = String(payload['status'] ?? 'updated');
+        if (status === 'requested') {
+          return {
+            title: 'Refund request received',
+            body: "We've received your refund request and will review it shortly.",
+          };
+        }
         return { title: 'Refund update', body: `Your refund is now "${status}".` };
       }
       case NotificationType.ANNOUNCEMENT: {
@@ -160,6 +197,23 @@ export class NotificationService {
       case NotificationType.ORGANIZER_FOLLOWED: {
         const followerName = String(payload['followerName'] ?? 'Someone');
         return { title: 'New follower', body: `${followerName} started following you.` };
+      }
+      case NotificationType.EVENT_CANCELLED: {
+        const eventTitle = String(payload['eventTitle'] ?? 'An event you booked');
+        const reason = payload['reason'] ? ` Reason: ${String(payload['reason'])}.` : '';
+        return {
+          title: 'Event cancelled',
+          body: `${eventTitle} has been cancelled.${reason} If you paid for this booking, request a refund from My Bookings in the app.`,
+        };
+      }
+      case NotificationType.BOOKING_CONFIRMED: {
+        const eventTitle = String(payload['eventTitle'] ?? 'your event');
+        const bookingReference = String(payload['bookingReference'] ?? '');
+        const quantity = Number(payload['quantity'] ?? 1);
+        return {
+          title: 'Booking confirmed!',
+          body: `You're confirmed for ${eventTitle} (${quantity} ticket${quantity === 1 ? '' : 's'}). Booking reference: ${bookingReference}. View your ticket in the app.`,
+        };
       }
       default:
         return { title: 'Notification', body: '' };

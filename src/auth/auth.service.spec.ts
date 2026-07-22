@@ -15,6 +15,7 @@ import { EmailService } from '../email/email.service';
 describe('AuthService — hasCompletedOnboarding', () => {
   let service: AuthService;
   let mockUserRepo: jest.Mocked<any>;
+  let mockEmailService: jest.Mocked<any>;
 
   beforeEach(async () => {
     mockUserRepo = {
@@ -22,6 +23,7 @@ describe('AuthService — hasCompletedOnboarding', () => {
       create: jest.fn((data: any) => data),
       save: jest.fn((data: any) => Promise.resolve({ id: 'user-1', ...data })),
     };
+    mockEmailService = { send: jest.fn().mockResolvedValue(undefined), isConfigured: false };
 
     const module: TestingModule = await Test.createTestingModule({
       providers: [
@@ -29,7 +31,7 @@ describe('AuthService — hasCompletedOnboarding', () => {
         { provide: getRepositoryToken(User), useValue: mockUserRepo },
         { provide: getRepositoryToken(PasswordResetOtp), useValue: {} },
         { provide: JwtService, useValue: { sign: jest.fn(() => 'signed-token') } },
-        { provide: EmailService, useValue: { send: jest.fn(), isConfigured: false } },
+        { provide: EmailService, useValue: mockEmailService },
         { provide: ConfigService, useValue: { get: jest.fn() } },
       ],
     }).compile();
@@ -52,6 +54,23 @@ describe('AuthService — hasCompletedOnboarding', () => {
         expect.objectContaining({ hasCompletedOnboarding: true }),
       );
       expect(result.hasCompletedOnboarding).toBe(true);
+    });
+
+    it('sends a welcome email to the new account', async () => {
+      mockUserRepo.findOne.mockResolvedValue(null);
+
+      await service.register({
+        email: 'new@example.com',
+        password: 'password123',
+        firstName: 'New',
+        lastName: 'User',
+      } as any);
+
+      expect(mockEmailService.send).toHaveBeenCalledWith(
+        'new@example.com',
+        expect.stringContaining('Welcome'),
+        expect.any(String),
+      );
     });
   });
 
@@ -88,5 +107,67 @@ describe('AuthService — hasCompletedOnboarding', () => {
 
       expect(result.hasCompletedOnboarding).toBe(false);
     });
+  });
+});
+
+// Regression tests: both the forgot-password/OTP flow and the logged-in change-password
+// flow must email the account owner a security notice (distinctly worded per flow) —
+// previously silent on both paths.
+describe('AuthService — password change/reset security emails', () => {
+  let service: AuthService;
+  let mockUserRepo: jest.Mocked<any>;
+  let mockOtpRepo: jest.Mocked<any>;
+  let mockEmailService: jest.Mocked<any>;
+
+  beforeEach(async () => {
+    mockUserRepo = { findOne: jest.fn(), save: jest.fn((u: any) => Promise.resolve(u)) };
+    mockOtpRepo = { findOne: jest.fn(), delete: jest.fn() };
+    mockEmailService = { send: jest.fn().mockResolvedValue(undefined), isConfigured: true };
+
+    const module: TestingModule = await Test.createTestingModule({
+      providers: [
+        AuthService,
+        { provide: getRepositoryToken(User), useValue: mockUserRepo },
+        { provide: getRepositoryToken(PasswordResetOtp), useValue: mockOtpRepo },
+        { provide: JwtService, useValue: { sign: jest.fn(() => 'signed-token') } },
+        { provide: EmailService, useValue: mockEmailService },
+        { provide: ConfigService, useValue: { get: jest.fn() } },
+      ],
+    }).compile();
+
+    service = module.get<AuthService>(AuthService);
+  });
+
+  it('emails the user after a successful changePassword()', async () => {
+    mockUserRepo.findOne.mockResolvedValue({
+      id: 'user-1',
+      email: 'user@example.com',
+      passwordHash: await bcrypt.hash('oldpass123', 10),
+    });
+
+    await service.changePassword('user-1', 'oldpass123', 'newpass456');
+
+    expect(mockEmailService.send).toHaveBeenCalledWith(
+      'user@example.com',
+      expect.stringContaining('password was changed'),
+      expect.any(String),
+    );
+  });
+
+  it('emails the user after a successful resetPassword()', async () => {
+    mockOtpRepo.findOne.mockResolvedValue({
+      email: 'user@example.com',
+      otpHash: 'irrelevant',
+      expiresAt: new Date(Date.now() + 60000),
+    });
+    mockUserRepo.findOne.mockResolvedValue({ id: 'user-1', email: 'user@example.com' });
+
+    await service.resetPassword('123456', 'newpass456');
+
+    expect(mockEmailService.send).toHaveBeenCalledWith(
+      'user@example.com',
+      expect.stringContaining('password was reset'),
+      expect.any(String),
+    );
   });
 });

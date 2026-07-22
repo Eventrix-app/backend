@@ -220,6 +220,21 @@ export class EventsController {
     await this.eventsService.remove(id, req.user.id, req.user.roles);
   }
 
+  // Organizer/admin cancellation — a status flip (event stays visible as "cancelled"),
+  // unlike remove() above which hard-blocks on active bookings. This is the actual
+  // resolution path for "this event can no longer happen": attendees get notified and can
+  // self-serve a refund, rather than needing a delete to somehow be forced through.
+  @AuditAction('event.cancel', 'event')
+  @Patch(':id/cancel')
+  @HttpCode(HttpStatus.OK)
+  async cancel(
+    @Param('id', ParseUUIDPipe) id: string,
+    @Body('reason') reason: string | undefined,
+    @Request() req: Request & { user: JwtPayload },
+  ) {
+    return await this.eventsService.cancelEvent(id, req.user.id, req.user.roles, reason);
+  }
+
   // Nested ticket-type CRUD (organizer-only, own event). New tiers may be added at any
   // time; editing/removing a tier is blocked once it has sales.
   @Public()

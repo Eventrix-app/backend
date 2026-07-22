@@ -133,6 +133,7 @@ export class PaymentsService {
     });
     const saved = await this.refundsRepository.save(refund);
     this.logger.log(`Refund ${saved.id} requested for enrollment ${enrollment.id} by user ${userId}`);
+    await this.notificationService.notifyRefundStatus(userId, saved.id, RefundStatus.REQUESTED, enrollment.id);
     return saved;
   }
 
@@ -293,11 +294,11 @@ export class PaymentsService {
   // wrap ticket issuance + payment confirmation in one transaction.
   // ---------------------------------------------------------------------
   async handleWebhook(dto: PaymentWebhookDto): Promise<Payment> {
-    return this.dataSource.transaction(async (manager) => {
+    const result = await this.dataSource.transaction(async (manager) => {
       const existing = await manager.findOne(Payment, { where: { gatewayEventId: dto.gatewayEventId } });
       if (existing) {
         this.logger.log(`Duplicate webhook event ${dto.gatewayEventId} ignored (idempotent)`);
-        return existing;
+        return { payment: existing, confirmedBooking: null };
       }
 
       const enrollment = await manager.findOne(Enrollment, {
@@ -324,7 +325,8 @@ export class PaymentsService {
         // passed the existence check above. Treat the loser as an idempotent duplicate.
         if ((err as { code?: string })?.code === '23505') {
           this.logger.warn(`Race on webhook idempotency key ${dto.gatewayEventId}; returning existing payment`);
-          return manager.findOneOrFail(Payment, { where: { gatewayEventId: dto.gatewayEventId } });
+          const racedPayment = await manager.findOneOrFail(Payment, { where: { gatewayEventId: dto.gatewayEventId } });
+          return { payment: racedPayment, confirmedBooking: null };
         }
         throw err;
       }
@@ -332,6 +334,7 @@ export class PaymentsService {
       // A late or duplicate-gateway-retry webhook can arrive after the enrollment has
       // already been refunded/cancelled through a separate flow. Record the payment for
       // the audit trail either way, but never let it resurrect a terminal enrollment.
+      let confirmedBooking: { userId: string; eventId: string; enrollmentId: string; eventTitle: string; bookingReference: string; quantity: number } | null = null;
       if (enrollment.status === 'refunded' || enrollment.status === 'cancelled') {
         this.logger.warn(
           `Webhook ${dto.gatewayEventId} (${dto.status}) received for enrollment ${dto.enrollmentId} which is already "${enrollment.status}"; payment recorded but enrollment left untouched`,
@@ -359,14 +362,33 @@ export class PaymentsService {
         enrollment.status = 'confirmed';
         enrollment.paymentStatus = 'paid';
         await manager.save(Enrollment, enrollment);
+
+        confirmedBooking = {
+          userId: enrollment.userId,
+          eventId: enrollment.eventId,
+          enrollmentId: enrollment.id,
+          eventTitle: enrollment.event.title,
+          bookingReference: enrollment.bookingReference,
+          quantity: enrollment.quantity,
+        };
       } else {
         enrollment.paymentStatus = 'failed';
         await manager.save(Enrollment, enrollment);
       }
 
       this.logger.log(`Processed ${dto.gateway} webhook ${dto.gatewayEventId} for enrollment ${dto.enrollmentId}: ${dto.status}`);
-      return savedPayment;
+      return { payment: savedPayment, confirmedBooking };
     });
+
+    // Fired after the transaction commits — a payment succeeding is exactly the moment a
+    // paid booking becomes actually confirmed-and-paid (see EventsService.enroll(), which
+    // fires the same notification immediately for free bookings instead).
+    if (result.confirmedBooking) {
+      const b = result.confirmedBooking;
+      void this.notificationService.notifyBookingConfirmed(b.userId, b.eventId, b.enrollmentId, b.eventTitle, b.bookingReference, b.quantity);
+    }
+
+    return result.payment;
   }
 
   // ---------------------------------------------------------------------

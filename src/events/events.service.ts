@@ -587,6 +587,51 @@ export class EventsService {
     await invalidateEventCaches(this.cache, event.id);
   }
 
+  // Soft cancellation (status flip, not a delete) — unlike remove() above, this is allowed
+  // even with active bookings, since cancelling *is* the resolution path for an event that
+  // can no longer happen: attendees are notified and can self-serve a refund via
+  // PaymentsService.requestRefund(), rather than the event just vanishing on them.
+  async cancelEvent(id: string, userId: string, userRoles: string[], reason?: string): Promise<Event> {
+    const event = await this.findOne(id);
+
+    if (!userRoles.includes('admin')) {
+      const organizer = await this.organizersRepository.findOne({ where: { userId } });
+      if (!organizer || organizer.id !== event.organizerId) {
+        throw new ForbiddenException('You can only cancel your own events');
+      }
+    }
+
+    if (event.status === EventStatus.CANCELLED) {
+      throw new BadRequestException('This event is already cancelled');
+    }
+    if (getEventEndDateTime(event).getTime() < Date.now()) {
+      throw new BadRequestException('Cannot cancel an event that has already ended');
+    }
+
+    event.status = EventStatus.CANCELLED;
+    event.updatedBy = userId;
+    const saved = await this.eventsRepository.save(event);
+    await invalidateEventCaches(this.cache, saved.id);
+
+    this.logger.log(`Event ${saved.id} (${saved.title}) cancelled by user ${userId}${reason ? `: ${reason}` : ''}`);
+
+    // Fire-and-forget, same reasoning as AnnouncementsService.notifyAttendees — the
+    // cancellation itself is already committed by this point and must not fail because a
+    // notification hiccuped.
+    void this.notifyEventCancelled(saved.id, saved.title, reason);
+
+    return saved;
+  }
+
+  private async notifyEventCancelled(eventId: string, eventTitle: string, reason?: string): Promise<void> {
+    const activeEnrollments = await this.enrollmentRepository.find({
+      where: [{ eventId, status: 'confirmed' }, { eventId, status: 'pending' }],
+    });
+    const userIds = [...new Set(activeEnrollments.map((e) => e.userId))];
+    if (userIds.length === 0) return;
+    await this.notificationService.notifyEventCancelled(userIds, eventId, eventTitle, reason);
+  }
+
   async findMyEvents(userId: string): Promise<Event[]> {
     const organizer = await this.organizersRepository.findOne({ where: { userId } });
     if (!organizer) return [];
@@ -1015,7 +1060,7 @@ export class EventsService {
       }
 
       this.logger.log(`User ${userId} enrolled in event ${eventId}`);
-      return { soldOut: false as const, enrollment: saved };
+      return { soldOut: false as const, enrollment: saved, eventTitle: event.title };
     });
 
     if (result.soldOut) {
@@ -1027,6 +1072,21 @@ export class EventsService {
     // availableTickets (withComputedSeats) is derived from — invalidate so list/detail
     // reads don't keep serving the pre-booking count for the rest of the cache TTL.
     await invalidateEventCaches(this.cache, eventId);
+
+    // Only free bookings are actually paid-and-confirmed at this point (paymentStatus is
+    // set to 'paid' immediately for those, above) — a paid booking's confirmation email
+    // fires from PaymentsService.handleWebhook() instead, once payment actually succeeds.
+    if (result.enrollment.paymentStatus === 'paid') {
+      void this.notificationService.notifyBookingConfirmed(
+        userId,
+        eventId,
+        result.enrollment.id,
+        result.eventTitle,
+        result.enrollment.bookingReference,
+        result.enrollment.quantity,
+      );
+    }
+
     return result.enrollment;
   }
 
