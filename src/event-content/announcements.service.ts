@@ -26,6 +26,11 @@ export class AnnouncementsService {
     return this.announcementsRepository.find({
       where: { eventId },
       relations: ['postedBy'],
+      // This is a @Public() endpoint — the full User relation (passwordHash, email,
+      // phoneNumber, roles, pushToken, ...) must never be selected here, only what the
+      // announcement card actually shows. See SAFE_ORGANIZER_SELECT in events.service.ts
+      // for the same pattern/reasoning.
+      select: { postedBy: { id: true, fullName: true } },
       order: { createdAt: 'DESC' },
     });
   }
@@ -40,7 +45,11 @@ export class AnnouncementsService {
 
     const created = this.announcementsRepository.create({ eventId, postedByUserId: userId, ...dto });
     const saved = await this.announcementsRepository.save(created);
-    const withAuthor = await this.announcementsRepository.findOne({ where: { id: saved.id }, relations: ['postedBy'] });
+    const withAuthor = await this.announcementsRepository.findOne({
+      where: { id: saved.id },
+      relations: ['postedBy'],
+      select: { postedBy: { id: true, fullName: true } },
+    });
     const announcement = withAuthor ?? saved;
 
     // Live update for anyone with the event's Community tab open right now...

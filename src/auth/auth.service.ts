@@ -7,7 +7,7 @@ import {
 import { InjectRepository } from '@nestjs/typeorm';
 import { MoreThan, Repository } from 'typeorm';
 import * as bcrypt from 'bcryptjs';
-import { createHash, randomInt } from 'crypto';
+import { createHash, randomInt, timingSafeEqual } from 'crypto';
 import { JwtService } from '@nestjs/jwt';
 import { ConfigService } from '@nestjs/config';
 import { LoginDto } from './dto/login.dto';
@@ -17,10 +17,36 @@ import { JwtPayload, SESSION_TOKEN_TTL_SECONDS } from './jwt.util';
 import { User } from '../entities/user.entity';
 import { PasswordResetOtp } from '../entities/password-reset-otp.entity';
 import { EmailService } from '../email/email.service';
+import {
+  passwordChangedEmail,
+  passwordResetConfirmationEmail,
+  passwordResetOtpEmail,
+  welcomeEmail,
+} from '../email/templates';
 
 const BCRYPT_PREFIXES = ['$2a$', '$2b$', '$2y$'];
 const BCRYPT_ROUNDS = 10;
 const OTP_TTL_MINUTES = 10;
+
+// Precomputed bcrypt hash of a value no real password will ever equal — used to burn the
+// same ~ms of CPU time login() spends on a real bcrypt.compare() when the email doesn't
+// exist at all, so response time can't be used to distinguish "no such account" from
+// "wrong password" (a login-page email-enumeration side channel).
+const DUMMY_BCRYPT_HASH = '$2b$10$lrr0hTvMFpwzRSS1y5HAROh7xVeVje9kZFZQf58/Ea5GUWl8iIa5m';
+
+// crypto.timingSafeEqual throws on unequal-length buffers rather than just returning
+// false, so a naive early-return on length mismatch would itself reintroduce a (smaller,
+// length-only) timing signal. Comparing the shorter buffer against itself keeps the
+// unequal-length path costing roughly the same as an equal-length mismatch.
+function timingSafeStringEqual(a: string, b: string): boolean {
+  const bufA = Buffer.from(a, 'utf8');
+  const bufB = Buffer.from(b, 'utf8');
+  if (bufA.length !== bufB.length) {
+    timingSafeEqual(bufA, bufA);
+    return false;
+  }
+  return timingSafeEqual(bufA, bufB);
+}
 
 @Injectable()
 export class AuthService {
@@ -41,6 +67,11 @@ export class AuthService {
 
     const user = await this.usersRepository.findOne({ where: { email } });
     if (!user) {
+      // Still run a bcrypt.compare so this path takes roughly the same time as a real
+      // wrong-password rejection below — otherwise "no such account" returns near-instantly
+      // while a real account's wrong password waits on bcrypt, letting an attacker enumerate
+      // registered emails purely from response latency despite the identical error text.
+      await bcrypt.compare(password, DUMMY_BCRYPT_HASH);
       this.logger.warn(`Login failed: user not found for email ${email}`);
       throw new UnauthorizedException('Invalid email or password');
     }
@@ -57,8 +88,13 @@ export class AuthService {
 
     let passwordMatches = false;
     if (isLegacyPlaintext) {
-      // Legacy rows from the previous (unhashed) AuthService: compare plaintext and re-hash on success
-      passwordMatches = stored === password;
+      // Legacy rows from the previous (unhashed) AuthService: compare plaintext and re-hash on success.
+      // `===` on strings short-circuits at the first differing character, so its timing
+      // leaks how many leading characters of a guess were correct — bcrypt.compare() below
+      // doesn't have this problem, but these old plaintext rows predate it. Vanishingly few
+      // (if any) such rows should still exist, but the comparison itself costs nothing to
+      // harden properly.
+      passwordMatches = timingSafeStringEqual(stored, password);
       if (passwordMatches) {
         try {
           user.passwordHash = await bcrypt.hash(password, BCRYPT_ROUNDS);
@@ -122,21 +158,16 @@ export class AuthService {
       bio: JSON.stringify({ username }),
       isEmailVerified: false,
       isPhoneVerified: false,
-      // Reaching /auth/register in the app's current flow already means the user went
-      // through the full pre-auth onboarding chain (carousel + interests + location +
-      // notification prefs) — see user.entity.ts.
-      hasCompletedOnboarding: true,
+      // Registration now happens before the onboarding chain (carousel + interests +
+      // location + notification prefs), not after — so a fresh account has not completed
+      // it yet. Defaults to false via the entity/column default; PATCH
+      // users/me/complete-onboarding flips it once the chain actually finishes.
     });
 
     const saved = await this.usersRepository.save(user);
     this.logger.log(`Registered new user: ${saved.email} (roles=${saved.roles})`);
-    await this.emailService.send(
-      saved.email,
-      'Welcome to Eventrix!',
-      `<p>Hi ${dto.firstName || 'there'},</p>` +
-        `<p>Welcome to Eventrix — your account is ready to go. Start exploring events near you, ` +
-        `or create your own event to share with the community.</p>`,
-    );
+    const welcome = welcomeEmail(dto.firstName);
+    await this.emailService.send(saved.email, welcome.subject, welcome.html);
 
     const savedRoles = saved.roles?.length ? saved.roles : ['user'];
 
@@ -220,13 +251,8 @@ export class AuthService {
       }),
     );
 
-    await this.emailService.send(
-      email,
-      'Your Eventrix password reset code',
-      `<p>Your password reset code is:</p>` +
-        `<p style="font-size:28px;font-weight:700;letter-spacing:4px;">${otp}</p>` +
-        `<p>This code expires in ${OTP_TTL_MINUTES} minutes. If you didn't request this, you can ignore this email.</p>`,
-    );
+    const otpEmail = passwordResetOtpEmail(otp, OTP_TTL_MINUTES);
+    await this.emailService.send(email, otpEmail.subject, otpEmail.html);
 
     // Local-dev convenience only, and only when no real send was attempted — once email is
     // configured, the code must never also land in a log, or "send it privately" is moot.
@@ -246,11 +272,14 @@ export class AuthService {
 
     // Dev-only testing fallback (matches whichever OTP was most recently issued, for
     // whichever email that was) — exists so a local tester without email configured can
-    // drive the reset flow without tailing server logs. Gated out of production: unlike
-    // the rest of this flow, this specific branch previously had no environment check at
-    // all, making it a live account-takeover backdoor rather than a dev convenience.
-    const isProduction = this.configService.get<string>('NODE_ENV') === 'production';
-    if (!match && token === '123456' && !isProduction) {
+    // drive the reset flow without tailing server logs. Fails CLOSED: requires an explicit
+    // opt-in env var, rather than inferring "not production" from NODE_ENV — NODE_ENV isn't
+    // required/validated anywhere in this app (env.validation.ts), so gating on `!==
+    // 'production'` meant this account-takeover-shaped bypass would be silently *live* on
+    // any deployment (VM, Docker, etc.) that simply never set NODE_ENV, not just genuine
+    // local dev. An unset/misconfigured env now leaves this off by default instead of on.
+    const allowDevOtpBypass = this.configService.get<string>('ALLOW_DEV_OTP_BYPASS') === 'true';
+    if (!match && token === '123456' && allowDevOtpBypass) {
       match = await this.otpRepository.findOne({
         where: { expiresAt: MoreThan(now) },
         order: { createdAt: 'DESC' },
@@ -267,6 +296,7 @@ export class AuthService {
     }
 
     user.passwordHash = await bcrypt.hash(password, BCRYPT_ROUNDS);
+    user.passwordChangedAt = new Date();
     await this.usersRepository.save(user);
     await this.otpRepository.delete({ email: match.email });
     this.logger.log(`Password reset successfully for user: ${match.email}`);
@@ -288,6 +318,7 @@ export class AuthService {
     }
 
     user.passwordHash = await bcrypt.hash(newPassword, BCRYPT_ROUNDS);
+    user.passwordChangedAt = new Date();
     await this.usersRepository.save(user);
     this.logger.log(`Password changed for user: ${user.email}`);
     await this.sendPasswordChangedEmail(user.email);
@@ -296,13 +327,8 @@ export class AuthService {
   // Logged-in self-service change — the account owner proved they know the current
   // password, so this is lower-suspicion than a reset, but still worth a notice.
   private async sendPasswordChangedEmail(email: string): Promise<void> {
-    await this.emailService.send(
-      email,
-      'Your Eventrix password was changed',
-      `<p>Your password was just changed.</p>` +
-        `<p>If this was you, no action is needed. If you didn't make this change, please reset your ` +
-        `password immediately and contact support.</p>`,
-    );
+    const changed = passwordChangedEmail();
+    await this.emailService.send(email, changed.subject, changed.html);
   }
 
   // Forgot-password/OTP flow — doesn't require proving the current password, so this is
@@ -310,12 +336,7 @@ export class AuthService {
   // and flagged distinctly from sendPasswordChangedEmail so a recipient who didn't request
   // a reset immediately recognizes this as the more serious of the two notices.
   private async sendPasswordResetEmail(email: string): Promise<void> {
-    await this.emailService.send(
-      email,
-      'Your Eventrix password was reset',
-      `<p>Your password was just reset using the "Forgot password" flow.</p>` +
-        `<p>If this was you, no action is needed. If you didn't request this, your account may be ` +
-        `compromised — contact support immediately.</p>`,
-    );
+    const resetConfirmation = passwordResetConfirmationEmail();
+    await this.emailService.send(email, resetConfirmation.subject, resetConfirmation.html);
   }
 }

@@ -5,6 +5,18 @@ import { NotificationJob, NotificationJobStatus, NotificationType } from '../ent
 import { User } from '../entities/user.entity';
 import { EmailService } from '../email/email.service';
 import { PushService } from '../push/push.service';
+import {
+  announcementEmail,
+  bookingConfirmedEmail,
+  eventCancelledEmail,
+  eventChangedEmail,
+  organizerFollowedEmail,
+  organizerVerificationApprovedEmail,
+  organizerVerificationRejectedEmail,
+  refundStatusEmail,
+  RenderedEmail,
+  waitlistPromotedEmail,
+} from '../email/templates';
 
 export interface NotificationRecord {
   id: string;
@@ -57,8 +69,8 @@ export class NotificationService {
   private async sendEmailForJob(user: User | null, type: NotificationType, payload: Record<string, unknown>): Promise<void> {
     try {
       if (!user?.email || user.emailEnabled === false) return;
-      const { title, body } = this.describe(type, payload);
-      await this.emailService.send(user.email, title, `<p>${body}</p>`);
+      const { subject, html } = this.describeEmail(type, payload);
+      await this.emailService.send(user.email, subject, html);
     } catch (err) {
       this.logger.warn(`Failed to email notification [${type}] to user ${user?.id}: ${err instanceof Error ? err.message : String(err)}`);
     }
@@ -237,6 +249,42 @@ export class NotificationService {
       }
       default:
         return { title: 'Notification', body: '' };
+    }
+  }
+
+  // Mirrors describe() one purpose at a time, but through templates.ts's branded HTML
+  // (header/footer chrome) rather than the in-app list's plain title/body pair.
+  private describeEmail(type: NotificationType, payload: Record<string, unknown>): RenderedEmail {
+    switch (type) {
+      case NotificationType.EVENT_CHANGED:
+        return eventChangedEmail();
+      case NotificationType.WAITLIST_PROMOTED:
+        return waitlistPromotedEmail();
+      case NotificationType.REFUND_STATUS:
+        return refundStatusEmail(String(payload['status'] ?? 'updated'));
+      case NotificationType.ANNOUNCEMENT:
+        return announcementEmail(String(payload['title'] ?? 'New announcement'));
+      case NotificationType.ORGANIZER_FOLLOWED:
+        return organizerFollowedEmail(String(payload['followerName'] ?? 'Someone'));
+      case NotificationType.EVENT_CANCELLED:
+        return eventCancelledEmail(
+          String(payload['eventTitle'] ?? 'An event you booked'),
+          payload['reason'] ? String(payload['reason']) : undefined,
+        );
+      case NotificationType.ORGANIZER_VERIFICATION_APPROVED:
+        return organizerVerificationApprovedEmail();
+      case NotificationType.ORGANIZER_VERIFICATION_REJECTED:
+        return organizerVerificationRejectedEmail(String(payload['reason'] ?? ''));
+      case NotificationType.BOOKING_CONFIRMED:
+        return bookingConfirmedEmail(
+          String(payload['eventTitle'] ?? 'your event'),
+          String(payload['bookingReference'] ?? ''),
+          Number(payload['quantity'] ?? 1),
+        );
+      default: {
+        const { title, body } = this.describe(type, payload);
+        return { subject: title, html: `<p>${body}</p>` };
+      }
     }
   }
 }

@@ -1,6 +1,6 @@
 import { Injectable, NotFoundException } from '@nestjs/common';
 import { InjectRepository } from '@nestjs/typeorm';
-import { Repository } from 'typeorm';
+import { Not, Repository } from 'typeorm';
 import { User } from '../entities/user.entity';
 import { EventCategory } from '../entities/category.entity';
 import { Follow } from '../entities/follow.entity';
@@ -158,6 +158,17 @@ export class UsersService {
   // site) — the latest device simply overwrites whatever token was stored before, since
   // this app only supports one active device per account for push purposes.
   async updatePushToken(userId: string, pushToken: string): Promise<void> {
+    // A push token uniquely identifies one physical device/app install — it must never
+    // stay attached to more than one account at once. Without this, a previous user of
+    // this device whose session merely expired or was force-closed (rather than an
+    // explicit logout, which does call clearPushToken) keeps their own pushToken column
+    // pointing at this device; when a different person then logs in here, both accounts'
+    // rows reference the same token and the earlier user keeps receiving push
+    // notifications meant for them on a device someone else is now using. Evicting it from
+    // whoever else currently holds it makes registering it here exclusive, regardless of
+    // how the previous session ended.
+    await this.usersRepository.update({ pushToken, id: Not(userId) }, { pushToken: null });
+
     const result = await this.usersRepository.update(userId, { pushToken });
 
     if (result.affected === 0) {
@@ -171,6 +182,18 @@ export class UsersService {
   // delivering notifications to a device the user is no longer signed into.
   async clearPushToken(userId: string): Promise<void> {
     const result = await this.usersRepository.update(userId, { pushToken: null });
+
+    if (result.affected === 0) {
+      throw new NotFoundException(`User ${userId} not found`);
+    }
+    await this.cache.del(userMeCacheKey(userId));
+  }
+
+  // Called from the last screen of the post-login onboarding chain (NotificationPreferences)
+  // once interests/location/notification-prefs have all synced — the one-way flag that lets
+  // future logins skip straight to Main instead of replaying the chain.
+  async completeOnboarding(userId: string): Promise<void> {
+    const result = await this.usersRepository.update(userId, { hasCompletedOnboarding: true });
 
     if (result.affected === 0) {
       throw new NotFoundException(`User ${userId} not found`);

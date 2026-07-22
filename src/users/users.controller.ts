@@ -55,6 +55,12 @@ export class UsersController {
     await this.usersService.updateNotificationPrefs(req.user.id, dto);
   }
 
+  @Patch('me/complete-onboarding')
+  @HttpCode(HttpStatus.NO_CONTENT)
+  async completeMyOnboarding(@Request() req: Request & { user: JwtPayload }) {
+    await this.usersService.completeOnboarding(req.user.id);
+  }
+
   @Patch('me/push-token')
   @HttpCode(HttpStatus.NO_CONTENT)
   async updateMyPushToken(

@@ -1,6 +1,6 @@
 import { BadRequestException, Injectable, NotFoundException, Logger } from '@nestjs/common';
 import { InjectRepository } from '@nestjs/typeorm';
-import { Repository } from 'typeorm';
+import { DataSource, Repository } from 'typeorm';
 import * as bcrypt from 'bcryptjs';
 import { UpdateOrganizerDto } from './dto/update-organizer.dto';
 import { User } from '../../entities/user.entity';
@@ -86,6 +86,7 @@ export class OrganizerService {
     private readonly eventsRepository: Repository<Event>,
     @InjectRepository(Follow)
     private readonly followsRepository: Repository<Follow>,
+    private readonly dataSource: DataSource,
     private readonly cache: CacheService,
     private readonly notificationService: NotificationService,
     private readonly uploadsService: UploadsService,
@@ -155,6 +156,7 @@ export class OrganizerService {
     if (dto.phone !== undefined) user.phoneNumber = dto.phone;
     if (dto.password) {
       user.passwordHash = await bcrypt.hash(dto.password, BCRYPT_ROUNDS);
+      user.passwordChangedAt = new Date();
     }
 
     if (dto.companyLogoUrl !== undefined) organizer.companyLogoUrl = dto.companyLogoUrl;
@@ -352,30 +354,84 @@ export class OrganizerService {
     return { identityProofUrl, addressProofUrl, panOrAadhaarUrl };
   }
 
-  async approveVerification(organizerId: string): Promise<OrganizerRecord> {
-    const organizer = await this.loadActiveOrganizer(organizerId);
-    organizer.verificationLevel = VerificationLevel.DOCUMENT_VERIFIED;
-    organizer.verified = true;
-    organizer.verifiedAt = new Date();
-    organizer.rejectionReason = null as unknown as string;
-    await this.organizersRepository.save(organizer);
-
-    if (!organizer.user.roles.includes('organizer')) {
-      organizer.user.roles = [...organizer.user.roles, 'organizer'];
-      await this.usersRepository.save(organizer.user);
+  // Neither loadActiveOrganizer nor either caller previously checked that a submission
+  // was actually pending review — an admin could approve/reject an organizer who never
+  // submitted documents (submittedForReviewAt never set), or act a second time on one
+  // already approved/rejected (re-granting nothing new but re-firing a duplicate
+  // approval/rejection notification each time).
+  private assertPendingReview(organizer: Organizer, action: 'approve' | 'reject'): void {
+    const isPending =
+      organizer.submittedForReviewAt != null &&
+      organizer.verificationLevel !== VerificationLevel.DOCUMENT_VERIFIED &&
+      !organizer.rejectionReason;
+    if (!isPending) {
+      throw new BadRequestException(
+        `Cannot ${action} verification for organizer ${organizer.id}: no submission is currently pending review.`,
+      );
     }
-    await this.cache.del(userMeCacheKey(organizer.userId));
+  }
 
+  // Both approve and reject take a pessimistic_write lock on the same Organizer row and
+  // re-run assertPendingReview() *after* acquiring it — without this, two admins acting on
+  // the same submission concurrently (one approve, one reject) could both pass the pending
+  // check before either commits, and whichever save() landed last would silently win,
+  // potentially leaving a rejected organizer with the 'organizer' role still granted (or a
+  // duplicate approval notification). The lock serializes the two transactions, so the
+  // second one to run sees the first one's already-applied state and correctly gets
+  // rejected by assertPendingReview instead of racing it.
+  async approveVerification(organizerId: string): Promise<OrganizerRecord> {
+    const organizer = await this.dataSource.transaction(async (manager) => {
+      const organizer = await manager.findOne(Organizer, {
+        where: { id: organizerId },
+        relations: ['user'],
+        lock: { mode: 'pessimistic_write' },
+      });
+      if (!organizer || !organizer.user || organizer.user.deletedAt) {
+        throw new NotFoundException(`Organizer with id ${organizerId} not found`);
+      }
+      this.assertPendingReview(organizer, 'approve');
+
+      organizer.verificationLevel = VerificationLevel.DOCUMENT_VERIFIED;
+      organizer.verified = true;
+      organizer.verifiedAt = new Date();
+      organizer.rejectionReason = null as unknown as string;
+      await manager.save(organizer);
+
+      if (!organizer.user.roles.includes('organizer')) {
+        organizer.user.roles = [...organizer.user.roles, 'organizer'];
+        await manager.save(organizer.user);
+      }
+      return organizer;
+    });
+
+    await this.cache.del(userMeCacheKey(organizer.userId));
     this.logger.log(`Organizer ${organizerId} verification approved — 'organizer' role granted`);
     void this.notificationService.notifyOrganizerVerificationApproved(organizer.userId);
     return this.mapToRecord(organizer.user, organizer);
   }
 
   async rejectVerification(organizerId: string, reason: string): Promise<OrganizerRecord> {
-    const organizer = await this.loadActiveOrganizer(organizerId);
-    organizer.rejectionReason = reason;
-    organizer.submittedForReviewAt = null as unknown as Date;
-    await this.organizersRepository.save(organizer);
+    const organizer = await this.dataSource.transaction(async (manager) => {
+      const organizer = await manager.findOne(Organizer, {
+        where: { id: organizerId },
+        relations: ['user'],
+        lock: { mode: 'pessimistic_write' },
+      });
+      if (!organizer || !organizer.user || organizer.user.deletedAt) {
+        throw new NotFoundException(`Organizer with id ${organizerId} not found`);
+      }
+      this.assertPendingReview(organizer, 'reject');
+
+      organizer.rejectionReason = reason;
+      organizer.submittedForReviewAt = null as unknown as Date;
+      // Belt-and-suspenders alongside the row lock above: a rejected organizer must never
+      // be left at DOCUMENT_VERIFIED/verified, so getMyVerificationStatus() can't report
+      // "approved" for a submission an admin just rejected.
+      organizer.verificationLevel = VerificationLevel.UNVERIFIED;
+      organizer.verified = false;
+      await manager.save(organizer);
+      return organizer;
+    });
 
     this.logger.log(`Organizer ${organizerId} verification rejected: ${reason}`);
     void this.notificationService.notifyOrganizerVerificationRejected(organizer.userId, reason);

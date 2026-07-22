@@ -1,8 +1,8 @@
-import { Injectable, NotFoundException } from '@nestjs/common';
+import { Injectable } from '@nestjs/common';
 import { InjectRepository } from '@nestjs/typeorm';
 import { Repository } from 'typeorm';
 import { ChatMessage } from '../entities/chat-message.entity';
-import { Event } from '../entities/event.entity';
+import { EventsService } from '../events/events.service';
 
 export interface ChatMessageRecord {
   id: string;
@@ -20,8 +20,7 @@ export class ChatService {
   constructor(
     @InjectRepository(ChatMessage)
     private readonly chatMessagesRepository: Repository<ChatMessage>,
-    @InjectRepository(Event)
-    private readonly eventsRepository: Repository<Event>,
+    private readonly eventsService: EventsService,
   ) {}
 
   private mapToRecord(message: ChatMessage): ChatMessageRecord {
@@ -37,16 +36,25 @@ export class ChatService {
     };
   }
 
-  async assertEventExists(eventId: string): Promise<void> {
-    const exists = await this.eventsRepository.exist({ where: { id: eventId, deletedAt: null as any } });
-    if (!exists) throw new NotFoundException(`Event with id ${eventId} not found`);
+  // Delegates to the same "hidden pending/rejected event" rule EventsService already
+  // enforces on every other read path (GET /:id, ticket types, reviews) — a non-owner,
+  // non-admin viewer gets the identical 404 a not-yet-approved event gives everywhere
+  // else, instead of chat being the one place that only checked the event existed at all.
+  async assertEventVisible(eventId: string, userId?: string, userRoles: string[] = []): Promise<void> {
+    await this.eventsService.findOneForViewer(eventId, userId, userRoles);
   }
 
   // Oldest-first for chat UI display; page 1 is the most recent DEFAULT_HISTORY_LIMIT
   // messages, matching the socket's "join room, backfill recent history" flow rather than
   // typical newest-first list pagination.
-  async getHistory(eventId: string, page: number = 1, limit: number = ChatService.DEFAULT_HISTORY_LIMIT): Promise<ChatMessageRecord[]> {
-    await this.assertEventExists(eventId);
+  async getHistory(
+    eventId: string,
+    userId: string | undefined,
+    userRoles: string[],
+    page: number = 1,
+    limit: number = ChatService.DEFAULT_HISTORY_LIMIT,
+  ): Promise<ChatMessageRecord[]> {
+    await this.assertEventVisible(eventId, userId, userRoles);
     const skip = (page - 1) * limit;
     const messages = await this.chatMessagesRepository.find({
       where: { eventId },
@@ -58,8 +66,8 @@ export class ChatService {
     return messages.reverse().map((m) => this.mapToRecord(m));
   }
 
-  async createMessage(eventId: string, userId: string, message: string): Promise<ChatMessageRecord> {
-    await this.assertEventExists(eventId);
+  async createMessage(eventId: string, userId: string, userRoles: string[], message: string): Promise<ChatMessageRecord> {
+    await this.assertEventVisible(eventId, userId, userRoles);
     const created = this.chatMessagesRepository.create({ eventId, userId, message: message.trim() });
     const saved = await this.chatMessagesRepository.save(created);
     const withUser = await this.chatMessagesRepository.findOne({ where: { id: saved.id }, relations: ['user'] });

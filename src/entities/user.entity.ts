@@ -31,6 +31,13 @@ export class User {
   @Column({ name: 'password_hash', type: 'varchar', nullable: true })
   passwordHash!: string;
 
+  // Set on every successful password change/reset — JwtAuthGuard compares this against the
+  // token's `iat` claim so a still-valid access token minted before the most recent
+  // password change stops working immediately, instead of remaining usable for its full
+  // ~2-day TTL after the account owner (or an attacker) changes the password.
+  @Column({ name: 'password_changed_at', type: 'timestamp', nullable: true })
+  passwordChangedAt?: Date | null;
+
   @Column({ name: 'profile_picture_url', type: 'varchar', nullable: true })
   profilePictureUrl!: string;
 

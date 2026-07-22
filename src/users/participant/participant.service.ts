@@ -203,8 +203,10 @@ export class ParticipantService {
     if (dto.dateOfBirth !== undefined) user.dateOfBirth = dto.dateOfBirth;
     if (dto.profileImageUrl !== undefined)
       user.profilePictureUrl = dto.profileImageUrl;
-    if (dto.password)
+    if (dto.password) {
       user.passwordHash = await bcrypt.hash(dto.password, BCRYPT_ROUNDS);
+      user.passwordChangedAt = new Date();
+    }
 
     // Merge meta stored in bio — only fields explicitly provided in DTO
     const existingMeta = this.parseMeta(user.bio);

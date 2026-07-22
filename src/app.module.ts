@@ -85,9 +85,16 @@ import { GeocodeModule } from './geocode/geocode.module';
   providers: [
     AppService,
     HttpExceptionFilter,
+    // Throttler runs FIRST, before auth — Nest evaluates global guards in registration
+    // order and stops at the first one that rejects, so if JwtAuthGuard ran first (as it
+    // used to), any request with a missing/expired/garbage bearer token would 401 out of
+    // that guard before ever reaching the throttler, exempting unauthenticated-token abuse
+    // (e.g. hammering a protected endpoint with junk tokens) from rate limiting entirely.
+    // Safe to run first: HttpOnlyThrottlerGuard's default tracker keys off req.ip, not
+    // req.user, so it has no dependency on JwtAuthGuard having run yet.
+    { provide: APP_GUARD, useClass: HttpOnlyThrottlerGuard },
     { provide: APP_GUARD, useClass: JwtAuthGuard },
     { provide: APP_GUARD, useClass: RolesGuard },
-    { provide: APP_GUARD, useClass: HttpOnlyThrottlerGuard },
     { provide: APP_INTERCEPTOR, useClass: LoggingInterceptor },
     { provide: APP_INTERCEPTOR, useClass: AuditLogInterceptor },
   ],

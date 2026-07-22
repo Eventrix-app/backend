@@ -3,6 +3,10 @@ export interface JwtPayload {
   email: string;
   roles: string[];
   full_name: string;
+  // Standard JWT claim, added automatically by jwtService.sign()/verifyAsync() (seconds
+  // since epoch) — never set explicitly when signing, only read back after verification
+  // (see JwtAuthGuard's passwordChangedAt check).
+  iat?: number;
 }
 
 // The user's session lasts as long as they keep using the app: POST /auth/refresh

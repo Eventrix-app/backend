@@ -18,6 +18,11 @@ export class ReviewsService {
     return this.reviewsRepository.find({
       where: { eventId },
       relations: ['user'],
+      // This is a @Public() endpoint — the full User relation (passwordHash, email,
+      // phoneNumber, roles, pushToken, ...) must never be selected here, only what the
+      // reviewer card actually shows. See SAFE_ORGANIZER_SELECT in events.service.ts for
+      // the same pattern/reasoning.
+      select: { user: { id: true, fullName: true } },
       order: { createdAt: 'DESC' },
     });
   }
@@ -40,6 +45,12 @@ export class ReviewsService {
 
     const created = this.reviewsRepository.create({ eventId, userId, ...dto });
     const saved = await this.reviewsRepository.save(created);
-    return (await this.reviewsRepository.findOne({ where: { id: saved.id }, relations: ['user'] })) ?? saved;
+    return (
+      (await this.reviewsRepository.findOne({
+        where: { id: saved.id },
+        relations: ['user'],
+        select: { user: { id: true, fullName: true } },
+      })) ?? saved
+    );
   }
 }

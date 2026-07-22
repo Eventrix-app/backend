@@ -10,8 +10,18 @@ export const validateEnv = (config: Record<string, unknown>) => {
     DATABASE_USER: Joi.string().optional(),
     DATABASE_PASSWORD: Joi.string().optional(),
     DATABASE_NAME: Joi.string().optional(),
-    JWT_SECRET: Joi.string().optional(),
+    // Required, not optional-with-a-fallback: configuration.ts used to default this to the
+    // literal string 'change-this-secret' when unset, which is a guessable-secret landmine
+    // (JwtAuthGuard itself already fails closed on a missing secret — the app should fail
+    // the same way at boot, not silently hand out tokens signable/forgeable by anyone who
+    // knows the source).
+    JWT_SECRET: Joi.string().min(32).required(),
     JWT_EXPIRES_IN: Joi.string().optional(),
+    // Opt-in only — enables the "123456" forgot-password OTP bypass in AuthService for
+    // local testing without email configured. Must be explicitly set to the string
+    // 'true'; anything else (including unset) keeps the bypass off. Never set this in a
+    // real deployment.
+    ALLOW_DEV_OTP_BYPASS: Joi.string().optional(),
     FRONTEND_URL: Joi.string().optional(),
     GATEWAY_FEE_PERCENT: Joi.number().optional(),
     GATEWAY_FEE_FLAT: Joi.number().optional(),

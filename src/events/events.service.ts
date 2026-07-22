@@ -489,9 +489,37 @@ export class EventsService {
       const organizer = await this.organizersRepository.findOne({
         where: { userId },
       });
-      
+
       if (!organizer || organizer.id !== event.organizerId) {
         throw new ForbiddenException('You can only update your own events');
+      }
+
+      // PATCH /events/:id has no @Roles('admin') guard — organizers legitimately use it
+      // for everything else about their event, so the admin-moderation fields have to be
+      // denylisted here instead. Without this, Object.assign(event, updateEventDto) below
+      // would apply a client-supplied approvalStatus/approvedBy/rejectedBy/organizerId/
+      // status verbatim, letting an organizer self-approve their own event, forge an
+      // approvedBy/rejectedBy id, reassign the event to a different organizer, or silently
+      // un-cancel an event outside the dedicated cancel endpoint.
+      if (updateEventDto.organizerId !== undefined && updateEventDto.organizerId !== event.organizerId) {
+        throw new ForbiddenException('Only an admin can reassign an event to a different organizer');
+      }
+      if (updateEventDto.status !== undefined) {
+        throw new ForbiddenException('Only an admin can change event status directly');
+      }
+      if (
+        updateEventDto.approvalStatus !== undefined &&
+        updateEventDto.approvalStatus !== EventApprovalStatus.DRAFT &&
+        updateEventDto.approvalStatus !== EventApprovalStatus.PENDING_APPROVAL
+      ) {
+        throw new ForbiddenException('Only an admin can approve or reject an event');
+      }
+      if (
+        updateEventDto.approvedBy !== undefined ||
+        updateEventDto.rejectedBy !== undefined ||
+        updateEventDto.rejectionReason !== undefined
+      ) {
+        throw new ForbiddenException('Only an admin can set approval/rejection metadata on an event');
       }
     }
 

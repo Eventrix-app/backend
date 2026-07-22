@@ -79,7 +79,10 @@ export class ChatGateway implements OnGatewayConnection, OnGatewayDisconnect {
   @UsePipes(new ValidationPipe({ whitelist: true, transform: true }))
   @SubscribeMessage('joinEvent')
   async handleJoinEvent(@ConnectedSocket() client: AuthedSocket, @MessageBody() body: JoinEventDto) {
-    await this.chatService.assertEventExists(body.eventId);
+    // handleConnection already ran and set client.data.user (or disconnected the socket)
+    // before any message handler can fire, so this is always populated here.
+    const user = client.data.user;
+    await this.chatService.assertEventVisible(body.eventId, user?.id, user?.roles ?? []);
     await client.join(room(body.eventId));
     return { eventId: body.eventId, joined: true };
   }
@@ -105,7 +108,7 @@ export class ChatGateway implements OnGatewayConnection, OnGatewayDisconnect {
       client.emit('authError', { message: 'Not authenticated' });
       return;
     }
-    const record = await this.chatService.createMessage(body.eventId, user.id, body.message);
+    const record = await this.chatService.createMessage(body.eventId, user.id, user.roles ?? [], body.message);
     this.server.to(room(body.eventId)).emit('newMessage', record);
     return record;
   }

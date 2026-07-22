@@ -22,8 +22,7 @@ import { SESSION_TOKEN_TTL_SECONDS } from './jwt.util';
       imports: [ConfigModule],
       inject: [ConfigService],
       useFactory: (configService: ConfigService) => ({
-        secret:
-          configService.get<string>('JWT_SECRET') || process.env.JWT_SECRET,
+        secret: configService.get<string>('JWT_SECRET'),
         signOptions: {
           expiresIn: SESSION_TOKEN_TTL_SECONDS,
         },

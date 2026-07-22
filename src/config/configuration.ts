@@ -8,7 +8,11 @@ export default () => ({
     database: process.env.DATABASE_NAME || 'eventrix',
   },
   jwt: {
-    secret: process.env.JWT_SECRET || 'change-this-secret',
+    // No fallback here on purpose — env.validation.ts's Joi schema requires JWT_SECRET at
+    // boot, so by the time this runs it's always set. A hardcoded fallback previously sat
+    // here as a landmine for anyone who later reads `jwt.secret` from this nested config
+    // instead of the flat `JWT_SECRET` key everything else reads today.
+    secret: process.env.JWT_SECRET,
     expiresIn: process.env.JWT_EXPIRES_IN || '3600s',
   },
   frontendUrl: process.env.FRONTEND_URL || 'http://localhost:19006',

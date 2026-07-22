@@ -80,11 +80,26 @@ export class JwtAuthGuard implements CanActivate {
       // keep working for up to its full 1h lifetime.
       const user = await this.usersRepository.findOne({
         where: { id: payload.id },
-        select: ['id', 'isBanned', 'deletedAt'],
+        select: ['id', 'isBanned', 'deletedAt', 'passwordChangedAt'],
         withDeleted: true,
       });
       if (!user || user.isBanned || user.deletedAt) {
         throw new UnauthorizedException('Account is no longer active');
+      }
+
+      // Same "stateless token" gap as above, but for a password change/reset: without this,
+      // a token issued before the account owner changed their password (or a stolen/leaked
+      // token an attacker is still using) keeps working for the rest of its ~2-day TTL even
+      // after the legitimate user resets their password specifically to lock the attacker
+      // out. `iat` is in seconds since epoch (standard JWT claim, added automatically by
+      // jwtService.sign); passwordChangedAt is only set on an actual password change, so
+      // this is a no-op for every token issued after the account's last (or only) password.
+      if (
+        user.passwordChangedAt &&
+        typeof payload.iat === 'number' &&
+        payload.iat * 1000 < user.passwordChangedAt.getTime()
+      ) {
+        throw new UnauthorizedException('Session expired — please log in again');
       }
 
       // Attach the verified payload for downstream handlers (e.g. RolesGuard, @GetUser())

@@ -2,6 +2,7 @@ import { NestFactory } from '@nestjs/core';
 import { NestExpressApplication } from '@nestjs/platform-express';
 import { ValidationPipe } from '@nestjs/common';
 import { join } from 'path';
+import helmet from 'helmet';
 import { AppModule } from './app.module';
 import { HttpExceptionFilter } from './common/filters/http-exception.filter';
 import { setupSwagger } from './crud/swagger-helper';
@@ -11,6 +12,15 @@ import { setupSwagger } from './crud/swagger-helper';
 // entrypoint (api/index.ts), which must never call app.listen().
 export async function createApp(): Promise<NestExpressApplication> {
   const app = await NestFactory.create<NestExpressApplication>(AppModule);
+
+  // Sets the standard hardening headers (X-Content-Type-Options, X-Frame-Options, HSTS,
+  // etc.) that were previously entirely absent. CSP is left off: this app is primarily a
+  // JSON API but does serve Swagger UI (/api/docs) and a couple of server-rendered `.hbs`
+  // views, both of which rely on inline scripts/styles that helmet's default CSP blocks —
+  // enabling it would require hand-tuning a policy for pages this app doesn't treat as
+  // security-sensitive today.
+  app.use(helmet({ contentSecurityPolicy: false }));
+
   app.useGlobalPipes(
     new ValidationPipe({
       whitelist: true,

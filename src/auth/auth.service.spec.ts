@@ -40,7 +40,7 @@ describe('AuthService — hasCompletedOnboarding', () => {
   });
 
   describe('register', () => {
-    it('marks the new account as having completed onboarding', async () => {
+    it('does not mark the new account as having completed onboarding (the chain now runs after registration)', async () => {
       mockUserRepo.findOne.mockResolvedValue(null);
 
       const result = await service.register({
@@ -51,9 +51,9 @@ describe('AuthService — hasCompletedOnboarding', () => {
       } as any);
 
       expect(mockUserRepo.create).toHaveBeenCalledWith(
-        expect.objectContaining({ hasCompletedOnboarding: true }),
+        expect.not.objectContaining({ hasCompletedOnboarding: expect.anything() }),
       );
-      expect(result.hasCompletedOnboarding).toBe(true);
+      expect(result.hasCompletedOnboarding).toBeFalsy();
     });
 
     it('sends a welcome email to the new account', async () => {

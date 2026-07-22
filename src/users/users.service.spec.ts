@@ -264,4 +264,24 @@ describe('UsersService', () => {
       ).rejects.toThrow(NotFoundException);
     });
   });
+
+  // ─── completeOnboarding service method ────────────────────────────────────────
+
+  describe('completeOnboarding', () => {
+    it('flips hasCompletedOnboarding to true', async () => {
+      mockUserRepo.update.mockResolvedValue({ affected: 1 });
+
+      await service.completeOnboarding('user-uuid');
+
+      expect(mockUserRepo.update).toHaveBeenCalledWith(
+        'user-uuid',
+        expect.objectContaining({ hasCompletedOnboarding: true }),
+      );
+    });
+
+    it('throws NotFoundException when user does not exist', async () => {
+      mockUserRepo.update.mockResolvedValue({ affected: 0 });
+      await expect(service.completeOnboarding('missing')).rejects.toThrow(NotFoundException);
+    });
+  });
 });

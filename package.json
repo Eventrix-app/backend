@@ -51,6 +51,7 @@
     "expo-server-sdk": "^5.0.0",
     "express": "^5.2.1",
     "hbs": "^4.2.1",
+    "helmet": "^8.3.0",
     "joi": "^18.2.1",
     "nodemailer": "^6.10.1",
     "passport": "^0.7.0",
