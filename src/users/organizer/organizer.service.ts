@@ -62,6 +62,7 @@ export interface OrganizerRecord {
   companyDescription?: string;
   companyWebsite?: string;
   companyLogoUrl?: string;
+  profilePictureUrl?: string;
   verified: boolean;
   verifiedAt?: Date;
   verificationLevel: VerificationLevel;
@@ -107,6 +108,7 @@ export class OrganizerService {
       companyDescription: organizer.companyDescription || undefined,
       companyWebsite: organizer.companyWebsite || undefined,
       companyLogoUrl: organizer.companyLogoUrl || undefined,
+      profilePictureUrl: user.profilePictureUrl || undefined,
       verified: organizer.verified,
       verifiedAt: organizer.verifiedAt || undefined,
       verificationLevel: organizer.verificationLevel,

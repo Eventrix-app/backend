@@ -20,6 +20,7 @@ export interface AdminRecord {
   firstName: string;
   lastName: string;
   phone?: string;
+  profilePictureUrl?: string;
   role: 'ADMIN';
   isActive: boolean;
   isBanned: boolean;
@@ -57,6 +58,7 @@ export class AdminService {
       firstName: firstName || '',
       lastName: lastName || '',
       phone: user.phoneNumber || undefined,
+      profilePictureUrl: user.profilePictureUrl || undefined,
       role: 'ADMIN',
       isActive: !user.deletedAt,
       isBanned: user.isBanned,
