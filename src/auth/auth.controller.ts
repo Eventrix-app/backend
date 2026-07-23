@@ -10,6 +10,15 @@ import { ResetPasswordDto } from './dto/reset-password.dto';
 import { ChangePasswordDto } from './dto/change-password.dto';
 import { Throttle } from '@nestjs/throttler';
 import { JwtPayload } from './jwt.util';
+import { IsIn, IsString } from 'class-validator';
+
+class SocialLoginDto {
+  @IsIn(['google', 'apple', 'facebook'])
+  provider!: 'google' | 'apple' | 'facebook';
+
+  @IsString()
+  token!: string;
+}
 
 // Auth endpoints are unauthenticated by nature, making them the prime target for
 // scripted credential-stuffing / account-creation abuse — throttled tighter than the
@@ -32,6 +41,12 @@ export class AuthController {
   @Post('register')
   async register(@Body() createUserDto: CreateUserDto): Promise<AuthResponseDto> {
     return await this.authService.register(createUserDto);
+  }
+
+  @Public()
+  @Post('social')
+  async socialLogin(@Body() body: SocialLoginDto): Promise<AuthResponseDto> {
+    return this.authService.socialLogin(body.provider, body.token);
   }
 
   // Deliberately not @Public(): requires a still-valid Bearer token, which

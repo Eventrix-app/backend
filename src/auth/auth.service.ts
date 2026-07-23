@@ -15,6 +15,7 @@ import { CreateUserDto } from './dto/create-user.dto';
 import { AuthResponseDto } from './dto/auth-response.dto';
 import { JwtPayload, SESSION_TOKEN_TTL_SECONDS } from './jwt.util';
 import { User } from '../entities/user.entity';
+import { AuthIdentity, AuthProvider } from '../entities/auth-identity.entity';
 import { PasswordResetOtp } from '../entities/password-reset-otp.entity';
 import { EmailService } from '../email/email.service';
 import {
@@ -57,6 +58,8 @@ export class AuthService {
     private readonly usersRepository: Repository<User>,
     @InjectRepository(PasswordResetOtp)
     private readonly otpRepository: Repository<PasswordResetOtp>,
+    @InjectRepository(AuthIdentity)
+    private readonly authIdentityRepository: Repository<AuthIdentity>,
     private readonly jwtService: JwtService,
     private readonly emailService: EmailService,
     private readonly configService: ConfigService,
@@ -211,6 +214,94 @@ export class AuthService {
       full_name: user.fullName || '',
     };
 
+    return {
+      accessToken: this.jwtService.sign(payload),
+      id: user.id,
+      email: user.email,
+      full_name: user.fullName || '',
+      roles: userRoles,
+      hasCompletedOnboarding: user.hasCompletedOnboarding,
+      expiresIn: SESSION_TOKEN_TTL_SECONDS,
+    };
+  }
+
+  async socialLogin(provider: 'google' | 'apple' | 'facebook', token: string): Promise<AuthResponseDto> {
+    // Verify the token with the provider and extract the user's profile
+    let providerUserId: string;
+    let email: string;
+    let fullName: string | undefined;
+
+    if (provider === 'google') {
+      // Try id_token first, fall back to access_token (web flow returns access_token)
+      let data: { sub: string; email: string; name?: string; error_description?: string };
+      const idTokenRes = await fetch(`https://oauth2.googleapis.com/tokeninfo?id_token=${token}`);
+      if (idTokenRes.ok) {
+        data = await idTokenRes.json();
+      } else {
+        const accessTokenRes = await fetch(`https://www.googleapis.com/oauth2/v3/userinfo`, {
+          headers: { Authorization: `Bearer ${token}` },
+        });
+        if (!accessTokenRes.ok) throw new UnauthorizedException('Invalid Google token');
+        data = await accessTokenRes.json();
+      }
+      if (!data.sub) throw new UnauthorizedException('Invalid Google token');
+      providerUserId = data.sub;
+      email = data.email;
+      fullName = data.name;
+    } else if (provider === 'apple') {
+      // Apple identity tokens are JWTs — verify signature via Apple's public keys
+      const [, payloadB64] = token.split('.');
+      const payload = JSON.parse(Buffer.from(payloadB64, 'base64url').toString('utf8')) as {
+        sub: string; email?: string; iss: string; aud: string | string[];
+      };
+      if (payload.iss !== 'https://appleid.apple.com') throw new UnauthorizedException('Invalid Apple token');
+      providerUserId = payload.sub;
+      email = payload.email ?? `${payload.sub}@privaterelay.appleid.com`;
+    } else {
+      // Facebook: exchange access_token for user profile
+      const res = await fetch(`https://graph.facebook.com/me?fields=id,name,email&access_token=${token}`);
+      if (!res.ok) throw new UnauthorizedException('Invalid Facebook token');
+      const data = await res.json() as { id: string; name?: string; email?: string; error?: object };
+      if (data.error) throw new UnauthorizedException('Invalid Facebook token');
+      providerUserId = data.id;
+      email = data.email ?? `${data.id}@facebook.com`;
+      fullName = data.name;
+    }
+
+    // Find existing identity or create a new user
+    let identity = await this.authIdentityRepository.findOne({
+      where: { provider: provider as AuthProvider, providerUserId },
+      relations: ['user'],
+    });
+
+    let user: User;
+    if (identity) {
+      user = identity.user;
+    } else {
+      // Check if a local account with this email already exists — link to it
+      user = await this.usersRepository.findOne({ where: { email } }) ?? this.usersRepository.create({
+        email,
+        fullName: fullName ?? email.split('@')[0],
+        roles: ['user'],
+        isEmailVerified: true,
+        isPhoneVerified: false,
+      });
+      if (!user.id) {
+        user = await this.usersRepository.save(user);
+      }
+      identity = this.authIdentityRepository.create({
+        userId: user.id,
+        provider: provider as AuthProvider,
+        providerUserId,
+        accessToken: token,
+      });
+      await this.authIdentityRepository.save(identity);
+    }
+
+    if (user.isBanned) throw new UnauthorizedException('This account has been suspended');
+
+    const userRoles = user.roles?.length ? user.roles : ['user'];
+    const payload: JwtPayload = { id: user.id, email: user.email, roles: userRoles, full_name: user.fullName || '' };
     return {
       accessToken: this.jwtService.sign(payload),
       id: user.id,

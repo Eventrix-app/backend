@@ -29,6 +29,7 @@ export interface OrganizerPublicProfile {
   eventCount: number;
   followerCount: number;
   isFollowing?: boolean;
+  phone?: string;
 }
 
 // What the applicant sees of their own submission — never exposes the raw document paths
@@ -241,6 +242,7 @@ export class OrganizerService {
       eventCount,
       followerCount,
       isFollowing,
+      phone: organizer.user.phoneNumber || undefined,
     };
   }
 
