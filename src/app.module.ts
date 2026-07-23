@@ -31,6 +31,7 @@ import { PushModule } from './push/push.module';
 import { ChatModule } from './chat/chat.module';
 import { EventContentModule } from './event-content/event-content.module';
 import { GeocodeModule } from './geocode/geocode.module';
+import { ShortsModule } from './shorts/shorts.module';
 
 @Module({
   imports: [
@@ -80,6 +81,7 @@ import { GeocodeModule } from './geocode/geocode.module';
     ChatModule,
     EventContentModule,
     GeocodeModule,
+    ShortsModule,
   ],
   controllers: [AppController],
   providers: [

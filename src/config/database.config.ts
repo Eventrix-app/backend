@@ -18,6 +18,7 @@ import { Favorite } from '../entities/favorite.entity';
 import { Follow } from '../entities/follow.entity';
 import { EventMedia } from '../entities/event-media.entity';
 import { PasswordResetOtp } from '../entities/password-reset-otp.entity';
+import { Short } from '../entities/short.entity';
 
 const entities = [
   User,
@@ -38,6 +39,7 @@ const entities = [
   Follow,
   EventMedia,
   PasswordResetOtp,
+  Short,
 ];
 
 export const getDatabaseConfig = (

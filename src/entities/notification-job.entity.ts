@@ -31,7 +31,12 @@ export class NotificationJob {
   @Column({ name: 'user_id', type: 'uuid' })
   userId!: string;
 
-  @Column({ type: 'varchar', length: 30, enum: NotificationType })
+  // 40, not 30: 'organizer_verification_approved'/'_rejected' are 32 chars — a varchar(30)
+  // column silently rejects every insert of either value at the DB level. Both crashed the
+  // whole process too: NotificationService.enqueue() is always called via `void` (fire-
+  // and-forget) at every call site, so the resulting unhandled promise rejection wasn't
+  // just swallowed — Node treats an unhandled rejection as fatal by default.
+  @Column({ type: 'varchar', length: 40, enum: NotificationType })
   type!: NotificationType;
 
   @Column({ type: 'jsonb', nullable: true })

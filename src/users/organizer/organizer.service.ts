@@ -121,13 +121,30 @@ export class OrganizerService {
     };
   }
 
-  async findAll(): Promise<OrganizerRecord[]> {
-    const organizers = await this.organizersRepository.find({
-      relations: ['user'],
-    });
-    return organizers
-      .filter((o) => o.user && !o.user.deletedAt)
-      .map((o) => this.mapToRecord(o.user, o));
+  // Paginated (admin dashboard's People page listing) — the `user.deletedAt IS NULL`
+  // filter has to be a query-level join condition, not a post-fetch JS filter (as this
+  // used to be), because paginating with skip/take over the unfiltered set would otherwise
+  // both short a page of otherwise-active organizers and make `total` wrong.
+  async findAll(
+    page: number = 1,
+    limit: number = 50,
+  ): Promise<{ organizers: OrganizerRecord[]; total: number; page: number; totalPages: number }> {
+    const skip = (page - 1) * limit;
+    const [rows, total] = await this.organizersRepository
+      .createQueryBuilder('organizer')
+      .innerJoinAndSelect('organizer.user', 'user')
+      .where('user.deletedAt IS NULL')
+      .orderBy('organizer.createdAt', 'DESC')
+      .skip(skip)
+      .take(limit)
+      .getManyAndCount();
+
+    return {
+      organizers: rows.map((o) => this.mapToRecord(o.user, o)),
+      total,
+      page,
+      totalPages: Math.ceil(total / limit),
+    };
   }
 
   async findOne(id: string): Promise<OrganizerRecord> {
@@ -385,11 +402,18 @@ export class OrganizerService {
   // rejected by assertPendingReview instead of racing it.
   async approveVerification(organizerId: string): Promise<OrganizerRecord> {
     const organizer = await this.dataSource.transaction(async (manager) => {
-      const organizer = await manager.findOne(Organizer, {
-        where: { id: organizerId },
-        relations: ['user'],
-        lock: { mode: 'pessimistic_write' },
-      });
+      // Postgres refuses `FOR UPDATE` on the nullable side of an outer join, and TypeORM's
+      // find()/findOne() `relations` option always generates a LEFT JOIN regardless of the
+      // relation's own nullability — combined with `lock`, that 500s every single time
+      // ("FOR UPDATE cannot be applied to the nullable side of an outer join"). Organizer.user
+      // is a required (non-nullable) relation, so an explicit INNER JOIN via query builder is
+      // both correct and lock-compatible.
+      const organizer = await manager
+        .createQueryBuilder(Organizer, 'organizer')
+        .innerJoinAndSelect('organizer.user', 'user')
+        .where('organizer.id = :id', { id: organizerId })
+        .setLock('pessimistic_write')
+        .getOne();
       if (!organizer || !organizer.user || organizer.user.deletedAt) {
         throw new NotFoundException(`Organizer with id ${organizerId} not found`);
       }
@@ -416,11 +440,13 @@ export class OrganizerService {
 
   async rejectVerification(organizerId: string, reason: string): Promise<OrganizerRecord> {
     const organizer = await this.dataSource.transaction(async (manager) => {
-      const organizer = await manager.findOne(Organizer, {
-        where: { id: organizerId },
-        relations: ['user'],
-        lock: { mode: 'pessimistic_write' },
-      });
+      // See identical comment in approveVerification() above — same lock/outer-join fix.
+      const organizer = await manager
+        .createQueryBuilder(Organizer, 'organizer')
+        .innerJoinAndSelect('organizer.user', 'user')
+        .where('organizer.id = :id', { id: organizerId })
+        .setLock('pessimistic_write')
+        .getOne();
       if (!organizer || !organizer.user || organizer.user.deletedAt) {
         throw new NotFoundException(`Organizer with id ${organizerId} not found`);
       }

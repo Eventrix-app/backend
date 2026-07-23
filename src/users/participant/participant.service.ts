@@ -167,11 +167,23 @@ export class ParticipantService {
     };
   }
 
-  async findAll(): Promise<ParticipantRecord[]> {
-    const users = await this.usersRepository.find({
+  async findAll(
+    page: number = 1,
+    limit: number = 50,
+  ): Promise<{ participants: ParticipantRecord[]; total: number; page: number; totalPages: number }> {
+    const skip = (page - 1) * limit;
+    const [users, total] = await this.usersRepository.findAndCount({
       where: { roles: Raw((alias) => `${alias} @> '["user"]'::jsonb`) },
+      order: { createdAt: 'DESC' },
+      skip,
+      take: limit,
     });
-    return users.map((u) => this.mapUserToParticipantRecord(u));
+    return {
+      participants: users.map((u) => this.mapUserToParticipantRecord(u)),
+      total,
+      page,
+      totalPages: Math.ceil(total / limit),
+    };
   }
 
   async findOne(id: string): Promise<ParticipantRecord> {

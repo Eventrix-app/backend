@@ -128,11 +128,23 @@ export class AdminService {
     return this.mapUserToAdminRecord(savedUser);
   }
 
-  async findAll(): Promise<AdminRecord[]> {
-    const admins = await this.usersRepository.find({
+  async findAll(
+    page: number = 1,
+    limit: number = 50,
+  ): Promise<{ admins: AdminRecord[]; total: number; page: number; totalPages: number }> {
+    const skip = (page - 1) * limit;
+    const [users, total] = await this.usersRepository.findAndCount({
       where: { roles: Raw((alias) => `${alias} @> '["admin"]'::jsonb`) },
+      order: { createdAt: 'DESC' },
+      skip,
+      take: limit,
     });
-    return admins.map((user) => this.mapUserToAdminRecord(user));
+    return {
+      admins: users.map((user) => this.mapUserToAdminRecord(user)),
+      total,
+      page,
+      totalPages: Math.ceil(total / limit),
+    };
   }
 
   async findOne(id: string): Promise<AdminRecord> {

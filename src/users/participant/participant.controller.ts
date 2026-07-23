@@ -2,13 +2,16 @@ import {
   Body,
   Controller,
   Delete,
+  DefaultValuePipe,
   Get,
   HttpCode,
   HttpStatus,
   Param,
+  ParseIntPipe,
   ParseUUIDPipe,
   Patch,
   Post,
+  Query,
   Request,
   ForbiddenException,
 } from '@nestjs/common';
@@ -33,8 +36,11 @@ export class ParticipantController {
   }
 
   @Get()
-  async findAll() {
-    return await this.participantService.findAll();
+  async findAll(
+    @Query('page', new DefaultValuePipe(1), ParseIntPipe) page?: number,
+    @Query('limit', new DefaultValuePipe(50), ParseIntPipe) limit?: number,
+  ) {
+    return await this.participantService.findAll(page, limit);
   }
 
   @Get(':id')

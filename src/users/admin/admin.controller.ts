@@ -2,11 +2,14 @@ import {
   Body,
   Controller,
   Delete,
+  DefaultValuePipe,
   Get,
   Param,
+  ParseIntPipe,
   ParseUUIDPipe,
   Patch,
   Post,
+  Query,
 } from '@nestjs/common';
 import { ApiTags } from '@nestjs/swagger';
 
@@ -36,8 +39,11 @@ export class AdminController {
   }
 
   @Get()
-  async findAll() {
-    return await this.adminService.findAll();
+  async findAll(
+    @Query('page', new DefaultValuePipe(1), ParseIntPipe) page?: number,
+    @Query('limit', new DefaultValuePipe(50), ParseIntPipe) limit?: number,
+  ) {
+    return await this.adminService.findAll(page, limit);
   }
 
   @Get(':id')

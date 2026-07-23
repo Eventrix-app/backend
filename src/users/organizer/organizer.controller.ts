@@ -2,13 +2,16 @@ import {
   Body,
   Controller,
   Delete,
+  DefaultValuePipe,
   Get,
   HttpCode,
   HttpStatus,
   Param,
+  ParseIntPipe,
   ParseUUIDPipe,
   Patch,
   Post,
+  Query,
   Request,
   ForbiddenException,
 } from '@nestjs/common';
@@ -29,8 +32,11 @@ export class OrganizerController {
   constructor(private readonly organizerService: OrganizerService) {}
 
   @Get()
-  async findAll() {
-    return await this.organizerService.findAll();
+  async findAll(
+    @Query('page', new DefaultValuePipe(1), ParseIntPipe) page?: number,
+    @Query('limit', new DefaultValuePipe(50), ParseIntPipe) limit?: number,
+  ) {
+    return await this.organizerService.findAll(page, limit);
   }
 
   // Static-path routes must come before the bare `:id` route below — Nest/Express match
