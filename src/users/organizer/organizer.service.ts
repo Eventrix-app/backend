@@ -1,11 +1,11 @@
 import { BadRequestException, Injectable, NotFoundException, Logger } from '@nestjs/common';
 import { InjectRepository } from '@nestjs/typeorm';
-import { DataSource, Repository } from 'typeorm';
+import { DataSource, Not, Repository } from 'typeorm';
 import * as bcrypt from 'bcryptjs';
 import { UpdateOrganizerDto } from './dto/update-organizer.dto';
 import { User } from '../../entities/user.entity';
 import { Organizer, VerificationLevel } from '../../entities/organizer.entity';
-import { Event, EventApprovalStatus } from '../../entities/event.entity';
+import { Event, EventApprovalStatus, EventStatus } from '../../entities/event.entity';
 import { Follow } from '../../entities/follow.entity';
 import { CacheService } from '../../common/cache/cache.service';
 import { userMeCacheKey } from '../users.service';
@@ -222,7 +222,12 @@ export class OrganizerService {
 
     const [eventCount, followerCount, isFollowing] = await Promise.all([
       this.eventsRepository.count({
-        where: { organizerId: id, approvalStatus: EventApprovalStatus.APPROVED, deletedAt: null as any },
+        where: {
+          organizerId: id,
+          approvalStatus: EventApprovalStatus.APPROVED,
+          status: Not(EventStatus.CANCELLED),
+          deletedAt: null as any,
+        },
       }),
       this.followsRepository.count({ where: { organizerId: id } }),
       requestingUserId
