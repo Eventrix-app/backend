@@ -134,6 +134,7 @@ export class AuthService {
       roles: userRoles,
       hasCompletedOnboarding: user.hasCompletedOnboarding,
       expiresIn: SESSION_TOKEN_TTL_SECONDS,
+      profilePictureUrl: user.profilePictureUrl ?? null,
     };
   }
 
@@ -188,6 +189,7 @@ export class AuthService {
       roles: savedRoles,
       hasCompletedOnboarding: saved.hasCompletedOnboarding,
       expiresIn: SESSION_TOKEN_TTL_SECONDS,
+      profilePictureUrl: saved.profilePictureUrl ?? null,
     };
   }
 
@@ -219,6 +221,7 @@ export class AuthService {
       roles: userRoles,
       hasCompletedOnboarding: user.hasCompletedOnboarding,
       expiresIn: SESSION_TOKEN_TTL_SECONDS,
+      profilePictureUrl: user.profilePictureUrl ?? null,
     };
   }
 
