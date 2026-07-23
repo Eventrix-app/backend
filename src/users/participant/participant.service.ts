@@ -35,6 +35,8 @@ export interface ParticipantRecord {
   country: string;
   pincode: string;
   isActive: boolean;
+  isBanned: boolean;
+  bannedReason?: string;
   createdAt: string;
   updatedAt: string;
   // Only set on create() — POST /participants is functionally a registration endpoint
@@ -102,6 +104,8 @@ export class ParticipantService {
       country: meta['country'] || '',
       pincode: meta['pincode'] || '',
       isActive: !user.deletedAt,
+      isBanned: user.isBanned,
+      bannedReason: user.bannedReason || undefined,
       createdAt: user.createdAt.toISOString(),
       updatedAt: user.updatedAt.toISOString(),
     };

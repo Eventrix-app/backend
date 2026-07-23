@@ -214,6 +214,61 @@ export class PaymentsService {
       .getMany();
   }
 
+  // General-purpose admin listing over every payment (not just pending refunds) — no
+  // listing method existed on paymentsRepository before this; joins through Enrollment for
+  // event/user context using the same field allowlist REFUND_SAFE_ENROLLMENT_SELECT already
+  // guards for refunds, so a payment row never leaks the enrollment user's passwordHash.
+  async findAllForAdmin(filters: {
+    status?: PaymentStatus;
+    page?: number;
+    limit?: number;
+  }): Promise<{ payments: Payment[]; total: number; page: number; totalPages: number }> {
+    const { status, page = 1, limit = 20 } = filters;
+    const skip = (page - 1) * limit;
+    const where: any = {};
+    if (status) where.status = status;
+
+    const [payments, total] = await this.paymentsRepository.findAndCount({
+      where,
+      relations: ['enrollment', 'enrollment.event', 'enrollment.user'],
+      select: { enrollment: REFUND_SAFE_ENROLLMENT_SELECT as any },
+      order: { createdAt: 'DESC' },
+      skip,
+      take: limit,
+    });
+
+    return { payments, total, page, totalPages: Math.ceil(total / limit) };
+  }
+
+  // Admin listing over the payout ledger the T+3 cron sweep (runPayoutSweep, below) already
+  // populates — that sweep only ever wrote rows, nothing read them back until this.
+  async findAllPayoutsForAdmin(filters: {
+    status?: PayoutStatus;
+    organizerId?: string;
+    page?: number;
+    limit?: number;
+  }): Promise<{ payouts: Payout[]; total: number; page: number; totalPages: number }> {
+    const { status, organizerId, page = 1, limit = 20 } = filters;
+    const skip = (page - 1) * limit;
+    const where: any = {};
+    if (status) where.status = status;
+    if (organizerId) where.organizerId = organizerId;
+
+    const [payouts, total] = await this.payoutsRepository.findAndCount({
+      where,
+      relations: ['organizer', 'organizer.user', 'event'],
+      select: {
+        organizer: { id: true, companyName: true, user: { id: true, fullName: true, email: true } },
+        event: { id: true, title: true },
+      },
+      order: { createdAt: 'DESC' },
+      skip,
+      take: limit,
+    });
+
+    return { payouts, total, page, totalPages: Math.ceil(total / limit) };
+  }
+
   // No live PayU/Razorpay integration exists yet — this is the single seam a future
   // gateway SDK call slots into. The forward-only state machine and status bookkeeping
   // around it are real.

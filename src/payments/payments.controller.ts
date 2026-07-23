@@ -1,4 +1,4 @@
-import { Body, Controller, Get, Headers, HttpCode, HttpStatus, Param, ParseUUIDPipe, Patch, Post, Query, Request, UnauthorizedException } from '@nestjs/common';
+import { BadRequestException, Body, Controller, Get, Headers, HttpCode, HttpStatus, Param, ParseUUIDPipe, Patch, Post, Query, Request, UnauthorizedException } from '@nestjs/common';
 import { ApiTags } from '@nestjs/swagger';
 import { ConfigService } from '@nestjs/config';
 import { Throttle } from '@nestjs/throttler';
@@ -11,6 +11,9 @@ import { PaymentWebhookDto } from './dto/payment-webhook.dto';
 import { JwtPayload } from '../auth/jwt.util';
 import { Public } from '../common/decorators/public.decorator';
 import { AuditAction } from '../common/decorators/audit-action.decorator';
+import { Roles } from '../common/decorators/roles.decorator';
+import { PaymentStatus } from '../entities/payment.entity';
+import { PayoutStatus } from '../entities/payout.entity';
 
 @ApiTags('payments')
 @Controller('payments')
@@ -54,6 +57,45 @@ export class PaymentsController {
   @Get('refunds/pending')
   async findPendingRefunds(@Request() req: Request & { user: JwtPayload }) {
     return await this.paymentsService.findPendingRefundsForOrganizer(req.user.id, req.user.roles);
+  }
+
+  // General-purpose admin transaction listing (not just pending refunds).
+  @Roles('admin')
+  @Get('admin')
+  async findAllForAdmin(
+    @Query('status') status?: PaymentStatus,
+    @Query('page') page?: string,
+    @Query('limit') limit?: string,
+  ) {
+    if (status !== undefined && !Object.values(PaymentStatus).includes(status)) {
+      throw new BadRequestException('Invalid status');
+    }
+    return await this.paymentsService.findAllForAdmin({
+      status,
+      page: page ? Number(page) : undefined,
+      limit: limit ? Number(limit) : undefined,
+    });
+  }
+
+  // Admin listing over the payout ledger the T+3 cron sweep populates (see
+  // runPayoutSweep) — a distinct static path from 'admin' above, no route-ordering concern.
+  @Roles('admin')
+  @Get('admin/payouts')
+  async findAllPayoutsForAdmin(
+    @Query('status') status?: PayoutStatus,
+    @Query('organizerId') organizerId?: string,
+    @Query('page') page?: string,
+    @Query('limit') limit?: string,
+  ) {
+    if (status !== undefined && !Object.values(PayoutStatus).includes(status)) {
+      throw new BadRequestException('Invalid status');
+    }
+    return await this.paymentsService.findAllPayoutsForAdmin({
+      status,
+      organizerId,
+      page: page ? Number(page) : undefined,
+      limit: limit ? Number(limit) : undefined,
+    });
   }
 
   @AuditAction('refund.approve', 'refund')

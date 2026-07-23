@@ -1216,9 +1216,9 @@ export class EventsService {
 
   async findPending(page: number = 1, limit: number = 20): Promise<{ events: Event[]; total: number; page: number; totalPages: number }> {
     const skip = (page - 1) * limit;
-    
+
     const [events, total] = await this.eventsRepository.findAndCount({
-      where: { 
+      where: {
         approvalStatus: EventApprovalStatus.PENDING_APPROVAL,
         isPaid: true,
         deletedAt: null as any,
@@ -1232,6 +1232,39 @@ export class EventsService {
 
     return {
       events,
+      total,
+      page,
+      totalPages: Math.ceil(total / limit),
+    };
+  }
+
+  // General-purpose admin catalog listing — unlike findPending (hardcoded to the paid-
+  // approval queue) and findAllFiltered (public browse, hardcoded to APPROVED), both
+  // filters here are optional so admins can see draft/rejected/cancelled/ended events too.
+  async findAllForAdmin(filters: {
+    approvalStatus?: EventApprovalStatus;
+    status?: EventStatus;
+    page?: number;
+    limit?: number;
+  }): Promise<{ events: Event[]; total: number; page: number; totalPages: number }> {
+    const { approvalStatus, status, page = 1, limit = 20 } = filters;
+    const skip = (page - 1) * limit;
+
+    const where: any = { deletedAt: null as any };
+    if (approvalStatus) where.approvalStatus = approvalStatus;
+    if (status) where.status = status;
+
+    const [events, total] = await this.eventsRepository.findAndCount({
+      where,
+      relations: ['organizer', 'organizer.user', 'category'],
+      select: SAFE_ORGANIZER_SELECT,
+      order: { createdAt: 'DESC' },
+      skip,
+      take: limit,
+    });
+
+    return {
+      events: events.map((e) => this.withComputedSeats(e)),
       total,
       page,
       totalPages: Math.ceil(total / limit),

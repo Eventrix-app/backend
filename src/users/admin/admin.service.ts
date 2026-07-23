@@ -22,6 +22,8 @@ export interface AdminRecord {
   phone?: string;
   role: 'ADMIN';
   isActive: boolean;
+  isBanned: boolean;
+  bannedReason?: string;
   createdAt: string;
   updatedAt: string;
 }
@@ -57,6 +59,8 @@ export class AdminService {
       phone: user.phoneNumber || undefined,
       role: 'ADMIN',
       isActive: !user.deletedAt,
+      isBanned: user.isBanned,
+      bannedReason: user.bannedReason || undefined,
       createdAt: user.createdAt.toISOString(),
       updatedAt: user.updatedAt.toISOString(),
     };

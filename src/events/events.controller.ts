@@ -19,6 +19,7 @@ import { ApiTags } from '@nestjs/swagger';
 import { Throttle } from '@nestjs/throttler';
 
 import { EventsService } from './events.service';
+import { EventApprovalStatus, EventStatus } from '../entities/event.entity';
 import { CreateEventDto } from './dto/create-event.dto';
 import { UpdateEventDto } from './dto/update-event.dto';
 import { EnrollDto } from './dto/enroll.dto';
@@ -121,6 +122,26 @@ export class EventsController {
     @Query('limit', new DefaultValuePipe(20), ParseIntPipe) limit?: number,
   ) {
     return await this.eventsService.findPending(page, limit);
+  }
+
+  // Admin catalog view across every status (draft/pending/approved/rejected × upcoming/
+  // ongoing/completed/cancelled) — findPending above is scoped to the paid-approval queue
+  // only, this is the general-purpose admin listing. MUST come before :id route.
+  @Roles('admin')
+  @Get('admin')
+  async findAllForAdmin(
+    @Query('approvalStatus') approvalStatus?: EventApprovalStatus,
+    @Query('status') status?: EventStatus,
+    @Query('page', new DefaultValuePipe(1), ParseIntPipe) page?: number,
+    @Query('limit', new DefaultValuePipe(20), ParseIntPipe) limit?: number,
+  ) {
+    if (approvalStatus !== undefined && !Object.values(EventApprovalStatus).includes(approvalStatus)) {
+      throw new BadRequestException('Invalid approvalStatus');
+    }
+    if (status !== undefined && !Object.values(EventStatus).includes(status)) {
+      throw new BadRequestException('Invalid status');
+    }
+    return await this.eventsService.findAllForAdmin({ approvalStatus, status, page, limit });
   }
 
   @Get('my-events')

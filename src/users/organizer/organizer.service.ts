@@ -69,6 +69,8 @@ export interface OrganizerRecord {
   commissionRate: number;
   commissionFlatFee: number;
   isActive: boolean;
+  isBanned: boolean;
+  bannedReason?: string;
   createdAt: string;
   updatedAt: string;
 }
@@ -112,6 +114,8 @@ export class OrganizerService {
       commissionRate: Number(organizer.commissionRate),
       commissionFlatFee: Number(organizer.commissionFlatFee),
       isActive: !user.deletedAt,
+      isBanned: user.isBanned,
+      bannedReason: user.bannedReason || undefined,
       createdAt: organizer.createdAt.toISOString(),
       updatedAt: organizer.updatedAt.toISOString(),
     };
