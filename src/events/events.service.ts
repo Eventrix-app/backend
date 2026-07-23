@@ -1,6 +1,6 @@
 import { Injectable, NotFoundException, ForbiddenException, Logger, ConflictException, BadRequestException } from '@nestjs/common';
 import { InjectRepository } from '@nestjs/typeorm';
-import { Repository, DataSource, ILike, In, Between, MoreThanOrEqual, LessThanOrEqual } from 'typeorm';
+import { Repository, DataSource, ILike, In, Between, MoreThanOrEqual, LessThanOrEqual, Not } from 'typeorm';
 import { JwtService } from '@nestjs/jwt';
 import { Event, EventApprovalStatus, EventStatus } from '../entities/event.entity';
 import { Enrollment } from '../entities/enrollment.entity';
@@ -347,9 +347,13 @@ export class EventsService {
     }
 
     const skip = (page - 1) * limit;
+    // Cancelling an event only flips `status`, not `approvalStatus` (it was already
+    // approved) — without excluding CANCELLED here too, a cancelled event stayed visible
+    // in every public listing (Home/Search/Explore) since it still passed this filter.
     const base: any = {
       deletedAt: null as any,
       approvalStatus: EventApprovalStatus.APPROVED,
+      status: Not(EventStatus.CANCELLED),
     };
 
     if (categoryId) base.categoryId = categoryId;
@@ -721,7 +725,12 @@ export class EventsService {
     const organizerIds = follows.map((f) => f.organizerId);
     const skip = (page - 1) * limit;
     const events = await this.eventsRepository.find({
-      where: { organizerId: In(organizerIds), approvalStatus: EventApprovalStatus.APPROVED, deletedAt: null as any },
+      where: {
+        organizerId: In(organizerIds),
+        approvalStatus: EventApprovalStatus.APPROVED,
+        status: Not(EventStatus.CANCELLED),
+        deletedAt: null as any,
+      },
       relations: ['organizer', 'organizer.user', 'category', 'ticketTypes'],
       select: SAFE_ORGANIZER_SELECT,
       order: { eventDate: 'ASC', startTime: 'ASC' },
@@ -758,7 +767,12 @@ export class EventsService {
   async findPublicEventsByOrganizer(organizerId: string, page: number = 1, limit: number = 20): Promise<Event[]> {
     const skip = (page - 1) * limit;
     return await this.eventsRepository.find({
-      where: { organizerId, approvalStatus: EventApprovalStatus.APPROVED, deletedAt: null as any },
+      where: {
+        organizerId,
+        approvalStatus: EventApprovalStatus.APPROVED,
+        status: Not(EventStatus.CANCELLED),
+        deletedAt: null as any,
+      },
       relations: ['organizer', 'organizer.user', 'category'],
       select: SAFE_ORGANIZER_SELECT,
       order: { eventDate: 'ASC', startTime: 'ASC' },

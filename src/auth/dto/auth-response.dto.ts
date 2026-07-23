@@ -6,4 +6,5 @@ export class AuthResponseDto {
   roles!: string[];
   hasCompletedOnboarding!: boolean;
   expiresIn?: number;
+  profilePictureUrl?: string | null;
 }
