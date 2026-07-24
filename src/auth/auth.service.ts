@@ -7,9 +7,11 @@ import {
 import { InjectRepository } from '@nestjs/typeorm';
 import { MoreThan, Repository } from 'typeorm';
 import * as bcrypt from 'bcryptjs';
-import { createHash, randomInt, timingSafeEqual } from 'crypto';
+import { createHash, createHmac, randomInt, timingSafeEqual } from 'crypto';
 import { JwtService } from '@nestjs/jwt';
 import { ConfigService } from '@nestjs/config';
+import { OAuth2Client, TokenPayload } from 'google-auth-library';
+import appleSignin from 'apple-signin-auth';
 import { LoginDto } from './dto/login.dto';
 import { CreateUserDto } from './dto/create-user.dto';
 import { AuthResponseDto } from './dto/auth-response.dto';
@@ -52,6 +54,9 @@ function timingSafeStringEqual(a: string, b: string): boolean {
 @Injectable()
 export class AuthService {
   private readonly logger = new Logger(AuthService.name);
+  // Stateless — verifyIdToken() takes the audience list per call, so no single clientId
+  // needs to be bound here despite the RN app using separate iOS/Android/Web client IDs.
+  private readonly googleClient = new OAuth2Client();
 
   constructor(
     @InjectRepository(User)
@@ -229,47 +234,15 @@ export class AuthService {
   }
 
   async socialLogin(provider: 'google' | 'apple' | 'facebook', token: string): Promise<AuthResponseDto> {
-    // Verify the token with the provider and extract the user's profile
-    let providerUserId: string;
-    let email: string;
-    let fullName: string | undefined;
-
-    if (provider === 'google') {
-      // Try id_token first, fall back to access_token (web flow returns access_token)
-      let data: { sub: string; email: string; name?: string; error_description?: string };
-      const idTokenRes = await fetch(`https://oauth2.googleapis.com/tokeninfo?id_token=${token}`);
-      if (idTokenRes.ok) {
-        data = await idTokenRes.json();
-      } else {
-        const accessTokenRes = await fetch(`https://www.googleapis.com/oauth2/v3/userinfo`, {
-          headers: { Authorization: `Bearer ${token}` },
-        });
-        if (!accessTokenRes.ok) throw new UnauthorizedException('Invalid Google token');
-        data = await accessTokenRes.json();
-      }
-      if (!data.sub) throw new UnauthorizedException('Invalid Google token');
-      providerUserId = data.sub;
-      email = data.email;
-      fullName = data.name;
-    } else if (provider === 'apple') {
-      // Apple identity tokens are JWTs — verify signature via Apple's public keys
-      const [, payloadB64] = token.split('.');
-      const payload = JSON.parse(Buffer.from(payloadB64, 'base64url').toString('utf8')) as {
-        sub: string; email?: string; iss: string; aud: string | string[];
-      };
-      if (payload.iss !== 'https://appleid.apple.com') throw new UnauthorizedException('Invalid Apple token');
-      providerUserId = payload.sub;
-      email = payload.email ?? `${payload.sub}@privaterelay.appleid.com`;
-    } else {
-      // Facebook: exchange access_token for user profile
-      const res = await fetch(`https://graph.facebook.com/me?fields=id,name,email&access_token=${token}`);
-      if (!res.ok) throw new UnauthorizedException('Invalid Facebook token');
-      const data = await res.json() as { id: string; name?: string; email?: string; error?: object };
-      if (data.error) throw new UnauthorizedException('Invalid Facebook token');
-      providerUserId = data.id;
-      email = data.email ?? `${data.id}@facebook.com`;
-      fullName = data.name;
-    }
+    // Verify the token with the provider and extract the user's profile. Each branch
+    // cryptographically verifies the token against the provider itself (signature/audience/
+    // issuer/expiry as applicable) rather than trusting whatever the client asserts.
+    const { providerUserId, email, fullName } =
+      provider === 'google'
+        ? await this.verifyGoogleToken(token)
+        : provider === 'apple'
+          ? await this.verifyAppleToken(token)
+          : await this.verifyFacebookToken(token);
 
     // Find existing identity or create a new user
     let identity = await this.authIdentityRepository.findOne({
@@ -313,7 +286,98 @@ export class AuthService {
       roles: userRoles,
       hasCompletedOnboarding: user.hasCompletedOnboarding,
       expiresIn: SESSION_TOKEN_TTL_SECONDS,
+      profilePictureUrl: user.profilePictureUrl ?? null,
     };
+  }
+
+  private socialProfile(providerUserId: string, email: string, fullName?: string) {
+    return { providerUserId, email, fullName };
+  }
+
+  // Verifies the ID token's signature, issuer and expiry via Google's own JWKS (handled
+  // internally by google-auth-library) and — critically — checks the `aud` claim against
+  // one of *our* configured client IDs. Without the audience check, any valid Google ID
+  // token issued for any app on Earth would pass verification.
+  private async verifyGoogleToken(idToken: string) {
+    const audience = [
+      this.configService.get<string>('GOOGLE_CLIENT_ID_IOS'),
+      this.configService.get<string>('GOOGLE_CLIENT_ID_ANDROID'),
+      this.configService.get<string>('GOOGLE_CLIENT_ID_WEB'),
+    ].filter((id): id is string => !!id);
+    if (audience.length === 0) {
+      this.logger.error('Google sign-in attempted but no GOOGLE_CLIENT_ID_* env vars are configured');
+      throw new UnauthorizedException('Google sign-in is not configured on the server');
+    }
+
+    let payload: TokenPayload | undefined;
+    try {
+      const ticket = await this.googleClient.verifyIdToken({ idToken, audience });
+      payload = ticket.getPayload();
+    } catch (err) {
+      this.logger.warn(`Google token verification failed: ${err instanceof Error ? err.message : String(err)}`);
+      throw new UnauthorizedException('Invalid Google token');
+    }
+    if (!payload?.sub || !payload.email) throw new UnauthorizedException('Invalid Google token');
+    return this.socialProfile(payload.sub, payload.email, payload.name);
+  }
+
+  // apple-signin-auth's verifyIdToken fetches Apple's public keys and verifies the JWT's
+  // signature/issuer/expiry — real cryptographic verification, unlike the previous
+  // implementation which only base64-decoded the payload without checking the signature at
+  // all. `audience` is only enforced when APPLE_CLIENT_ID is configured: Sign in with Apple
+  // isn't wired up client-side yet (no bundle/services ID has been issued), so we still
+  // verify every other claim rather than rejecting the whole provider outright.
+  private async verifyAppleToken(idToken: string) {
+    const audience = this.configService.get<string>('APPLE_CLIENT_ID') || undefined;
+    let payload: Awaited<ReturnType<typeof appleSignin.verifyIdToken>>;
+    try {
+      payload = await appleSignin.verifyIdToken(idToken, audience ? { audience } : undefined);
+    } catch (err) {
+      this.logger.warn(`Apple token verification failed: ${err instanceof Error ? err.message : String(err)}`);
+      throw new UnauthorizedException('Invalid Apple token');
+    }
+    if (!payload?.sub) throw new UnauthorizedException('Invalid Apple token');
+    return this.socialProfile(
+      payload.sub,
+      payload.email ?? `${payload.sub}@privaterelay.appleid.com`,
+      undefined,
+    );
+  }
+
+  // Facebook has no signed-JWT equivalent — the access token is an opaque string, so it
+  // must be verified by asking Facebook's own Graph API about it (debug_token), rather than
+  // trusting the client's claimed provider/token pairing. appsecret_proof additionally
+  // proves the /me call itself originates from a party holding our app secret, per Meta's
+  // recommended hardening: https://developers.facebook.com/docs/graph-api/securing-requests
+  private async verifyFacebookToken(token: string) {
+    const appId = this.configService.get<string>('FACEBOOK_APP_ID');
+    const appSecret = this.configService.get<string>('FACEBOOK_APP_SECRET');
+    if (!appId || !appSecret) {
+      this.logger.error('Facebook sign-in attempted but FACEBOOK_APP_ID/FACEBOOK_APP_SECRET are not configured');
+      throw new UnauthorizedException('Facebook sign-in is not configured on the server');
+    }
+    const appsecretProof = createHmac('sha256', appSecret).update(token).digest('hex');
+
+    const debugRes = await fetch(
+      `https://graph.facebook.com/debug_token?input_token=${encodeURIComponent(token)}` +
+        `&access_token=${encodeURIComponent(`${appId}|${appSecret}`)}`,
+    );
+    if (!debugRes.ok) throw new UnauthorizedException('Invalid Facebook token');
+    const debugData = (await debugRes.json()) as {
+      data?: { is_valid?: boolean; app_id?: string; user_id?: string };
+    };
+    if (!debugData.data?.is_valid || debugData.data.app_id !== appId) {
+      throw new UnauthorizedException('Invalid Facebook token');
+    }
+
+    const profileRes = await fetch(
+      `https://graph.facebook.com/me?fields=id,name,email` +
+        `&access_token=${encodeURIComponent(token)}&appsecret_proof=${appsecretProof}`,
+    );
+    if (!profileRes.ok) throw new UnauthorizedException('Invalid Facebook token');
+    const data = (await profileRes.json()) as { id: string; name?: string; email?: string; error?: object };
+    if (data.error || data.id !== debugData.data.user_id) throw new UnauthorizedException('Invalid Facebook token');
+    return this.socialProfile(data.id, data.email ?? `${data.id}@facebook.com`, data.name);
   }
 
   // SHA-256 of the plaintext OTP — the code itself only ever exists in the email sent to
