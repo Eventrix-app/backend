@@ -1,10 +1,10 @@
-import { Body, Controller, Get, Param, ParseUUIDPipe, Post, Request } from '@nestjs/common';
+import { Body, Controller, Delete, Get, Param, ParseUUIDPipe, Patch, Post, Request } from '@nestjs/common';
 import { ApiTags } from '@nestjs/swagger';
 import { Throttle } from '@nestjs/throttler';
 import { Public } from '../common/decorators/public.decorator';
 import { JwtPayload } from '../auth/jwt.util';
 import { AnnouncementsService } from './announcements.service';
-import { CreateAnnouncementDto } from './dto/announcement.dto';
+import { CreateAnnouncementDto, UpdateAnnouncementDto } from './dto/announcement.dto';
 
 @ApiTags('event-announcements')
 @Controller('events/:eventId/announcements')
@@ -28,5 +28,25 @@ export class AnnouncementsController {
     @Request() req: Request & { user: JwtPayload },
   ) {
     return this.announcementsService.create(eventId, dto, req.user.id, req.user.roles);
+  }
+
+  @Patch(':announcementId')
+  async update(
+    @Param('eventId', ParseUUIDPipe) eventId: string,
+    @Param('announcementId', ParseUUIDPipe) announcementId: string,
+    @Body() dto: UpdateAnnouncementDto,
+    @Request() req: Request & { user: JwtPayload },
+  ) {
+    return this.announcementsService.update(eventId, announcementId, dto, req.user.id, req.user.roles);
+  }
+
+  @Delete(':announcementId')
+  async remove(
+    @Param('eventId', ParseUUIDPipe) eventId: string,
+    @Param('announcementId', ParseUUIDPipe) announcementId: string,
+    @Request() req: Request & { user: JwtPayload },
+  ) {
+    await this.announcementsService.remove(eventId, announcementId, req.user.id, req.user.roles);
+    return { message: 'Announcement deleted' };
   }
 }

@@ -1,3 +1,4 @@
+import { PartialType } from '@nestjs/mapped-types';
 import { IsNotEmpty, IsString, MaxLength } from 'class-validator';
 
 export class CreateAnnouncementDto {
@@ -11,3 +12,5 @@ export class CreateAnnouncementDto {
   @MaxLength(5000)
   body!: string;
 }
+
+export class UpdateAnnouncementDto extends PartialType(CreateAnnouncementDto) {}

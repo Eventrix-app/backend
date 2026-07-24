@@ -1,12 +1,12 @@
-import { Injectable } from '@nestjs/common';
+import { Injectable, NotFoundException } from '@nestjs/common';
 import { InjectRepository } from '@nestjs/typeorm';
 import { Repository } from 'typeorm';
 import { EventAnnouncement } from '../entities/event-announcement.entity';
 import { Event } from '../entities/event.entity';
 import { Enrollment } from '../entities/enrollment.entity';
 import { assertEventOwnerOrAdmin } from './event-ownership.util';
-import { CreateAnnouncementDto } from './dto/announcement.dto';
-import { ChatGateway } from '../chat/chat.gateway';
+import { CreateAnnouncementDto, UpdateAnnouncementDto } from './dto/announcement.dto';
+import { ChatRealtimeService } from '../chat/chat-realtime.service';
 import { NotificationService } from '../notifications/notification.service';
 
 @Injectable()
@@ -18,7 +18,7 @@ export class AnnouncementsService {
     private readonly eventsRepository: Repository<Event>,
     @InjectRepository(Enrollment)
     private readonly enrollmentsRepository: Repository<Enrollment>,
-    private readonly chatGateway: ChatGateway,
+    private readonly chatRealtimeService: ChatRealtimeService,
     private readonly notificationService: NotificationService,
   ) {}
 
@@ -53,7 +53,7 @@ export class AnnouncementsService {
     const announcement = withAuthor ?? saved;
 
     // Live update for anyone with the event's Community tab open right now...
-    this.chatGateway.broadcastAnnouncement(eventId, announcement);
+    this.chatRealtimeService.broadcastAnnouncement(eventId, announcement);
 
     // ...and a push/email for attendees who aren't. Fire-and-forget: an announcement is
     // already persisted and broadcast by this point, so a notification hiccup here must
@@ -62,6 +62,37 @@ export class AnnouncementsService {
     void this.notifyAttendees(eventId, saved.id, dto.title);
 
     return announcement;
+  }
+
+  // Correcting a typo doesn't warrant re-broadcasting/re-notifying every attendee — only
+  // brand-new content does (see create() above). Anyone with the tab already open just sees
+  // the correction on their next refetch, same as a delete below.
+  async update(
+    eventId: string,
+    announcementId: string,
+    dto: UpdateAnnouncementDto,
+    userId: string,
+    userRoles: string[],
+  ): Promise<EventAnnouncement> {
+    await assertEventOwnerOrAdmin(this.eventsRepository, eventId, userId, userRoles);
+    const announcement = await this.announcementsRepository.findOne({ where: { id: announcementId, eventId } });
+    if (!announcement) throw new NotFoundException(`Announcement ${announcementId} not found`);
+
+    Object.assign(announcement, dto);
+    const saved = await this.announcementsRepository.save(announcement);
+    return (
+      (await this.announcementsRepository.findOne({
+        where: { id: saved.id },
+        relations: ['postedBy'],
+        select: { postedBy: { id: true, fullName: true } },
+      })) ?? saved
+    );
+  }
+
+  async remove(eventId: string, announcementId: string, userId: string, userRoles: string[]): Promise<void> {
+    await assertEventOwnerOrAdmin(this.eventsRepository, eventId, userId, userRoles);
+    const result = await this.announcementsRepository.delete({ id: announcementId, eventId });
+    if (result.affected === 0) throw new NotFoundException(`Announcement ${announcementId} not found`);
   }
 
   private async notifyAttendees(eventId: string, announcementId: string, title: string): Promise<void> {

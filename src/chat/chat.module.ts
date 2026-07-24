@@ -1,31 +1,18 @@
 import { Module } from '@nestjs/common';
 import { TypeOrmModule } from '@nestjs/typeorm';
-import { JwtModule } from '@nestjs/jwt';
-import { ConfigModule, ConfigService } from '@nestjs/config';
 import { ChatMessage } from '../entities/chat-message.entity';
+import { Event } from '../entities/event.entity';
+import { Enrollment } from '../entities/enrollment.entity';
 import { EventsModule } from '../events/events.module';
 import { ModerationModule } from '../moderation/moderation.module';
 import { ChatService } from './chat.service';
-import { ChatGateway } from './chat.gateway';
+import { ChatRealtimeService } from './chat-realtime.service';
 import { ChatController } from './chat.controller';
 
 @Module({
-  imports: [
-    ConfigModule,
-    TypeOrmModule.forFeature([ChatMessage]),
-    EventsModule,
-    ModerationModule,
-    JwtModule.registerAsync({
-      imports: [ConfigModule],
-      useFactory: (config: ConfigService) => ({
-        secret: config.get<string>('JWT_SECRET'),
-        signOptions: { expiresIn: '1h' },
-      }),
-      inject: [ConfigService],
-    }),
-  ],
+  imports: [TypeOrmModule.forFeature([ChatMessage, Event, Enrollment]), EventsModule, ModerationModule],
   controllers: [ChatController],
-  providers: [ChatService, ChatGateway],
-  exports: [ChatService, ChatGateway],
+  providers: [ChatService, ChatRealtimeService],
+  exports: [ChatService, ChatRealtimeService],
 })
 export class ChatModule {}

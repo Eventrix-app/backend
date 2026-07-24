@@ -31,11 +31,9 @@ export class JwtAuthGuard implements CanActivate {
   ) {}
 
   async canActivate(context: ExecutionContext): Promise<boolean> {
-    // This guard is registered globally (APP_GUARD), so it also fires for WS gateway
-    // handlers (@SubscribeMessage) — Nest's execution-context pipeline covers HTTP and WS
-    // alike. Its request/header-reading logic only makes sense for HTTP; ChatGateway does
-    // its own token verification once at handshake (handleConnection), so non-HTTP
-    // contexts are a no-op here rather than crashing on a Socket with no `.headers`.
+    // This guard is registered globally (APP_GUARD). Its request/header-reading logic only
+    // makes sense for HTTP — chat no longer runs its own WS gateway (see chat-realtime.service.ts),
+    // but this stays as a defensive no-op for any non-HTTP execution context.
     if (context.getType() !== 'http') {
       return true;
     }

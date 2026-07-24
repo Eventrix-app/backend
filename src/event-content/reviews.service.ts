@@ -1,9 +1,9 @@
-import { ConflictException, ForbiddenException, Injectable } from '@nestjs/common';
+import { ConflictException, ForbiddenException, Injectable, NotFoundException } from '@nestjs/common';
 import { InjectRepository } from '@nestjs/typeorm';
 import { Repository } from 'typeorm';
 import { EventReview } from '../entities/event-review.entity';
 import { Enrollment } from '../entities/enrollment.entity';
-import { CreateReviewDto } from './dto/review.dto';
+import { CreateReviewDto, UpdateReviewDto } from './dto/review.dto';
 
 @Injectable()
 export class ReviewsService {
@@ -52,5 +52,40 @@ export class ReviewsService {
         select: { user: { id: true, fullName: true } },
       })) ?? saved
     );
+  }
+
+  // Author-only — even an admin can't rewrite someone else's words. Admin moderation of a
+  // review's *content* goes through remove() below (or the Reports "action" flow), never edit.
+  async update(eventId: string, reviewId: string, dto: UpdateReviewDto, userId: string): Promise<EventReview> {
+    const review = await this.reviewsRepository.findOne({ where: { id: reviewId, eventId } });
+    if (!review) throw new NotFoundException(`Review ${reviewId} not found`);
+    if (review.userId !== userId) {
+      throw new ForbiddenException('You can only edit your own review');
+    }
+
+    Object.assign(review, dto);
+    const saved = await this.reviewsRepository.save(review);
+    return (
+      (await this.reviewsRepository.findOne({
+        where: { id: saved.id },
+        relations: ['user'],
+        select: { user: { id: true, fullName: true } },
+      })) ?? saved
+    );
+  }
+
+  // Author or admin — deliberately NOT the event's organizer. An organizer being able to
+  // unilaterally delete reviews of their own event would undercut why negative-review
+  // moderation already routes through a neutral admin via the Reports "action" flow instead.
+  async remove(eventId: string, reviewId: string, userId: string, userRoles: string[]): Promise<void> {
+    const review = await this.reviewsRepository.findOne({ where: { id: reviewId, eventId } });
+    if (!review) throw new NotFoundException(`Review ${reviewId} not found`);
+
+    const isAdmin = userRoles.includes('admin');
+    if (!isAdmin && review.userId !== userId) {
+      throw new ForbiddenException('You can only delete your own review');
+    }
+
+    await this.reviewsRepository.delete({ id: reviewId, eventId });
   }
 }
