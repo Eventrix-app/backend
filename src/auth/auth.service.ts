@@ -237,7 +237,7 @@ export class AuthService {
     // Verify the token with the provider and extract the user's profile. Each branch
     // cryptographically verifies the token against the provider itself (signature/audience/
     // issuer/expiry as applicable) rather than trusting whatever the client asserts.
-    const { providerUserId, email, fullName } =
+    const { providerUserId, email, fullName, pictureUrl } =
       provider === 'google'
         ? await this.verifyGoogleToken(token)
         : provider === 'apple'
@@ -258,6 +258,7 @@ export class AuthService {
       user = await this.usersRepository.findOne({ where: { email } }) ?? this.usersRepository.create({
         email,
         fullName: fullName ?? email.split('@')[0],
+        profilePictureUrl: pictureUrl,
         roles: ['user'],
         isEmailVerified: true,
         isPhoneVerified: false,
@@ -272,6 +273,14 @@ export class AuthService {
         accessToken: token,
       });
       await this.authIdentityRepository.save(identity);
+    }
+
+    // Backfill the provider's avatar for an account that doesn't have one yet (e.g. an
+    // existing email/password account linking a social identity for the first time, or one
+    // created before this field was captured) — never overwrite a photo the user already set.
+    if (!user.profilePictureUrl && pictureUrl) {
+      user.profilePictureUrl = pictureUrl;
+      user = await this.usersRepository.save(user);
     }
 
     if (user.isBanned) throw new UnauthorizedException('This account has been suspended');
@@ -290,8 +299,8 @@ export class AuthService {
     };
   }
 
-  private socialProfile(providerUserId: string, email: string, fullName?: string) {
-    return { providerUserId, email, fullName };
+  private socialProfile(providerUserId: string, email: string, fullName?: string, pictureUrl?: string) {
+    return { providerUserId, email, fullName, pictureUrl };
   }
 
   // Verifies the ID token's signature, issuer and expiry via Google's own JWKS (handled
@@ -318,7 +327,7 @@ export class AuthService {
       throw new UnauthorizedException('Invalid Google token');
     }
     if (!payload?.sub || !payload.email) throw new UnauthorizedException('Invalid Google token');
-    return this.socialProfile(payload.sub, payload.email, payload.name);
+    return this.socialProfile(payload.sub, payload.email, payload.name, payload.picture);
   }
 
   // apple-signin-auth's verifyIdToken fetches Apple's public keys and verifies the JWT's
@@ -371,13 +380,22 @@ export class AuthService {
     }
 
     const profileRes = await fetch(
-      `https://graph.facebook.com/me?fields=id,name,email` +
+      `https://graph.facebook.com/me?fields=id,name,email,picture.type(large)` +
         `&access_token=${encodeURIComponent(token)}&appsecret_proof=${appsecretProof}`,
     );
     if (!profileRes.ok) throw new UnauthorizedException('Invalid Facebook token');
-    const data = (await profileRes.json()) as { id: string; name?: string; email?: string; error?: object };
+    const data = (await profileRes.json()) as {
+      id: string;
+      name?: string;
+      email?: string;
+      picture?: { data?: { url?: string; is_silhouette?: boolean } };
+      error?: object;
+    };
     if (data.error || data.id !== debugData.data.user_id) throw new UnauthorizedException('Invalid Facebook token');
-    return this.socialProfile(data.id, data.email ?? `${data.id}@facebook.com`, data.name);
+    // is_silhouette means the user has no real profile photo — Facebook's default generic
+    // avatar isn't worth saving as if it were one.
+    const pictureUrl = data.picture?.data?.is_silhouette ? undefined : data.picture?.data?.url;
+    return this.socialProfile(data.id, data.email ?? `${data.id}@facebook.com`, data.name, pictureUrl);
   }
 
   // SHA-256 of the plaintext OTP — the code itself only ever exists in the email sent to
