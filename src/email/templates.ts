@@ -73,6 +73,17 @@ export function passwordChangedEmail(): RenderedEmail {
   };
 }
 
+export function emailVerificationOtpEmail(otp: string, ttlMinutes: number): RenderedEmail {
+  return {
+    subject: 'Verify your Eventrix email address',
+    html: wrapEmail('Verify your email', `
+      <p>Your email verification code is:</p>
+      <p style="font-size:28px;font-weight:700;letter-spacing:4px;color:${BRAND_COLOR};">${otp}</p>
+      <p>This code expires in ${ttlMinutes} minutes. If you didn't request this, you can ignore this email.</p>
+    `),
+  };
+}
+
 export function passwordResetConfirmationEmail(): RenderedEmail {
   return {
     subject: 'Your Eventrix password was reset',

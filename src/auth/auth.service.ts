@@ -1,4 +1,5 @@
 import {
+  BadRequestException,
   ConflictException,
   Injectable,
   Logger,
@@ -19,8 +20,12 @@ import { JwtPayload, SESSION_TOKEN_TTL_SECONDS } from './jwt.util';
 import { User } from '../entities/user.entity';
 import { AuthIdentity, AuthProvider } from '../entities/auth-identity.entity';
 import { PasswordResetOtp } from '../entities/password-reset-otp.entity';
+import { EmailVerificationOtp } from '../entities/email-verification-otp.entity';
+import { CacheService } from '../common/cache/cache.service';
+import { userMeCacheKey } from '../users/users.service';
 import { EmailService } from '../email/email.service';
 import {
+  emailVerificationOtpEmail,
   passwordChangedEmail,
   passwordResetConfirmationEmail,
   passwordResetOtpEmail,
@@ -63,11 +68,14 @@ export class AuthService {
     private readonly usersRepository: Repository<User>,
     @InjectRepository(PasswordResetOtp)
     private readonly otpRepository: Repository<PasswordResetOtp>,
+    @InjectRepository(EmailVerificationOtp)
+    private readonly emailVerificationOtpRepository: Repository<EmailVerificationOtp>,
     @InjectRepository(AuthIdentity)
     private readonly authIdentityRepository: Repository<AuthIdentity>,
     private readonly jwtService: JwtService,
     private readonly emailService: EmailService,
     private readonly configService: ConfigService,
+    private readonly cache: CacheService,
   ) {}
 
   async login(loginDto: LoginDto): Promise<AuthResponseDto> {
@@ -166,7 +174,6 @@ export class AuthService {
       roles: ['user'],
       bio: JSON.stringify({ username }),
       isEmailVerified: false,
-      isPhoneVerified: false,
       // Registration now happens before the onboarding chain (carousel + interests +
       // location + notification prefs), not after — so a fresh account has not completed
       // it yet. Defaults to false via the entity/column default; PATCH
@@ -261,7 +268,6 @@ export class AuthService {
         profilePictureUrl: pictureUrl,
         roles: ['user'],
         isEmailVerified: true,
-        isPhoneVerified: false,
       });
       if (!user.id) {
         user = await this.usersRepository.save(user);
@@ -477,6 +483,77 @@ export class AuthService {
     await this.otpRepository.delete({ email: match.email });
     this.logger.log(`Password reset successfully for user: ${match.email}`);
     await this.sendPasswordResetEmail(match.email);
+  }
+
+  // Self-service, logged-in only (Settings/Profile "Verify email" action) — unlike
+  // forgot-password, there's no unauthenticated path here, so no email-enumeration concern
+  // and no need to silently no-op on a missing account the way forgotPassword does.
+  async sendEmailVerificationOtp(userId: string): Promise<void> {
+    const user = await this.usersRepository.findOne({ where: { id: userId } });
+    if (!user) {
+      throw new UnauthorizedException('Account no longer exists');
+    }
+    if (user.isEmailVerified) {
+      throw new BadRequestException('Email is already verified');
+    }
+
+    const otp = randomInt(100000, 1000000).toString();
+
+    // One pending OTP per email, same as the password-reset flow.
+    await this.emailVerificationOtpRepository.delete({ email: user.email });
+    await this.emailVerificationOtpRepository.save(
+      this.emailVerificationOtpRepository.create({
+        email: user.email,
+        otpHash: this.hashOtp(otp),
+        expiresAt: new Date(Date.now() + OTP_TTL_MINUTES * 60 * 1000),
+      }),
+    );
+
+    const otpEmail = emailVerificationOtpEmail(otp, OTP_TTL_MINUTES);
+    await this.emailService.send(user.email, otpEmail.subject, otpEmail.html);
+
+    if (!this.emailService.isConfigured) {
+      this.logger.log(`*************************************************`);
+      this.logger.log(`EMAIL VERIFICATION OTP FOR ${user.email}: ${otp}`);
+      this.logger.log(`*************************************************`);
+    }
+  }
+
+  async confirmEmailVerification(userId: string, otp: string): Promise<void> {
+    const user = await this.usersRepository.findOne({ where: { id: userId } });
+    if (!user) {
+      throw new UnauthorizedException('Account no longer exists');
+    }
+    if (user.isEmailVerified) {
+      throw new BadRequestException('Email is already verified');
+    }
+
+    const now = new Date();
+    let match = await this.emailVerificationOtpRepository.findOne({
+      where: { email: user.email, otpHash: this.hashOtp(otp), expiresAt: MoreThan(now) },
+      order: { createdAt: 'DESC' },
+    });
+
+    // Same dev-only bypass as resetPassword, scoped to this user's own pending OTP only.
+    const allowDevOtpBypass = this.configService.get<string>('ALLOW_DEV_OTP_BYPASS') === 'true';
+    if (!match && otp === '123456' && allowDevOtpBypass) {
+      match = await this.emailVerificationOtpRepository.findOne({
+        where: { email: user.email, expiresAt: MoreThan(now) },
+        order: { createdAt: 'DESC' },
+      });
+    }
+
+    if (!match) {
+      throw new UnauthorizedException('Invalid or expired verification code');
+    }
+
+    user.isEmailVerified = true;
+    await this.usersRepository.save(user);
+    await this.emailVerificationOtpRepository.delete({ email: user.email });
+    // Shares users:me:<id> with UsersService.findMe — bust it or the profile screen would
+    // keep showing isEmailVerified: false for the cache's remaining TTL.
+    await this.cache.del(userMeCacheKey(userId));
+    this.logger.log(`Email verified for user: ${user.email}`);
   }
 
   // Logged-in password change (vs. resetPassword's forgot-password/OTP flow) — requires

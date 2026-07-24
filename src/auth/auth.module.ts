@@ -6,6 +6,7 @@ import { AuthService } from './auth.service';
 import { AuthController } from './auth.controller';
 import { User } from '../entities/user.entity';
 import { PasswordResetOtp } from '../entities/password-reset-otp.entity';
+import { EmailVerificationOtp } from '../entities/email-verification-otp.entity';
 import { AuthIdentity } from '../entities/auth-identity.entity';
 import { AdminModule } from '../users/admin/admin.module';
 import { ParticipantModule } from '../users/participant/participant.module';
@@ -14,7 +15,7 @@ import { SESSION_TOKEN_TTL_SECONDS } from './jwt.util';
 
 @Module({
   imports: [
-    TypeOrmModule.forFeature([User, PasswordResetOtp, AuthIdentity]),
+    TypeOrmModule.forFeature([User, PasswordResetOtp, EmailVerificationOtp, AuthIdentity]),
     AdminModule,
     ParticipantModule,
     OrganizerModule,

@@ -23,6 +23,7 @@ export type CurrentUserResponse = {
   lastName: string;
   phoneNumber: string | null;
   profilePictureUrl: string | null;
+  isEmailVerified: boolean;
   bio: string | null;
   location: string | null;
   city: string;
@@ -93,6 +94,7 @@ export class UsersService {
       lastName: lastNameParts.join(' '),
       phoneNumber: user.phoneNumber ?? null,
       profilePictureUrl: user.profilePictureUrl ?? null,
+      isEmailVerified: user.isEmailVerified,
       bio: user.bio ?? null,
       location: user.location ?? null,
       city: meta['city'] || '',

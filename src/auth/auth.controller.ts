@@ -8,6 +8,7 @@ import { CreateUserDto } from './dto/create-user.dto';
 import { ForgotPasswordDto } from './dto/forgot-password.dto';
 import { ResetPasswordDto } from './dto/reset-password.dto';
 import { ChangePasswordDto } from './dto/change-password.dto';
+import { VerifyEmailDto } from './dto/verify-email.dto';
 import { Throttle } from '@nestjs/throttler';
 import { JwtPayload } from './jwt.util';
 import { IsIn, IsString } from 'class-validator';
@@ -79,5 +80,22 @@ export class AuthController {
     @Request() req: Request & { user: JwtPayload },
   ): Promise<void> {
     return await this.authService.changePassword(req.user.id, body.currentPassword, body.newPassword);
+  }
+
+  // Deliberately not @Public(): unlike forgot-password (for someone locked out entirely),
+  // email verification is always for the account you're already logged into — no need to
+  // accept an arbitrary email in the body, which would also reopen the email-enumeration
+  // concern forgot-password's silent no-op exists to avoid.
+  @Post('verify-email/send')
+  async sendEmailVerificationOtp(@Request() req: Request & { user: JwtPayload }): Promise<void> {
+    return await this.authService.sendEmailVerificationOtp(req.user.id);
+  }
+
+  @Post('verify-email/confirm')
+  async confirmEmailVerification(
+    @Body() body: VerifyEmailDto,
+    @Request() req: Request & { user: JwtPayload },
+  ): Promise<void> {
+    return await this.authService.confirmEmailVerification(req.user.id, body.otp);
   }
 }

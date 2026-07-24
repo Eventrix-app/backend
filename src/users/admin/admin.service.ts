@@ -122,7 +122,6 @@ export class AdminService {
       roles: ['admin'],
       bio: JSON.stringify({ username }),
       isEmailVerified: false,
-      isPhoneVerified: false,
     });
 
     const savedUser = await repo.save(user);

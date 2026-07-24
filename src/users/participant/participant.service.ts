@@ -147,7 +147,6 @@ export class ParticipantService {
       roles: ['user'],
       bio: this.buildMeta(dto),
       isEmailVerified: false,
-      isPhoneVerified: false,
     });
 
     const savedUser = await this.usersRepository.save(user);
