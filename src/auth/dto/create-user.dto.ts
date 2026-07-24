@@ -1,4 +1,5 @@
-import { IsEmail, IsNotEmpty, IsOptional, IsString, MinLength } from 'class-validator';
+import { IsDateString, IsEmail, IsNotEmpty, IsOptional, IsString, MaxLength, MinLength } from 'class-validator';
+import { IsAdult } from '../../common/validators/is-adult.validator';
 
 export class CreateUserDto {
   @IsOptional()
@@ -21,4 +22,15 @@ export class CreateUserDto {
   @IsNotEmpty()
   @IsString()
   lastName!: string;
+
+  @IsNotEmpty()
+  @IsDateString()
+  @IsAdult(18)
+  dateOfBirth!: string;
+
+  // See LoginDto.deviceLabel.
+  @IsOptional()
+  @IsString()
+  @MaxLength(120)
+  deviceLabel?: string;
 }

@@ -6,11 +6,16 @@ import helmet from 'helmet';
 import { AppModule } from './app.module';
 import { HttpExceptionFilter } from './common/filters/http-exception.filter';
 import { setupSwagger } from './crud/swagger-helper';
+import { initSentry } from './config/sentry';
 
 // Builds and configures the Nest app without binding a port, so the same setup can be
 // reused by both the traditional long-running server (main.ts) and the Vercel serverless
 // entrypoint (api/index.ts), which must never call app.listen().
 export async function createApp(): Promise<NestExpressApplication> {
+  // Before anything else — captures boot-time failures too (e.g. a bad provider), not
+  // just request-time ones.
+  initSentry();
+
   const app = await NestFactory.create<NestExpressApplication>(AppModule);
 
   // Sets the standard hardening headers (X-Content-Type-Options, X-Frame-Options, HSTS,

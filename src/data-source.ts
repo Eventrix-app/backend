@@ -24,6 +24,10 @@ import { EventScheduleItem } from './entities/event-schedule.entity';
 import { EventAnnouncement } from './entities/event-announcement.entity';
 import { EventReview } from './entities/event-review.entity';
 import { Short } from './entities/short.entity';
+import { UserSession } from './entities/user-session.entity';
+import { DeviceToken } from './entities/device-token.entity';
+import { Report } from './entities/report.entity';
+import { Block } from './entities/block.entity';
 
 const entities = [
   User,
@@ -50,6 +54,10 @@ const entities = [
   EventAnnouncement,
   EventReview,
   Short,
+  UserSession,
+  DeviceToken,
+  Report,
+  Block,
 ];
 
 export const AppDataSource = new DataSource({

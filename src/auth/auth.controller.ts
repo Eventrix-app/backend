@@ -1,5 +1,5 @@
-import { Controller, Post, Body, Request } from '@nestjs/common';
-import { AuthService } from './auth.service';
+import { Controller, Post, Get, Delete, Param, ParseUUIDPipe, Body, Headers, Request } from '@nestjs/common';
+import { AuthService, SessionRecord } from './auth.service';
 import { LoginDto } from './dto/login.dto';
 import { AuthResponseDto } from './dto/auth-response.dto';
 import { Public } from '../common/decorators/public.decorator';
@@ -11,7 +11,7 @@ import { ChangePasswordDto } from './dto/change-password.dto';
 import { VerifyEmailDto } from './dto/verify-email.dto';
 import { Throttle } from '@nestjs/throttler';
 import { JwtPayload } from './jwt.util';
-import { IsIn, IsString } from 'class-validator';
+import { IsIn, IsOptional, IsString, MaxLength } from 'class-validator';
 
 class SocialLoginDto {
   @IsIn(['google', 'apple', 'facebook'])
@@ -19,6 +19,12 @@ class SocialLoginDto {
 
   @IsString()
   token!: string;
+
+  // See LoginDto.deviceLabel.
+  @IsOptional()
+  @IsString()
+  @MaxLength(120)
+  deviceLabel?: string;
 }
 
 // Auth endpoints are unauthenticated by nature, making them the prime target for
@@ -34,20 +40,26 @@ export class AuthController {
 
   @Public()
   @Post('login')
-  async login(@Body() loginDto: LoginDto): Promise<AuthResponseDto> {
-    return await this.authService.login(loginDto);
+  async login(@Body() loginDto: LoginDto, @Headers('user-agent') userAgent?: string): Promise<AuthResponseDto> {
+    return await this.authService.login(loginDto, userAgent);
   }
 
   @Public()
   @Post('register')
-  async register(@Body() createUserDto: CreateUserDto): Promise<AuthResponseDto> {
-    return await this.authService.register(createUserDto);
+  async register(
+    @Body() createUserDto: CreateUserDto,
+    @Headers('user-agent') userAgent?: string,
+  ): Promise<AuthResponseDto> {
+    return await this.authService.register(createUserDto, userAgent);
   }
 
   @Public()
   @Post('social')
-  async socialLogin(@Body() body: SocialLoginDto): Promise<AuthResponseDto> {
-    return this.authService.socialLogin(body.provider, body.token);
+  async socialLogin(
+    @Body() body: SocialLoginDto,
+    @Headers('user-agent') userAgent?: string,
+  ): Promise<AuthResponseDto> {
+    return this.authService.socialLogin(body.provider, body.token, body.deviceLabel, userAgent);
   }
 
   // Deliberately not @Public(): requires a still-valid Bearer token, which
@@ -56,7 +68,7 @@ export class AuthController {
   // Frontend/App.tsx — to keep an actively-used session alive on a sliding 2-day window.
   @Post('refresh')
   async refresh(@Request() req: Request & { user: JwtPayload }): Promise<AuthResponseDto> {
-    return await this.authService.refresh(req.user.id);
+    return await this.authService.refresh(req.user.id, req.user.jti);
   }
 
   @Public()
@@ -97,5 +109,29 @@ export class AuthController {
     @Request() req: Request & { user: JwtPayload },
   ): Promise<void> {
     return await this.authService.confirmEmailVerification(req.user.id, body.otp);
+  }
+
+  // --- Session management (Settings → Active Sessions) ---
+
+  @Get('sessions')
+  async listSessions(@Request() req: Request & { user: JwtPayload }): Promise<SessionRecord[]> {
+    return await this.authService.listSessions(req.user.id, req.user.jti);
+  }
+
+  // Must be declared before 'sessions/:id' below — NestJS matches routes in declaration
+  // order, and a ':id' route declared first would swallow the literal "others" segment as
+  // if it were an id (same gotcha as EventsController's pending-vs-:id ordering).
+  @Delete('sessions/others')
+  async revokeOtherSessions(@Request() req: Request & { user: JwtPayload }): Promise<{ revoked: number }> {
+    const revoked = await this.authService.revokeOtherSessions(req.user.id, req.user.jti);
+    return { revoked };
+  }
+
+  @Delete('sessions/:id')
+  async revokeSession(
+    @Param('id', ParseUUIDPipe) id: string,
+    @Request() req: Request & { user: JwtPayload },
+  ): Promise<void> {
+    await this.authService.revokeSession(req.user.id, id);
   }
 }

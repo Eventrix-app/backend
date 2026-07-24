@@ -32,6 +32,7 @@ import { ChatModule } from './chat/chat.module';
 import { EventContentModule } from './event-content/event-content.module';
 import { GeocodeModule } from './geocode/geocode.module';
 import { ShortsModule } from './shorts/shorts.module';
+import { ModerationModule } from './moderation/moderation.module';
 
 @Module({
   imports: [
@@ -82,6 +83,7 @@ import { ShortsModule } from './shorts/shorts.module';
     EventContentModule,
     GeocodeModule,
     ShortsModule,
+    ModerationModule,
   ],
   controllers: [AppController],
   providers: [

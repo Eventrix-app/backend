@@ -3,6 +3,11 @@ export interface JwtPayload {
   email: string;
   roles: string[];
   full_name: string;
+  // Session id (UserSession.id) — lets a session be looked up and individually revoked
+  // ("log out this device") without a separate token blocklist. Optional so tokens issued
+  // before this field existed keep working (JwtAuthGuard skips the session check when it's
+  // absent) rather than mass-logging-out every existing session on deploy.
+  jti?: string;
   // Standard JWT claim, added automatically by jwtService.sign()/verifyAsync() (seconds
   // since epoch) — never set explicitly when signing, only read back after verification
   // (see JwtAuthGuard's passwordChangedAt check).

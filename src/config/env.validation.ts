@@ -50,6 +50,11 @@ export const validateEnv = (config: Record<string, unknown>) => {
     // storage (correct for a single long-lived process) if unset.
     UPSTASH_REDIS_REST_URL: Joi.string().optional(),
     UPSTASH_REDIS_REST_TOKEN: Joi.string().optional(),
+    // Optional — error/crash reporting (see config/sentry.ts). Unset means Sentry's SDK
+    // simply never sends anything, the same graceful-degradation pattern as every other
+    // optional integration in this app (EmailService, UploadsService, PushService).
+    SENTRY_DSN: Joi.string().optional(),
+    SENTRY_ENVIRONMENT: Joi.string().optional(),
   }).unknown(true);
 
   const { error, value } = schema.validate(config, {

@@ -1,0 +1,77 @@
+import { ExecutionContext, UnauthorizedException } from '@nestjs/common';
+import { Reflector } from '@nestjs/core';
+import { JwtAuthGuard } from './jwt-auth.guard';
+
+function makeContext(authHeader?: string): ExecutionContext {
+  const request = { headers: { authorization: authHeader } } as any;
+  return {
+    getType: () => 'http',
+    getHandler: () => ({}),
+    getClass: () => ({}),
+    switchToHttp: () => ({ getRequest: () => request }),
+  } as unknown as ExecutionContext;
+}
+
+describe('JwtAuthGuard — session revocation', () => {
+  let guard: JwtAuthGuard;
+  let mockJwtService: { verifyAsync: jest.Mock };
+  let mockConfigService: { get: jest.Mock };
+  let mockUsersRepo: { findOne: jest.Mock };
+  let mockSessionsRepo: { findOne: jest.Mock };
+  let reflector: Reflector;
+
+  const basePayload = { id: 'user-1', email: 'u@example.com', roles: ['user'], full_name: 'U', iat: 1000 };
+  const activeUser = { id: 'user-1', isBanned: false, deletedAt: null, passwordChangedAt: null };
+
+  beforeEach(() => {
+    reflector = new Reflector();
+    jest.spyOn(reflector, 'getAllAndOverride').mockReturnValue(false);
+    mockJwtService = { verifyAsync: jest.fn() };
+    mockConfigService = { get: jest.fn().mockReturnValue('test-secret') };
+    mockUsersRepo = { findOne: jest.fn().mockResolvedValue(activeUser) };
+    mockSessionsRepo = { findOne: jest.fn() };
+
+    guard = new JwtAuthGuard(
+      reflector,
+      mockJwtService as any,
+      mockConfigService as any,
+      mockUsersRepo as any,
+      mockSessionsRepo as any,
+    );
+  });
+
+  it('allows a token with no jti through untracked (pre-existing tokens keep working)', async () => {
+    mockJwtService.verifyAsync.mockResolvedValue({ ...basePayload, jti: undefined });
+
+    await expect(guard.canActivate(makeContext('Bearer sometoken'))).resolves.toBe(true);
+    expect(mockSessionsRepo.findOne).not.toHaveBeenCalled();
+  });
+
+  it('allows a token whose session is active and unrevoked', async () => {
+    mockJwtService.verifyAsync.mockResolvedValue({ ...basePayload, jti: 'session-1' });
+    mockSessionsRepo.findOne.mockResolvedValue({ id: 'session-1', userId: 'user-1', revokedAt: null });
+
+    await expect(guard.canActivate(makeContext('Bearer sometoken'))).resolves.toBe(true);
+  });
+
+  it('rejects a token whose session has been revoked', async () => {
+    mockJwtService.verifyAsync.mockResolvedValue({ ...basePayload, jti: 'session-1' });
+    mockSessionsRepo.findOne.mockResolvedValue({ id: 'session-1', userId: 'user-1', revokedAt: new Date() });
+
+    await expect(guard.canActivate(makeContext('Bearer sometoken'))).rejects.toThrow(UnauthorizedException);
+  });
+
+  it('rejects a token whose session no longer exists', async () => {
+    mockJwtService.verifyAsync.mockResolvedValue({ ...basePayload, jti: 'deleted-session' });
+    mockSessionsRepo.findOne.mockResolvedValue(null);
+
+    await expect(guard.canActivate(makeContext('Bearer sometoken'))).rejects.toThrow(UnauthorizedException);
+  });
+
+  it("rejects a token whose jti belongs to a different user's session", async () => {
+    mockJwtService.verifyAsync.mockResolvedValue({ ...basePayload, jti: 'session-1' });
+    mockSessionsRepo.findOne.mockResolvedValue({ id: 'session-1', userId: 'someone-else', revokedAt: null });
+
+    await expect(guard.canActivate(makeContext('Bearer sometoken'))).rejects.toThrow(UnauthorizedException);
+  });
+});

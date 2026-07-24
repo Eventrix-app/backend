@@ -1,14 +1,18 @@
-import { Injectable, NotFoundException } from '@nestjs/common';
+import { Injectable, Logger, NotFoundException } from '@nestjs/common';
 import { InjectRepository } from '@nestjs/typeorm';
-import { Not, Repository } from 'typeorm';
+import { Repository } from 'typeorm';
 import { User } from '../entities/user.entity';
 import { EventCategory } from '../entities/category.entity';
 import { Follow } from '../entities/follow.entity';
+import { Organizer } from '../entities/organizer.entity';
+import { DeviceToken } from '../entities/device-token.entity';
 import { UpdateInterestsDto } from './participant/dto/update-interests.dto';
 import { UpdateLocationDto } from './participant/dto/update-location.dto';
 import { UpdateNotificationPrefsDto } from './participant/dto/update-notification-prefs.dto';
 import { UpdateNotificationChannelsDto } from './participant/dto/update-notification-channels.dto';
 import { CacheService } from '../common/cache/cache.service';
+import { EmailService } from '../email/email.service';
+import { dataExportEmail } from '../email/templates';
 
 // Exported so ParticipantService (a separate service writing to the same `users` row via
 // PATCH /participants/:id) can invalidate the same cache entry this module populates.
@@ -44,6 +48,8 @@ export type CurrentUserResponse = {
 
 @Injectable()
 export class UsersService {
+  private readonly logger = new Logger(UsersService.name);
+
   constructor(
     @InjectRepository(User)
     private readonly usersRepository: Repository<User>,
@@ -51,7 +57,12 @@ export class UsersService {
     private readonly categoryRepository: Repository<EventCategory>,
     @InjectRepository(Follow)
     private readonly followsRepository: Repository<Follow>,
+    @InjectRepository(Organizer)
+    private readonly organizerRepository: Repository<Organizer>,
+    @InjectRepository(DeviceToken)
+    private readonly deviceTokenRepository: Repository<DeviceToken>,
     private readonly cache: CacheService,
+    private readonly emailService: EmailService,
   ) {}
 
   // Participant-specific fields (city, etc.) are JSON-encoded in the `bio` column (see
@@ -157,38 +168,29 @@ export class UsersService {
   }
 
   // Re-registered on every app start/login (see the frontend's push-registration call
-  // site) — the latest device simply overwrites whatever token was stored before, since
-  // this app only supports one active device per account for push purposes.
+  // site) — one row per physical device/app-install (device_tokens), not one slot per
+  // account, so a second device logging in no longer silently steals push notifications
+  // from the first. A push token still uniquely identifies one physical device, so it must
+  // never stay attached to more than one *account* at once — upserting on the unique
+  // `token` column reassigns ownership atomically (evicts whoever else currently holds it
+  // and attaches it to this user) in the same statement, covering a previous user's
+  // session that merely expired or was force-closed rather than explicitly logged out.
   async updatePushToken(userId: string, pushToken: string): Promise<void> {
-    // A push token uniquely identifies one physical device/app install — it must never
-    // stay attached to more than one account at once. Without this, a previous user of
-    // this device whose session merely expired or was force-closed (rather than an
-    // explicit logout, which does call clearPushToken) keeps their own pushToken column
-    // pointing at this device; when a different person then logs in here, both accounts'
-    // rows reference the same token and the earlier user keeps receiving push
-    // notifications meant for them on a device someone else is now using. Evicting it from
-    // whoever else currently holds it makes registering it here exclusive, regardless of
-    // how the previous session ended.
-    await this.usersRepository.update({ pushToken, id: Not(userId) }, { pushToken: null });
-
-    const result = await this.usersRepository.update(userId, { pushToken });
-
-    if (result.affected === 0) {
+    const user = await this.usersRepository.findOne({ where: { id: userId } });
+    if (!user) {
       throw new NotFoundException(`User ${userId} not found`);
     }
-    await this.cache.del(userMeCacheKey(userId));
+    await this.deviceTokenRepository.upsert(
+      { userId, token: pushToken, lastUsedAt: new Date() },
+      ['token'],
+    );
   }
 
-  // Called on logout so a signed-out device stops receiving this account's pushes —
-  // without this, the token (registered per-account, not per-device) would keep
-  // delivering notifications to a device the user is no longer signed into.
-  async clearPushToken(userId: string): Promise<void> {
-    const result = await this.usersRepository.update(userId, { pushToken: null });
-
-    if (result.affected === 0) {
-      throw new NotFoundException(`User ${userId} not found`);
-    }
-    await this.cache.del(userMeCacheKey(userId));
+  // Called on logout so *this* signed-out device stops receiving this account's pushes,
+  // without touching any of the account's other logged-in devices — scoped to the
+  // specific token the caller is holding, not "every token this account has".
+  async clearPushToken(userId: string, pushToken: string): Promise<void> {
+    await this.deviceTokenRepository.delete({ userId, token: pushToken });
   }
 
   // Called from the last screen of the post-login onboarding chain (NotificationPreferences)
@@ -216,5 +218,92 @@ export class UsersService {
       throw new NotFoundException(`User ${userId} not found`);
     }
     await this.cache.del(userMeCacheKey(userId));
+  }
+
+  // Self-service account deletion (Settings → Delete Account). Soft-deletes the user row
+  // (same DeleteDateColumn mechanism AdminService's ban/remove tooling already relies on) —
+  // JwtAuthGuard's live `withDeleted` lookup then rejects this account's still-valid token
+  // on its very next request instead of waiting out the token's remaining TTL. Also
+  // soft-deletes any Organizer profile(s) owned by this user: without that, an admin's
+  // organizer list/detail queries (which join `user`) would keep surfacing a "ghost"
+  // organizer whose account no longer exists.
+  async deleteMe(userId: string): Promise<void> {
+    const user = await this.usersRepository.findOne({ where: { id: userId } });
+    if (!user) {
+      throw new NotFoundException(`User ${userId} not found`);
+    }
+
+    const organizers = await this.organizerRepository.find({ where: { userId } });
+    if (organizers.length > 0) {
+      await this.organizerRepository.softRemove(organizers);
+    }
+
+    // Explicit, not left to the FK's ON DELETE CASCADE — that only fires on a real row
+    // DELETE, and softRemove() below is just an UPDATE setting deleted_at, so it would
+    // never actually trigger for a soft-deleted user.
+    await this.deviceTokenRepository.delete({ userId });
+
+    await this.usersRepository.softRemove(user);
+    await this.cache.del(userMeCacheKey(userId));
+    this.logger.log(`Account self-deleted: ${user.email}`);
+  }
+
+  // Self-service "download my data" (Settings → Data & Privacy). Scoped to the account/
+  // profile data this service directly owns (User columns, interests, organizer profile(s),
+  // follows) rather than reaching across every module in the app (bookings, payments,
+  // reviews, chat) — those live behind their own services/authorization, and a shallow
+  // cross-module join here risks quietly leaking another user's data through a bad query.
+  // The export itself says as much, with a pointer to support for anything broader.
+  async exportMyData(userId: string): Promise<void> {
+    const user = await this.usersRepository.findOne({ where: { id: userId }, relations: ['interests'] });
+    if (!user) {
+      throw new NotFoundException(`User ${userId} not found`);
+    }
+
+    const organizerProfiles = await this.organizerRepository.find({ where: { userId } });
+    const follows = await this.followsRepository.find({ where: { userId } });
+
+    const exportPayload = {
+      exportedAt: new Date().toISOString(),
+      account: {
+        id: user.id,
+        email: user.email,
+        fullName: user.fullName,
+        phoneNumber: user.phoneNumber,
+        dateOfBirth: user.dateOfBirth,
+        gender: user.gender,
+        bio: user.bio,
+        location: user.location,
+        latitude: user.latitude,
+        longitude: user.longitude,
+        profilePictureUrl: user.profilePictureUrl,
+        roles: user.roles,
+        isEmailVerified: user.isEmailVerified,
+        hasCompletedOnboarding: user.hasCompletedOnboarding,
+        notificationPrefs: user.notificationPrefs,
+        pushEnabled: user.pushEnabled,
+        emailEnabled: user.emailEnabled,
+        createdAt: user.createdAt,
+        updatedAt: user.updatedAt,
+      },
+      interests: user.interests?.map((c) => ({ id: c.id, name: c.name })) ?? [],
+      organizerProfiles: organizerProfiles.map((o) => ({
+        id: o.id,
+        companyName: o.companyName,
+        companyDescription: o.companyDescription,
+        companyWebsite: o.companyWebsite,
+        verificationLevel: o.verificationLevel,
+        commissionRate: o.commissionRate,
+        commissionFlatFee: o.commissionFlatFee,
+        createdAt: o.createdAt,
+      })),
+      followedOrganizerIds: follows.map((f) => f.organizerId),
+      note: 'This export covers your account profile, interests, organizer profile (if any), and follows. For booking, payment, or refund records tied to your account, contact support.',
+    };
+
+    const jsonPretty = JSON.stringify(exportPayload, null, 2);
+    const email = dataExportEmail(jsonPretty);
+    await this.emailService.send(user.email, email.subject, email.html);
+    this.logger.log(`Data export emailed to ${user.email}`);
   }
 }

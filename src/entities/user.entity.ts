@@ -80,12 +80,6 @@ export class User {
   @Column({ name: 'banned_reason', type: 'text', nullable: true })
   bannedReason?: string;
 
-  // Single-device Expo push token — re-registered on every app start/login, so the
-  // latest device to call PATCH /users/me/push-token simply overwrites it. Multi-device
-  // support (a device_tokens table) is a v2 concern, not needed for this rollout.
-  @Column({ name: 'push_token', type: 'varchar', nullable: true })
-  pushToken?: string | null;
-
   // Master on/off switches surfaced by SettingsScreen's "Push Notifications"/"Email
   // Notifications" toggles — distinct from notificationPrefs below, which is a set of
   // onboarding content categories. These gate every transactional notification

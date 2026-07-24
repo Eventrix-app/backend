@@ -6,7 +6,10 @@ import { UsersService } from './users.service';
 import { User } from '../entities/user.entity';
 import { EventCategory } from '../entities/category.entity';
 import { Follow } from '../entities/follow.entity';
+import { Organizer } from '../entities/organizer.entity';
+import { DeviceToken } from '../entities/device-token.entity';
 import { UpdateInterestsDto } from './participant/dto/update-interests.dto';
+import { EmailService } from '../email/email.service';
 import { CacheService } from '../common/cache/cache.service';
 
 const CAT_A = { id: 'a0eebc99-9c0b-4ef8-bb6d-6bb9bd380a11', name: 'Music' } as EventCategory;
@@ -40,19 +43,36 @@ describe('UsersService', () => {
   let mockUserRepo: jest.Mocked<any>;
   let mockCategoryRepo: jest.Mocked<any>;
   let mockFollowRepo: jest.Mocked<any>;
+  let mockOrganizerRepo: jest.Mocked<any>;
+  let mockDeviceTokenRepo: jest.Mocked<any>;
   let mockCacheService: jest.Mocked<any>;
+  let mockEmailService: jest.Mocked<any>;
 
   beforeEach(async () => {
     mockUserRepo = {
       findOne: jest.fn(),
       save: jest.fn(),
       update: jest.fn(),
+      softRemove: jest.fn(),
     };
     mockCategoryRepo = {
       findBy: jest.fn(),
     };
     mockFollowRepo = {
       count: jest.fn().mockResolvedValue(0),
+      find: jest.fn().mockResolvedValue([]),
+    };
+    mockOrganizerRepo = {
+      find: jest.fn().mockResolvedValue([]),
+      softRemove: jest.fn(),
+    };
+    mockDeviceTokenRepo = {
+      upsert: jest.fn().mockResolvedValue(undefined),
+      delete: jest.fn().mockResolvedValue(undefined),
+      find: jest.fn().mockResolvedValue([]),
+    };
+    mockEmailService = {
+      send: jest.fn().mockResolvedValue(undefined),
     };
     mockCacheService = {
       get: jest.fn().mockResolvedValue(null),
@@ -68,7 +88,10 @@ describe('UsersService', () => {
         { provide: getRepositoryToken(User), useValue: mockUserRepo },
         { provide: getRepositoryToken(EventCategory), useValue: mockCategoryRepo },
         { provide: getRepositoryToken(Follow), useValue: mockFollowRepo },
+        { provide: getRepositoryToken(Organizer), useValue: mockOrganizerRepo },
+        { provide: getRepositoryToken(DeviceToken), useValue: mockDeviceTokenRepo },
         { provide: CacheService, useValue: mockCacheService },
+        { provide: EmailService, useValue: mockEmailService },
       ],
     }).compile();
 
@@ -282,6 +305,102 @@ describe('UsersService', () => {
     it('throws NotFoundException when user does not exist', async () => {
       mockUserRepo.update.mockResolvedValue({ affected: 0 });
       await expect(service.completeOnboarding('missing')).rejects.toThrow(NotFoundException);
+    });
+  });
+
+  // ─── updatePushToken / clearPushToken (multi-device) ──────────────────────
+
+  describe('updatePushToken', () => {
+    it('upserts a device_tokens row keyed on the unique token column', async () => {
+      mockUserRepo.findOne.mockResolvedValue(makeUser());
+
+      await service.updatePushToken('user-uuid', 'ExponentPushToken[abc]');
+
+      expect(mockDeviceTokenRepo.upsert).toHaveBeenCalledWith(
+        expect.objectContaining({ userId: 'user-uuid', token: 'ExponentPushToken[abc]' }),
+        ['token'],
+      );
+    });
+
+    it('throws NotFoundException when the user does not exist', async () => {
+      mockUserRepo.findOne.mockResolvedValue(null);
+      await expect(service.updatePushToken('missing', 'tok')).rejects.toThrow(NotFoundException);
+      expect(mockDeviceTokenRepo.upsert).not.toHaveBeenCalled();
+    });
+  });
+
+  describe('clearPushToken', () => {
+    it('deletes only the row matching this user AND this specific token', async () => {
+      await service.clearPushToken('user-uuid', 'ExponentPushToken[abc]');
+
+      expect(mockDeviceTokenRepo.delete).toHaveBeenCalledWith({
+        userId: 'user-uuid',
+        token: 'ExponentPushToken[abc]',
+      });
+    });
+  });
+
+  // ─── deleteMe service method ───────────────────────────────────────────────
+
+  describe('deleteMe', () => {
+    it('soft-removes the user and deletes all of their registered device tokens', async () => {
+      const user = makeUser();
+      mockUserRepo.findOne.mockResolvedValue(user);
+      mockOrganizerRepo.find.mockResolvedValue([]);
+
+      await service.deleteMe('user-uuid');
+
+      expect(mockUserRepo.softRemove).toHaveBeenCalledWith(user);
+      expect(mockDeviceTokenRepo.delete).toHaveBeenCalledWith({ userId: 'user-uuid' });
+    });
+
+    it('also soft-removes any Organizer profile(s) owned by the user', async () => {
+      const user = makeUser();
+      const organizerRow = { id: 'org-1', userId: 'user-uuid' };
+      mockUserRepo.findOne.mockResolvedValue(user);
+      mockOrganizerRepo.find.mockResolvedValue([organizerRow]);
+
+      await service.deleteMe('user-uuid');
+
+      expect(mockOrganizerRepo.softRemove).toHaveBeenCalledWith([organizerRow]);
+    });
+
+    it('does not touch the Organizer repo when the user has no organizer profile', async () => {
+      mockUserRepo.findOne.mockResolvedValue(makeUser());
+      mockOrganizerRepo.find.mockResolvedValue([]);
+
+      await service.deleteMe('user-uuid');
+
+      expect(mockOrganizerRepo.softRemove).not.toHaveBeenCalled();
+    });
+
+    it('throws NotFoundException when user does not exist', async () => {
+      mockUserRepo.findOne.mockResolvedValue(null);
+      await expect(service.deleteMe('missing')).rejects.toThrow(NotFoundException);
+    });
+  });
+
+  // ─── exportMyData service method ───────────────────────────────────────────
+
+  describe('exportMyData', () => {
+    it('emails a JSON export containing the account profile to the user\'s own address', async () => {
+      const user = makeUser({ email: 'export-me@example.com', interests: [CAT_A] });
+      mockUserRepo.findOne.mockResolvedValue(user);
+      mockOrganizerRepo.find.mockResolvedValue([]);
+      mockFollowRepo.find.mockResolvedValue([]);
+
+      await service.exportMyData('user-uuid');
+
+      expect(mockEmailService.send).toHaveBeenCalledTimes(1);
+      const [to, , html] = mockEmailService.send.mock.calls[0];
+      expect(to).toBe('export-me@example.com');
+      expect(html).toContain('export-me@example.com');
+      expect(html).toContain(CAT_A.id);
+    });
+
+    it('throws NotFoundException when user does not exist', async () => {
+      mockUserRepo.findOne.mockResolvedValue(null);
+      await expect(service.exportMyData('missing')).rejects.toThrow(NotFoundException);
     });
   });
 });

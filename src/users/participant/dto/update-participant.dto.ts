@@ -7,6 +7,7 @@ import {
   MinLength,
   IsUrl,
 } from 'class-validator';
+import { IsAdult } from '../../../common/validators/is-adult.validator';
 
 export class UpdateParticipantDto {
   @IsOptional()
@@ -36,6 +37,7 @@ export class UpdateParticipantDto {
 
   @IsOptional()
   @IsString()
+  @IsAdult(18)
   dateOfBirth!: string;
 
   @IsOptional()

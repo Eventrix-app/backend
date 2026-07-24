@@ -6,10 +6,12 @@ import {
   HttpCode,
   HttpStatus,
   Patch,
+  Post,
   Put,
   Request,
 } from '@nestjs/common';
 import { ApiTags } from '@nestjs/swagger';
+import { Throttle } from '@nestjs/throttler';
 import { JwtPayload } from '../auth/jwt.util';
 import { UpdateInterestsDto } from './participant/dto/update-interests.dto';
 import { UpdateLocationDto } from './participant/dto/update-location.dto';
@@ -70,11 +72,17 @@ export class UsersController {
     await this.usersService.updatePushToken(req.user.id, dto.pushToken);
   }
 
-  // Called on logout — see UsersService.clearPushToken for why this matters.
+  // Called on logout — see UsersService.clearPushToken for why this matters. Takes the
+  // token in the body (not implicit) since push tokens are now multi-device: this must
+  // clear only the calling device's registration, not every device this account is
+  // signed in on.
   @Delete('me/push-token')
   @HttpCode(HttpStatus.NO_CONTENT)
-  async clearMyPushToken(@Request() req: Request & { user: JwtPayload }) {
-    await this.usersService.clearPushToken(req.user.id);
+  async clearMyPushToken(
+    @Body() dto: UpdatePushTokenDto,
+    @Request() req: Request & { user: JwtPayload },
+  ) {
+    await this.usersService.clearPushToken(req.user.id, dto.pushToken);
   }
 
   @Patch('me/notification-channels')
@@ -84,5 +92,26 @@ export class UsersController {
     @Request() req: Request & { user: JwtPayload },
   ) {
     await this.usersService.updateNotificationChannels(req.user.id, dto);
+  }
+
+  // Self-service account deletion (Settings → Delete Account). Works for any role
+  // (participant/organizer/admin) — unlike ParticipantController's DELETE /participants/:id,
+  // this isn't scoped to accounts carrying the 'user' role.
+  @Delete('me')
+  @HttpCode(HttpStatus.NO_CONTENT)
+  async deleteMe(@Request() req: Request & { user: JwtPayload }) {
+    await this.usersService.deleteMe(req.user.id);
+  }
+
+  // Self-service data export (Settings → Download My Data). Emails a JSON copy to the
+  // account's own registered address rather than returning it in the response — nothing
+  // for a client to store/display, and it's delivered to an address we've already verified
+  // control of. Throttled tighter than this controller's other routes since it triggers an
+  // outbound email send per call.
+  @Throttle({ default: { limit: 3, ttl: 3600000 } })
+  @Post('me/export')
+  @HttpCode(HttpStatus.NO_CONTENT)
+  async exportMyData(@Request() req: Request & { user: JwtPayload }) {
+    await this.usersService.exportMyData(req.user.id);
   }
 }

@@ -2,8 +2,11 @@ import {
   announcementEmail,
   bookingConfirmedEmail,
   eventCancelledEmail,
+  eventChangedEmail,
   organizerFollowedEmail,
   organizerVerificationRejectedEmail,
+  refundStatusEmail,
+  waitlistPromotedEmail,
   welcomeEmail,
 } from './templates';
 
@@ -42,5 +45,57 @@ describe('email templates — HTML injection in interpolated values', () => {
   it('escapes a malicious admin-typed rejection reason', () => {
     const { html } = organizerVerificationRejectedEmail(XSS);
     expect(html).not.toContain(XSS);
+  });
+});
+
+// Regression tests for deep-linking (Frontend/src/navigation/linking.ts): when an id is
+// available, the email should render a real eventrix:// link, not just static "open the
+// app" text — and must keep working (backward-compatible signatures) for every existing
+// call site that doesn't have an id to pass.
+describe('email templates — deep links', () => {
+  it('bookingConfirmedEmail renders a booking deep link when enrollmentId is provided', () => {
+    const { html } = bookingConfirmedEmail('Music Fest', 'REF123', 2, 'enr-abc-123');
+    expect(html).toContain('eventrix://booking/enr-abc-123');
+  });
+
+  it('bookingConfirmedEmail falls back to plain text when enrollmentId is omitted', () => {
+    const { html } = bookingConfirmedEmail('Music Fest', 'REF123', 2);
+    expect(html).not.toContain('eventrix://');
+    expect(html).toContain('Open the');
+  });
+
+  it('eventCancelledEmail renders an event deep link when eventId is provided', () => {
+    const { html } = eventCancelledEmail('Music Fest', 'Venue unavailable', 'evt-xyz-789');
+    expect(html).toContain('eventrix://event/evt-xyz-789');
+  });
+
+  it('waitlistPromotedEmail renders a booking deep link when enrollmentId is provided', () => {
+    const { html } = waitlistPromotedEmail('enr-def-456');
+    expect(html).toContain('eventrix://booking/enr-def-456');
+  });
+
+  it('refundStatusEmail renders a booking deep link for a non-"requested" status', () => {
+    const { html } = refundStatusEmail('processed', 'enr-ghi-789');
+    expect(html).toContain('eventrix://booking/enr-ghi-789');
+  });
+
+  it('refundStatusEmail omits the deep link for the initial "requested" status regardless of enrollmentId', () => {
+    const { html } = refundStatusEmail('requested', 'enr-ghi-789');
+    expect(html).not.toContain('eventrix://');
+  });
+
+  it('eventChangedEmail renders an event deep link when eventId is provided', () => {
+    const { html } = eventChangedEmail('evt-jkl-321');
+    expect(html).toContain('eventrix://event/evt-jkl-321');
+  });
+
+  it('eventChangedEmail falls back to plain text when eventId is omitted', () => {
+    const { html } = eventChangedEmail();
+    expect(html).not.toContain('eventrix://');
+  });
+
+  it('URL-encodes an id so it can never break out of the href attribute', () => {
+    const { html } = eventCancelledEmail('Music Fest', undefined, '"><script>alert(1)</script>');
+    expect(html).not.toContain('<script>alert(1)</script>');
   });
 });

@@ -6,7 +6,7 @@ import {
   UnauthorizedException,
 } from '@nestjs/common';
 import { InjectRepository } from '@nestjs/typeorm';
-import { MoreThan, Repository } from 'typeorm';
+import { IsNull, MoreThan, Not, Repository } from 'typeorm';
 import * as bcrypt from 'bcryptjs';
 import { createHash, createHmac, randomInt, timingSafeEqual } from 'crypto';
 import { JwtService } from '@nestjs/jwt';
@@ -21,6 +21,7 @@ import { User } from '../entities/user.entity';
 import { AuthIdentity, AuthProvider } from '../entities/auth-identity.entity';
 import { PasswordResetOtp } from '../entities/password-reset-otp.entity';
 import { EmailVerificationOtp } from '../entities/email-verification-otp.entity';
+import { UserSession } from '../entities/user-session.entity';
 import { CacheService } from '../common/cache/cache.service';
 import { userMeCacheKey } from '../users/users.service';
 import { EmailService } from '../email/email.service';
@@ -35,6 +36,15 @@ import {
 const BCRYPT_PREFIXES = ['$2a$', '$2b$', '$2y$'];
 const BCRYPT_ROUNDS = 10;
 const OTP_TTL_MINUTES = 10;
+
+export interface SessionRecord {
+  id: string;
+  deviceLabel: string | null;
+  userAgent: string | null;
+  createdAt: Date;
+  lastSeenAt: Date;
+  isCurrent: boolean;
+}
 
 // Precomputed bcrypt hash of a value no real password will ever equal — used to burn the
 // same ~ms of CPU time login() spends on a real bcrypt.compare() when the email doesn't
@@ -72,13 +82,39 @@ export class AuthService {
     private readonly emailVerificationOtpRepository: Repository<EmailVerificationOtp>,
     @InjectRepository(AuthIdentity)
     private readonly authIdentityRepository: Repository<AuthIdentity>,
+    @InjectRepository(UserSession)
+    private readonly sessionsRepository: Repository<UserSession>,
     private readonly jwtService: JwtService,
     private readonly emailService: EmailService,
     private readonly configService: ConfigService,
     private readonly cache: CacheService,
   ) {}
 
-  async login(loginDto: LoginDto): Promise<AuthResponseDto> {
+  // One row per login/register/social-login — its id becomes the token's `jti` claim, so
+  // this specific session (and only this one) can later be revoked from Settings → Active
+  // Sessions without invalidating the user's other logged-in devices.
+  private async createSession(userId: string, deviceLabel?: string, userAgent?: string): Promise<string> {
+    const session = this.sessionsRepository.create({
+      userId,
+      deviceLabel: deviceLabel || null,
+      userAgent: userAgent || null,
+      lastSeenAt: new Date(),
+    });
+    const saved = await this.sessionsRepository.save(session);
+    return saved.id;
+  }
+
+  // Called on both password-change paths (self-service and forgot-password/OTP) — a
+  // password change is exactly the moment a leaked/stolen session should stop working
+  // everywhere, not just on whichever device made the change. This keeps Settings → Active
+  // Sessions truthful with what JwtAuthGuard's own passwordChangedAt check already does
+  // (silently reject every pre-existing token) — without it, a revoked-in-spirit session
+  // would still show up as "active" in that list until its token separately expired.
+  private async revokeAllSessions(userId: string): Promise<void> {
+    await this.sessionsRepository.update({ userId, revokedAt: IsNull() }, { revokedAt: new Date() });
+  }
+
+  async login(loginDto: LoginDto, userAgent?: string): Promise<AuthResponseDto> {
     const { email, password } = loginDto;
 
     const user = await this.usersRepository.findOne({ where: { email } });
@@ -132,12 +168,14 @@ export class AuthService {
     }
 
     const userRoles = user.roles?.length ? user.roles : ['user'];
+    const sessionId = await this.createSession(user.id, loginDto.deviceLabel, userAgent);
 
     const payload: JwtPayload = {
       id: user.id,
       email: user.email,
       roles: userRoles,
       full_name: user.fullName || '',
+      jti: sessionId,
     };
 
     const token = this.jwtService.sign(payload);
@@ -154,7 +192,7 @@ export class AuthService {
     };
   }
 
-  async register(dto: CreateUserDto): Promise<AuthResponseDto> {
+  async register(dto: CreateUserDto, userAgent?: string): Promise<AuthResponseDto> {
     const existing = await this.usersRepository.findOne({
       where: { email: dto.email },
     });
@@ -171,6 +209,7 @@ export class AuthService {
       email: dto.email,
       fullName,
       passwordHash,
+      dateOfBirth: dto.dateOfBirth,
       roles: ['user'],
       bio: JSON.stringify({ username }),
       isEmailVerified: false,
@@ -186,12 +225,14 @@ export class AuthService {
     await this.emailService.send(saved.email, welcome.subject, welcome.html);
 
     const savedRoles = saved.roles?.length ? saved.roles : ['user'];
+    const sessionId = await this.createSession(saved.id, dto.deviceLabel, userAgent);
 
     const payload: JwtPayload = {
       id: saved.id,
       email: saved.email,
       roles: savedRoles,
       full_name: saved.fullName || '',
+      jti: sessionId,
     };
 
     const token = this.jwtService.sign(payload);
@@ -214,10 +255,20 @@ export class AuthService {
   // banned/deleted, so no password check is needed here. Re-reads the user row (rather than
   // trusting the old token's payload) so roles/name changes since the last login are picked
   // up on refresh instead of persisting stale claims for another 2 days.
-  async refresh(userId: string): Promise<AuthResponseDto> {
+  //
+  // Reuses the SAME session (jti) rather than creating a new one — this is a sliding-TTL
+  // renewal of an existing session (called on every app foreground/launch), not a new
+  // login, so it must not spawn a fresh "device" entry in Settings → Active Sessions every
+  // time. sessionId is undefined only for a pre-jti token (see JwtPayload.jti); such a
+  // token refreshes untracked, same graceful-degradation as the guard's own check.
+  async refresh(userId: string, sessionId?: string): Promise<AuthResponseDto> {
     const user = await this.usersRepository.findOne({ where: { id: userId } });
     if (!user) {
       throw new UnauthorizedException('Account no longer exists');
+    }
+
+    if (sessionId) {
+      await this.sessionsRepository.update({ id: sessionId, userId }, { lastSeenAt: new Date() });
     }
 
     const userRoles = user.roles?.length ? user.roles : ['user'];
@@ -226,6 +277,7 @@ export class AuthService {
       email: user.email,
       roles: userRoles,
       full_name: user.fullName || '',
+      jti: sessionId,
     };
 
     return {
@@ -240,7 +292,12 @@ export class AuthService {
     };
   }
 
-  async socialLogin(provider: 'google' | 'apple' | 'facebook', token: string): Promise<AuthResponseDto> {
+  async socialLogin(
+    provider: 'google' | 'apple' | 'facebook',
+    token: string,
+    deviceLabel?: string,
+    userAgent?: string,
+  ): Promise<AuthResponseDto> {
     // Verify the token with the provider and extract the user's profile. Each branch
     // cryptographically verifies the token against the provider itself (signature/audience/
     // issuer/expiry as applicable) rather than trusting whatever the client asserts.
@@ -292,7 +349,14 @@ export class AuthService {
     if (user.isBanned) throw new UnauthorizedException('This account has been suspended');
 
     const userRoles = user.roles?.length ? user.roles : ['user'];
-    const payload: JwtPayload = { id: user.id, email: user.email, roles: userRoles, full_name: user.fullName || '' };
+    const sessionId = await this.createSession(user.id, deviceLabel, userAgent);
+    const payload: JwtPayload = {
+      id: user.id,
+      email: user.email,
+      roles: userRoles,
+      full_name: user.fullName || '',
+      jti: sessionId,
+    };
     return {
       accessToken: this.jwtService.sign(payload),
       id: user.id,
@@ -481,6 +545,7 @@ export class AuthService {
     user.passwordChangedAt = new Date();
     await this.usersRepository.save(user);
     await this.otpRepository.delete({ email: match.email });
+    await this.revokeAllSessions(user.id);
     this.logger.log(`Password reset successfully for user: ${match.email}`);
     await this.sendPasswordResetEmail(match.email);
   }
@@ -577,6 +642,7 @@ export class AuthService {
     user.passwordHash = await bcrypt.hash(newPassword, BCRYPT_ROUNDS);
     user.passwordChangedAt = new Date();
     await this.usersRepository.save(user);
+    await this.revokeAllSessions(user.id);
     this.logger.log(`Password changed for user: ${user.email}`);
     await this.sendPasswordChangedEmail(user.email);
   }
@@ -595,5 +661,43 @@ export class AuthService {
   private async sendPasswordResetEmail(email: string): Promise<void> {
     const resetConfirmation = passwordResetConfirmationEmail();
     await this.emailService.send(email, resetConfirmation.subject, resetConfirmation.html);
+  }
+
+  // --- Session management (Settings → Active Sessions) ---
+
+  async listSessions(userId: string, currentSessionId?: string): Promise<SessionRecord[]> {
+    const sessions = await this.sessionsRepository.find({
+      where: { userId, revokedAt: IsNull() },
+      order: { lastSeenAt: 'DESC' },
+    });
+    return sessions.map((s) => ({
+      id: s.id,
+      deviceLabel: s.deviceLabel ?? null,
+      userAgent: s.userAgent ?? null,
+      createdAt: s.createdAt,
+      lastSeenAt: s.lastSeenAt,
+      isCurrent: s.id === currentSessionId,
+    }));
+  }
+
+  // Deliberately silent (no error) if the session doesn't exist or was already revoked —
+  // "log out this device" reaching the same end state either way isn't worth surfacing as
+  // a failure to the caller. The `userId` scoping in the WHERE is what actually matters:
+  // it's what stops one account from revoking another's session by guessing an id.
+  async revokeSession(userId: string, sessionId: string): Promise<void> {
+    await this.sessionsRepository.update({ id: sessionId, userId, revokedAt: IsNull() }, { revokedAt: new Date() });
+  }
+
+  // "Log out other devices" — revokes every one of this user's active sessions except the
+  // one making the request. If the caller's own token predates the jti field (see
+  // JwtPayload.jti), there's no "current" session id to protect, so every session is
+  // revoked, including — on its next request — the caller's own; that's the correct
+  // outcome for a token this app can't otherwise distinguish from any other device's.
+  async revokeOtherSessions(userId: string, currentSessionId?: string): Promise<number> {
+    const result = await this.sessionsRepository.update(
+      { userId, revokedAt: IsNull(), id: Not(currentSessionId ?? '') },
+      { revokedAt: new Date() },
+    );
+    return result.affected ?? 0;
   }
 }

@@ -8,9 +8,16 @@ import { UsersService } from './users.service';
 import { User } from '../entities/user.entity';
 import { EventCategory } from '../entities/category.entity';
 import { Follow } from '../entities/follow.entity';
+import { Organizer } from '../entities/organizer.entity';
+import { DeviceToken } from '../entities/device-token.entity';
 
 @Module({
-  imports: [TypeOrmModule.forFeature([User, EventCategory, Follow]), AdminModule, OrganizerModule, ParticipantModule],
+  imports: [
+    TypeOrmModule.forFeature([User, EventCategory, Follow, Organizer, DeviceToken]),
+    AdminModule,
+    OrganizerModule,
+    ParticipantModule,
+  ],
   controllers: [UsersController],
   providers: [UsersService],
   exports: [AdminModule, OrganizerModule, ParticipantModule],

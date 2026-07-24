@@ -14,6 +14,7 @@ import { Request } from 'express';
 import { IS_PUBLIC_KEY } from '../../common/decorators/public.decorator';
 import { JwtPayload } from '../jwt.util';
 import { User } from '../../entities/user.entity';
+import { UserSession } from '../../entities/user-session.entity';
 
 @Injectable()
 export class JwtAuthGuard implements CanActivate {
@@ -25,6 +26,8 @@ export class JwtAuthGuard implements CanActivate {
     private readonly configService: ConfigService,
     @InjectRepository(User)
     private readonly usersRepository: Repository<User>,
+    @InjectRepository(UserSession)
+    private readonly sessionsRepository: Repository<UserSession>,
   ) {}
 
   async canActivate(context: ExecutionContext): Promise<boolean> {
@@ -100,6 +103,20 @@ export class JwtAuthGuard implements CanActivate {
         payload.iat * 1000 < user.passwordChangedAt.getTime()
       ) {
         throw new UnauthorizedException('Session expired — please log in again');
+      }
+
+      // Per-session revocation ("log out this device" / "log out other devices" in
+      // Settings). `jti` is optional so tokens issued before this field existed keep
+      // working untracked rather than mass-logging-out every session on deploy — only
+      // tokens that do carry one are held to this check.
+      if (payload.jti) {
+        const session = await this.sessionsRepository.findOne({
+          where: { id: payload.jti },
+          select: ['id', 'userId', 'revokedAt'],
+        });
+        if (!session || session.userId !== payload.id || session.revokedAt) {
+          throw new UnauthorizedException('This session has been signed out');
+        }
       }
 
       // Attach the verified payload for downstream handlers (e.g. RolesGuard, @GetUser())

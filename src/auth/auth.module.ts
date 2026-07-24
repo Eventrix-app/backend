@@ -8,6 +8,7 @@ import { User } from '../entities/user.entity';
 import { PasswordResetOtp } from '../entities/password-reset-otp.entity';
 import { EmailVerificationOtp } from '../entities/email-verification-otp.entity';
 import { AuthIdentity } from '../entities/auth-identity.entity';
+import { UserSession } from '../entities/user-session.entity';
 import { AdminModule } from '../users/admin/admin.module';
 import { ParticipantModule } from '../users/participant/participant.module';
 import { OrganizerModule } from '../users/organizer/organizer.module';
@@ -15,7 +16,7 @@ import { SESSION_TOKEN_TTL_SECONDS } from './jwt.util';
 
 @Module({
   imports: [
-    TypeOrmModule.forFeature([User, PasswordResetOtp, EmailVerificationOtp, AuthIdentity]),
+    TypeOrmModule.forFeature([User, PasswordResetOtp, EmailVerificationOtp, AuthIdentity, UserSession]),
     AdminModule,
     ParticipantModule,
     OrganizerModule,
@@ -34,7 +35,8 @@ import { SESSION_TOKEN_TTL_SECONDS } from './jwt.util';
   controllers: [AuthController],
   providers: [AuthService],
   // TypeOrmModule re-exported so JwtAuthGuard (registered globally in AppModule, which
-  // imports this module) can inject the User repository for its live ban check.
+  // imports this module) can inject the User repository for its live ban check, and the
+  // UserSession repository for its per-session revocation check.
   exports: [AuthService, TypeOrmModule],
 })
 export class AuthModule {}

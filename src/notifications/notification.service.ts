@@ -3,6 +3,7 @@ import { InjectRepository } from '@nestjs/typeorm';
 import { IsNull, Repository } from 'typeorm';
 import { NotificationJob, NotificationJobStatus, NotificationType } from '../entities/notification-job.entity';
 import { User } from '../entities/user.entity';
+import { DeviceToken } from '../entities/device-token.entity';
 import { EmailService } from '../email/email.service';
 import { PushService } from '../push/push.service';
 import {
@@ -36,6 +37,8 @@ export class NotificationService {
     private readonly notificationJobsRepository: Repository<NotificationJob>,
     @InjectRepository(User)
     private readonly usersRepository: Repository<User>,
+    @InjectRepository(DeviceToken)
+    private readonly deviceTokenRepository: Repository<DeviceToken>,
     private readonly emailService: EmailService,
     private readonly pushService: PushService,
   ) {}
@@ -78,12 +81,17 @@ export class NotificationService {
 
   private async sendPushForJob(user: User | null, type: NotificationType, payload: Record<string, unknown>): Promise<void> {
     try {
-      if (!user?.pushToken || user.pushEnabled === false) return;
+      if (!user || user.pushEnabled === false) return;
+      const devices = await this.deviceTokenRepository.find({ where: { userId: user.id } });
+      if (devices.length === 0) return;
       const { title, body } = this.describe(type, payload);
       // type is included alongside the raw payload so the app's notification-tap handler
       // can deep-link (EventDetails/Bookings/TicketDetails) without re-deriving it from
-      // title/body text.
-      await this.pushService.send(user.pushToken, title, body, { type, ...payload });
+      // title/body text. Fanned out to every registered device (not just one) — a user
+      // signed in on two phones expects a push on both, not just whichever logged in most
+      // recently. PushService.send() never rejects (it catches internally), so one dead/
+      // uninstalled device's token can't suppress delivery to the rest.
+      await Promise.all(devices.map((d) => this.pushService.send(d.token, title, body, { type, ...payload })));
     } catch (err) {
       this.logger.warn(`Failed to push notification [${type}] to user ${user?.id}: ${err instanceof Error ? err.message : String(err)}`);
     }
@@ -257,19 +265,26 @@ export class NotificationService {
   private describeEmail(type: NotificationType, payload: Record<string, unknown>): RenderedEmail {
     switch (type) {
       case NotificationType.EVENT_CHANGED:
-        return eventChangedEmail();
+        return eventChangedEmail(payload['eventId'] ? String(payload['eventId']) : undefined);
       case NotificationType.WAITLIST_PROMOTED:
-        return waitlistPromotedEmail();
+        return waitlistPromotedEmail(payload['enrollmentId'] ? String(payload['enrollmentId']) : undefined);
       case NotificationType.REFUND_STATUS:
-        return refundStatusEmail(String(payload['status'] ?? 'updated'));
+        return refundStatusEmail(
+          String(payload['status'] ?? 'updated'),
+          payload['enrollmentId'] ? String(payload['enrollmentId']) : undefined,
+        );
       case NotificationType.ANNOUNCEMENT:
-        return announcementEmail(String(payload['title'] ?? 'New announcement'));
+        return announcementEmail(
+          String(payload['title'] ?? 'New announcement'),
+          payload['eventId'] ? String(payload['eventId']) : undefined,
+        );
       case NotificationType.ORGANIZER_FOLLOWED:
         return organizerFollowedEmail(String(payload['followerName'] ?? 'Someone'));
       case NotificationType.EVENT_CANCELLED:
         return eventCancelledEmail(
           String(payload['eventTitle'] ?? 'An event you booked'),
           payload['reason'] ? String(payload['reason']) : undefined,
+          payload['eventId'] ? String(payload['eventId']) : undefined,
         );
       case NotificationType.ORGANIZER_VERIFICATION_APPROVED:
         return organizerVerificationApprovedEmail();
@@ -280,6 +295,7 @@ export class NotificationService {
           String(payload['eventTitle'] ?? 'your event'),
           String(payload['bookingReference'] ?? ''),
           Number(payload['quantity'] ?? 1),
+          payload['enrollmentId'] ? String(payload['enrollmentId']) : undefined,
         );
       default: {
         const { title, body } = this.describe(type, payload);

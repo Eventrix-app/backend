@@ -28,6 +28,20 @@ describe('OrganizerService', () => {
             entityClass === Organizer ? mockOrganizersRepo.findOne(opts) : mockUsersRepo.findOne(opts),
           ),
           save: jest.fn((entity: any) => (entity instanceof Object && 'roles' in entity ? mockUsersRepo.save(entity) : mockOrganizersRepo.save(entity))),
+          // approveVerification/rejectVerification use createQueryBuilder (INNER JOIN +
+          // pessimistic_write lock) instead of findOne — see the comment in organizer.service.ts
+          // on why find()/findOne()'s automatic LEFT JOIN can't be combined with a row lock.
+          // getOne() forwards to the same mockOrganizersRepo.findOne() every other test in
+          // this file already configures, so both query paths return the same fixture.
+          createQueryBuilder: jest.fn(() => {
+            const builder: any = {
+              innerJoinAndSelect: jest.fn(() => builder),
+              where: jest.fn(() => builder),
+              setLock: jest.fn(() => builder),
+              getOne: jest.fn(() => mockOrganizersRepo.findOne()),
+            };
+            return builder;
+          }),
         }),
       ),
     };

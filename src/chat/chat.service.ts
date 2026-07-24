@@ -1,8 +1,9 @@
 import { Injectable } from '@nestjs/common';
 import { InjectRepository } from '@nestjs/typeorm';
-import { Repository } from 'typeorm';
+import { In, Not, Repository } from 'typeorm';
 import { ChatMessage } from '../entities/chat-message.entity';
 import { EventsService } from '../events/events.service';
+import { BlocksService } from '../moderation/blocks.service';
 
 export interface ChatMessageRecord {
   id: string;
@@ -21,6 +22,7 @@ export class ChatService {
     @InjectRepository(ChatMessage)
     private readonly chatMessagesRepository: Repository<ChatMessage>,
     private readonly eventsService: EventsService,
+    private readonly blocksService: BlocksService,
   ) {}
 
   private mapToRecord(message: ChatMessage): ChatMessageRecord {
@@ -47,6 +49,12 @@ export class ChatService {
   // Oldest-first for chat UI display; page 1 is the most recent DEFAULT_HISTORY_LIMIT
   // messages, matching the socket's "join room, backfill recent history" flow rather than
   // typical newest-first list pagination.
+  //
+  // Filtered at the query level (not post-fetch) so blocking still returns a full page —
+  // filtering after the fact would silently under-fill a page whenever a blocked user had
+  // posted recently, with no way to tell "quiet room" from "someone I blocked was chatty."
+  // Real-time messages pushed over the socket (ChatGateway) are NOT filtered by block yet —
+  // this only covers the history backfill a client loads on opening the room.
   async getHistory(
     eventId: string,
     userId: string | undefined,
@@ -56,8 +64,9 @@ export class ChatService {
   ): Promise<ChatMessageRecord[]> {
     await this.assertEventVisible(eventId, userId, userRoles);
     const skip = (page - 1) * limit;
+    const blockedUserIds = userId ? await this.blocksService.getBlockedUserIds(userId) : [];
     const messages = await this.chatMessagesRepository.find({
-      where: { eventId },
+      where: blockedUserIds.length > 0 ? { eventId, userId: Not(In(blockedUserIds)) } : { eventId },
       relations: ['user'],
       order: { createdAt: 'DESC' },
       skip,
