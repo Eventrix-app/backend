@@ -9,8 +9,10 @@ import { PushService } from '../push/push.service';
 import {
   announcementEmail,
   bookingConfirmedEmail,
+  eventApprovedEmail,
   eventCancelledEmail,
   eventChangedEmail,
+  eventRejectedEmail,
   organizerFollowedEmail,
   organizerVerificationApprovedEmail,
   organizerVerificationRejectedEmail,
@@ -128,6 +130,16 @@ export class NotificationService {
     await this.enqueue(organizerUserId, NotificationType.ORGANIZER_FOLLOWED, { followerUserId, followerName });
   }
 
+  // eventId rides along so the frontend's push-tap handler can deep-link straight to
+  // EventDetailsScreen instead of only being able to fall back to a generic notification.
+  async notifyEventApproved(userId: string, eventId: string, eventTitle: string): Promise<void> {
+    await this.enqueue(userId, NotificationType.EVENT_APPROVED, { eventId, eventTitle });
+  }
+
+  async notifyEventRejected(userId: string, eventId: string, eventTitle: string, reason: string): Promise<void> {
+    await this.enqueue(userId, NotificationType.EVENT_REJECTED, { eventId, eventTitle, reason });
+  }
+
   async notifyOrganizerVerificationApproved(userId: string): Promise<void> {
     await this.enqueue(userId, NotificationType.ORGANIZER_VERIFICATION_APPROVED, {});
   }
@@ -234,6 +246,15 @@ export class NotificationService {
           body: `${eventTitle} has been cancelled.${reason} If you paid for this booking, request a refund from My Bookings in the app.`,
         };
       }
+      case NotificationType.EVENT_APPROVED: {
+        const eventTitle = String(payload['eventTitle'] ?? 'Your event');
+        return { title: "You're live!", body: `${eventTitle} has been approved and is now visible to everyone.` };
+      }
+      case NotificationType.EVENT_REJECTED: {
+        const eventTitle = String(payload['eventTitle'] ?? 'Your event');
+        const reason = payload['reason'] ? ` ${String(payload['reason'])}` : '';
+        return { title: 'Your event needs another look', body: `${eventTitle} wasn't approved this time.${reason}` };
+      }
       case NotificationType.ORGANIZER_VERIFICATION_APPROVED:
         return {
           title: "You're verified!",
@@ -284,6 +305,17 @@ export class NotificationService {
         return eventCancelledEmail(
           String(payload['eventTitle'] ?? 'An event you booked'),
           payload['reason'] ? String(payload['reason']) : undefined,
+          payload['eventId'] ? String(payload['eventId']) : undefined,
+        );
+      case NotificationType.EVENT_APPROVED:
+        return eventApprovedEmail(
+          String(payload['eventTitle'] ?? 'Your event'),
+          payload['eventId'] ? String(payload['eventId']) : undefined,
+        );
+      case NotificationType.EVENT_REJECTED:
+        return eventRejectedEmail(
+          String(payload['eventTitle'] ?? 'Your event'),
+          String(payload['reason'] ?? ''),
           payload['eventId'] ? String(payload['eventId']) : undefined,
         );
       case NotificationType.ORGANIZER_VERIFICATION_APPROVED:

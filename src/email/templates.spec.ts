@@ -1,8 +1,10 @@
 import {
   announcementEmail,
   bookingConfirmedEmail,
+  eventApprovedEmail,
   eventCancelledEmail,
   eventChangedEmail,
+  eventRejectedEmail,
   organizerFollowedEmail,
   organizerVerificationRejectedEmail,
   refundStatusEmail,
@@ -44,6 +46,16 @@ describe('email templates — HTML injection in interpolated values', () => {
 
   it('escapes a malicious admin-typed rejection reason', () => {
     const { html } = organizerVerificationRejectedEmail(XSS);
+    expect(html).not.toContain(XSS);
+  });
+
+  it('escapes a malicious event title in eventApprovedEmail', () => {
+    const { html } = eventApprovedEmail(XSS);
+    expect(html).not.toContain(XSS);
+  });
+
+  it('escapes a malicious event title and rejection reason in eventRejectedEmail', () => {
+    const { html } = eventRejectedEmail(XSS, XSS);
     expect(html).not.toContain(XSS);
   });
 });
@@ -97,5 +109,26 @@ describe('email templates — deep links', () => {
   it('URL-encodes an id so it can never break out of the href attribute', () => {
     const { html } = eventCancelledEmail('Music Fest', undefined, '"><script>alert(1)</script>');
     expect(html).not.toContain('<script>alert(1)</script>');
+  });
+
+  it('eventApprovedEmail renders an event deep link when eventId is provided', () => {
+    const { html } = eventApprovedEmail('Music Fest', 'evt-approved-1');
+    expect(html).toContain('eventrix://event/evt-approved-1');
+  });
+
+  it('eventApprovedEmail falls back to plain text when eventId is omitted', () => {
+    const { html } = eventApprovedEmail('Music Fest');
+    expect(html).not.toContain('eventrix://');
+  });
+
+  it('eventRejectedEmail renders an event deep link and the rejection reason when both are provided', () => {
+    const { html } = eventRejectedEmail('Music Fest', 'Missing venue details', 'evt-rejected-1');
+    expect(html).toContain('eventrix://event/evt-rejected-1');
+    expect(html).toContain('Missing venue details');
+  });
+
+  it('eventRejectedEmail falls back to plain text when eventId is omitted', () => {
+    const { html } = eventRejectedEmail('Music Fest', 'Missing venue details');
+    expect(html).not.toContain('eventrix://');
   });
 });

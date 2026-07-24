@@ -460,6 +460,22 @@ export class EventsService {
     if (!isOwnerOrAdmin && event.approvalStatus !== EventApprovalStatus.APPROVED) {
       throw new NotFoundException(`Event with id ${id} not found`);
     }
+
+    // Cancelling only flips `status`, not `approvalStatus` (it was already approved) — so
+    // without this, a cancelled event's detail page stayed fully open to anyone with the
+    // link/id, same bug findAllFiltered/findFromFollowing/findPublicEventsByOrganizer above
+    // already had to fix for listings. Unlike those, this isn't a blanket hide: someone who
+    // actually booked (any enrollment status — even a since-cancelled/refunded one counts as
+    // "had a stake in this") still needs to reach this page for context and the "View Event"
+    // link from their own ticket to keep working. A random non-enrolled viewer gets the same
+    // 404 a pending/rejected event already gives.
+    if (!isOwnerOrAdmin && event.status === EventStatus.CANCELLED) {
+      const hasEnrollment = userId ? await this.enrollmentRepository.exist({ where: { eventId: id, userId } }) : false;
+      if (!hasEnrollment) {
+        throw new NotFoundException(`Event with id ${id} not found`);
+      }
+    }
+
     return this.withComputedSeats(event);
   }
 
@@ -1194,8 +1210,9 @@ export class EventsService {
     this.logger.log(`Event ${event.id} approved by admin ${adminUserId}`);
     await invalidateEventCaches(this.cache, event.id);
 
-    // TODO: Send notification to organizer
-    // await this.notificationService.notifyEventApproved(event);
+    // Fire-and-forget, same reasoning as cancelEvent()/notifyEventCancelled above — approval
+    // is already committed by this point and must not fail because a notification hiccuped.
+    void this.notificationService.notifyEventApproved(event.organizer.userId, event.id, event.title);
 
     return saved;
   }
@@ -1222,8 +1239,8 @@ export class EventsService {
     this.logger.log(`Event ${event.id} rejected by admin ${adminUserId}`);
     await invalidateEventCaches(this.cache, event.id);
 
-    // TODO: Send notification to organizer
-    // await this.notificationService.notifyEventRejected(event, rejectionReason);
+    // Fire-and-forget, same reasoning as approve() above.
+    void this.notificationService.notifyEventRejected(event.organizer.userId, event.id, event.title, rejectionReason);
 
     return saved;
   }

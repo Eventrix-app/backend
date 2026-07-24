@@ -332,6 +332,41 @@ export function bookingConfirmedEmail(
   };
 }
 
+export function eventApprovedEmail(eventTitle: string, eventId?: string): RenderedEmail {
+  const safeTitle = escapeHtml(eventTitle);
+  const link = eventId ? appLink(`event/${encodeURIComponent(eventId)}`) : undefined;
+  return {
+    subject: `Your event was approved: ${subjectSafe(eventTitle)}`,
+    html: wrapEmail(
+      "You're live! 🎉",
+      `
+      <p><strong>${safeTitle}</strong> has been approved and is now visible to everyone on ${COMPANY_NAME}.</p>
+      ${link ? ctaButton('View Event', link) : `<p>Open the ${COMPANY_NAME} app to view your listing.</p>`}
+      `,
+      `"${eventTitle}" has been approved and is now live.`,
+    ),
+  };
+}
+
+export function eventRejectedEmail(eventTitle: string, reason: string, eventId?: string): RenderedEmail {
+  const safeTitle = escapeHtml(eventTitle);
+  const reasonHtml = reason ? calloutBox('Reason', escapeHtml(reason)) : '';
+  const link = eventId ? appLink(`event/${encodeURIComponent(eventId)}`) : undefined;
+  return {
+    subject: `Your event needs changes: ${subjectSafe(eventTitle)}`,
+    html: wrapEmail(
+      'Your event needs another look',
+      `
+      <p><strong>${safeTitle}</strong> wasn't approved this time.</p>
+      ${reasonHtml}
+      <p>Open the ${COMPANY_NAME} app, update the listing, and resubmit for review.</p>
+      ${link ? ctaButton('View Event', link) : ''}
+      `,
+      `"${eventTitle}" needs changes before it can go live.`,
+    ),
+  };
+}
+
 export function organizerVerificationApprovedEmail(): RenderedEmail {
   return {
     subject: `You're verified! Start creating events`,

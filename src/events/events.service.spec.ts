@@ -51,6 +51,7 @@ describe('EventsService - Fixed Issues', () => {
       save: jest.fn(),
       find: jest.fn(),
       count: jest.fn(),
+      exist: jest.fn(),
     };
 
     mockOrganizerRepo = {
@@ -122,6 +123,8 @@ describe('EventsService - Fixed Issues', () => {
       notifyRefundStatus: jest.fn(),
       notifyBookingConfirmed: jest.fn(),
       notifyEventCancelled: jest.fn(),
+      notifyEventApproved: jest.fn(),
+      notifyEventRejected: jest.fn(),
     };
 
     mockCacheService = {
@@ -316,7 +319,9 @@ describe('EventsService - Fixed Issues', () => {
     it('should record who approved the event and when', async () => {
       const mockEvent = {
         id: 'event-1',
+        title: 'Test Event',
         approvalStatus: EventApprovalStatus.PENDING_APPROVAL,
+        organizer: { userId: 'organizer-user-1' },
       };
 
       mockEventRepo.findOne.mockResolvedValue(mockEvent);
@@ -328,12 +333,15 @@ describe('EventsService - Fixed Issues', () => {
       });
 
       await service.approve('event-1', 'admin-1');
+      expect(mockNotificationService.notifyEventApproved).toHaveBeenCalledWith('organizer-user-1', 'event-1', 'Test Event');
     });
 
     it('should record who rejected the event and when', async () => {
       const mockEvent = {
         id: 'event-1',
+        title: 'Test Event',
         approvalStatus: EventApprovalStatus.PENDING_APPROVAL,
+        organizer: { userId: 'organizer-user-1' },
       };
 
       mockEventRepo.findOne.mockResolvedValue(mockEvent);
@@ -345,6 +353,12 @@ describe('EventsService - Fixed Issues', () => {
       });
 
       await service.reject('event-1', 'Inappropriate content', 'admin-1');
+      expect(mockNotificationService.notifyEventRejected).toHaveBeenCalledWith(
+        'organizer-user-1',
+        'event-1',
+        'Test Event',
+        'Inappropriate content',
+      );
     });
   });
 
@@ -525,6 +539,55 @@ describe('EventsService - Fixed Issues', () => {
       // availableTickets recomputed from ticketTypes (withComputedSeats), not the raw
       // entity instance — same content, new reference.
       expect(result).toEqual(mockEvent);
+    });
+
+    it('findOneForViewer hides a cancelled event from an anonymous or non-enrolled viewer', async () => {
+      const mockEvent = {
+        id: 'event-1',
+        organizerId: 'org-1',
+        approvalStatus: EventApprovalStatus.APPROVED,
+        status: EventStatus.CANCELLED,
+        isApproved: () => true,
+      };
+      mockEventRepo.findOne.mockResolvedValue(mockEvent);
+      mockOrganizerRepo.findOne.mockResolvedValue(null);
+      mockEnrollmentRepo.exist.mockResolvedValue(false);
+
+      await expect(service.findOneForViewer('event-1')).rejects.toThrow(NotFoundException);
+      await expect(service.findOneForViewer('event-1', 'other-user', [])).rejects.toThrow(NotFoundException);
+    });
+
+    it('findOneForViewer still shows a cancelled event to someone with any enrollment for it', async () => {
+      const mockEvent = {
+        id: 'event-1',
+        organizerId: 'org-1',
+        approvalStatus: EventApprovalStatus.APPROVED,
+        status: EventStatus.CANCELLED,
+        isApproved: () => true,
+      };
+      mockEventRepo.findOne.mockResolvedValue(mockEvent);
+      mockOrganizerRepo.findOne.mockResolvedValue(null);
+      mockEnrollmentRepo.exist.mockResolvedValue(true);
+
+      const result = await service.findOneForViewer('event-1', 'attendee-1', []);
+      expect(result).toEqual(mockEvent);
+      expect(mockEnrollmentRepo.exist).toHaveBeenCalledWith({ where: { eventId: 'event-1', userId: 'attendee-1' } });
+    });
+
+    it('findOneForViewer still shows a cancelled event to its owning organizer without checking enrollment', async () => {
+      const mockEvent = {
+        id: 'event-1',
+        organizerId: 'org-1',
+        approvalStatus: EventApprovalStatus.APPROVED,
+        status: EventStatus.CANCELLED,
+        isApproved: () => true,
+      };
+      mockEventRepo.findOne.mockResolvedValue(mockEvent);
+      mockOrganizerRepo.findOne.mockResolvedValue({ id: 'org-1', userId: 'user-1' });
+
+      const result = await service.findOneForViewer('event-1', 'user-1', []);
+      expect(result).toEqual(mockEvent);
+      expect(mockEnrollmentRepo.exist).not.toHaveBeenCalled();
     });
   });
 
