@@ -3,6 +3,15 @@
 // functions (not an Injectable) since rendering has no dependencies: AuthService and
 // NotificationService import these directly, same as they'd build a string inline before.
 const BRAND_COLOR = '#FF3366';
+const BRAND_TINT = '#FFF6F8';
+const BRAND_TINT_BORDER = '#FFD8E1';
+const TEXT_PRIMARY = '#1A1A1A';
+const TEXT_SECONDARY = '#4B4B52';
+const TEXT_MUTED = '#8A8A8E';
+const TEXT_FAINT = '#ACACB2';
+const BORDER_LIGHT = '#EFEFF2';
+const SUPPORT_EMAIL = 'support@eventrix.app';
+const COMPANY_NAME = 'Eventrix';
 
 export interface RenderedEmail {
   subject: string;
@@ -22,19 +31,62 @@ function escapeHtml(value: string): string {
     .replace(/'/g, '&#39;');
 }
 
-function wrapEmail(heading: string, bodyHtml: string): string {
+// Subject lines are plain mail headers, not HTML — the risk there isn't markup injection,
+// it's header injection (a title containing a raw CR/LF could, on a naive transport, forge
+// extra headers like a Bcc). Strip control characters and cap length so a subject built from
+// user-entered text (event titles, follower names) can never smuggle either.
+function subjectSafe(value: string, maxLen = 60): string {
+  const stripped = value.replace(/[\r\n]+/g, ' ').trim();
+  return stripped.length > maxLen ? `${stripped.slice(0, maxLen - 1)}…` : stripped;
+}
+
+// Highlighted box for a one-time code (password reset / email verification).
+function codeBox(code: string): string {
   return `
-    <div style="font-family: -apple-system, Helvetica, Arial, sans-serif; max-width: 480px; margin: 0 auto; color: #1A1A1A;">
-      <div style="padding: 24px 0; text-align: center; border-bottom: 2px solid ${BRAND_COLOR};">
-        <span style="font-size: 22px; font-weight: 700; color: ${BRAND_COLOR};">Eventrix</span>
-      </div>
-      <div style="padding: 32px 8px;">
-        <h2 style="margin: 0 0 16px; font-size: 18px; color: #1A1A1A;">${heading}</h2>
-        ${bodyHtml}
-      </div>
-      <div style="padding: 16px 8px; border-top: 1px solid #EAEAEA; color: #8A8A8A; font-size: 12px; text-align: center;">
-        <p style="margin: 0;">You're receiving this because you have an Eventrix account.</p>
-        <p style="margin: 4px 0 0;">Need help? Contact us anytime at support@eventrix.app</p>
+    <div style="margin:20px 0;padding:20px;background-color:${BRAND_TINT};border:1px solid ${BRAND_TINT_BORDER};border-radius:12px;text-align:center;">
+      <span style="font-size:30px;font-weight:800;letter-spacing:8px;color:${BRAND_COLOR};font-family:'SF Mono',Consolas,Menlo,monospace;">${code}</span>
+    </div>
+  `;
+}
+
+// Labeled callout for supplementary detail (a cancellation/rejection reason, a booking
+// reference, a status) — visually distinct from body copy so it reads as data, not prose.
+function calloutBox(label: string, value: string): string {
+  return `
+    <div style="margin:16px 0;padding:14px 16px;background-color:#F7F7FA;border-left:3px solid ${BRAND_COLOR};border-radius:6px;">
+      <p style="margin:0;font-size:12px;font-weight:600;color:${TEXT_MUTED};text-transform:uppercase;letter-spacing:0.5px;">${label}</p>
+      <p style="margin:4px 0 0;font-size:14px;color:${TEXT_PRIMARY};">${value}</p>
+    </div>
+  `;
+}
+
+// Text-only "button" — a real <a> styled as a button, not an <img>/deep-link, since none of
+// these emails point at a verified universal/app link today; every CTA below is intentionally
+// phrased as "open the app and go to X" rather than a clickable button that might 404.
+function wrapEmail(heading: string, bodyHtml: string, preheader?: string): string {
+  const year = new Date().getFullYear();
+  return `
+    <div style="background-color:#F4F4F7;padding:32px 16px;font-family:-apple-system,Helvetica,Arial,sans-serif;">
+      ${preheader ? `<div style="display:none;max-height:0;overflow:hidden;opacity:0;color:transparent;">${escapeHtml(preheader)}</div>` : ''}
+      <div style="max-width:480px;margin:0 auto;background-color:#FFFFFF;border-radius:16px;overflow:hidden;border:1px solid ${BORDER_LIGHT};">
+        <div style="padding:28px 32px;text-align:center;background-color:${BRAND_TINT};border-bottom:1px solid ${BRAND_TINT_BORDER};">
+          <span style="font-size:22px;font-weight:800;color:${BRAND_COLOR};letter-spacing:0.3px;">${COMPANY_NAME}</span>
+        </div>
+        <div style="padding:32px;">
+          <h1 style="margin:0 0 16px;font-size:19px;line-height:26px;color:${TEXT_PRIMARY};">${heading}</h1>
+          <div style="font-size:15px;line-height:23px;color:${TEXT_SECONDARY};">
+            ${bodyHtml}
+          </div>
+        </div>
+        <div style="padding:20px 32px 28px;border-top:1px solid ${BORDER_LIGHT};">
+          <p style="margin:0 0 8px;font-size:13px;color:${TEXT_MUTED};">
+            Questions? Reach us anytime at <a href="mailto:${SUPPORT_EMAIL}" style="color:${BRAND_COLOR};text-decoration:none;">${SUPPORT_EMAIL}</a>.
+          </p>
+          <p style="margin:0 0 8px;font-size:12px;color:${TEXT_FAINT};">
+            You're receiving this email because you have an ${COMPANY_NAME} account. This is an automated message — please don't reply directly to it.
+          </p>
+          <p style="margin:0;font-size:12px;color:${TEXT_FAINT};">&copy; ${year} ${COMPANY_NAME}. All rights reserved.</p>
+        </div>
       </div>
     </div>
   `;
@@ -43,54 +95,82 @@ function wrapEmail(heading: string, bodyHtml: string): string {
 // --- Auth (auth.service.ts) ---
 
 export function welcomeEmail(firstName: string): RenderedEmail {
+  const safeName = escapeHtml(firstName || 'there');
   return {
-    subject: 'Welcome to Eventrix!',
-    html: wrapEmail('Welcome to Eventrix!', `
-      <p>Hi ${escapeHtml(firstName || 'there')},</p>
-      <p>Welcome to Eventrix — your account is ready to go. Start exploring events near you, or create your own event to share with the community.</p>
-    `),
+    subject: `Welcome to ${COMPANY_NAME}, ${subjectSafe(firstName || 'there')}!`,
+    html: wrapEmail(
+      `Welcome to ${COMPANY_NAME}, ${safeName}! 🎉`,
+      `
+      <p>Your account is ready to go. Here's what you can do next:</p>
+      <ul style="margin:0 0 16px;padding-left:20px;">
+        <li style="margin-bottom:6px;">Browse and book events happening near you</li>
+        <li style="margin-bottom:6px;">Follow organizers to hear about their next event first</li>
+        <li>Create your own event and start selling tickets</li>
+      </ul>
+      <p>Open the ${COMPANY_NAME} app to get started.</p>
+      `,
+      `Your ${COMPANY_NAME} account is ready — here's how to get started.`,
+    ),
   };
 }
 
 export function passwordResetOtpEmail(otp: string, ttlMinutes: number): RenderedEmail {
   return {
-    subject: 'Your Eventrix password reset code',
-    html: wrapEmail('Password reset code', `
-      <p>Your password reset code is:</p>
-      <p style="font-size:28px;font-weight:700;letter-spacing:4px;color:${BRAND_COLOR};">${otp}</p>
-      <p>This code expires in ${ttlMinutes} minutes. If you didn't request this, you can ignore this email.</p>
-    `),
+    subject: `Your ${COMPANY_NAME} password reset code`,
+    html: wrapEmail(
+      'Reset your password',
+      `
+      <p>We received a request to reset your password. Enter this code in the app to continue:</p>
+      ${codeBox(otp)}
+      <p>This code expires in <strong>${ttlMinutes} minutes</strong>. Your password won't change until you enter it.</p>
+      <p>If you didn't request this, you can safely ignore this email — no changes were made to your account.</p>
+      `,
+      `Your password reset code — expires in ${ttlMinutes} minutes.`,
+    ),
   };
 }
 
 export function passwordChangedEmail(): RenderedEmail {
   return {
-    subject: 'Your Eventrix password was changed',
-    html: wrapEmail('Password changed', `
-      <p>Your password was just changed.</p>
-      <p>If this was you, no action is needed. If you didn't make this change, please reset your password immediately and contact support.</p>
-    `),
+    subject: `Your ${COMPANY_NAME} password was changed`,
+    html: wrapEmail(
+      'Your password was changed',
+      `
+      <p>This confirms your ${COMPANY_NAME} account password was just changed.</p>
+      <p>If this was you, no action is needed. If you didn't make this change, reset your password immediately from the login screen and contact us at <a href="mailto:${SUPPORT_EMAIL}" style="color:${BRAND_COLOR};">${SUPPORT_EMAIL}</a> right away.</p>
+      `,
+      'Your password was just changed — here\'s what to do if that wasn\'t you.',
+    ),
   };
 }
 
 export function emailVerificationOtpEmail(otp: string, ttlMinutes: number): RenderedEmail {
   return {
-    subject: 'Verify your Eventrix email address',
-    html: wrapEmail('Verify your email', `
-      <p>Your email verification code is:</p>
-      <p style="font-size:28px;font-weight:700;letter-spacing:4px;color:${BRAND_COLOR};">${otp}</p>
-      <p>This code expires in ${ttlMinutes} minutes. If you didn't request this, you can ignore this email.</p>
-    `),
+    subject: `Verify your ${COMPANY_NAME} email address`,
+    html: wrapEmail(
+      'Verify your email address',
+      `
+      <p>Enter this code in the app to verify your email address:</p>
+      ${codeBox(otp)}
+      <p>This code expires in <strong>${ttlMinutes} minutes</strong>.</p>
+      <p>If you didn't request this, you can safely ignore this email.</p>
+      `,
+      `Your email verification code — expires in ${ttlMinutes} minutes.`,
+    ),
   };
 }
 
 export function passwordResetConfirmationEmail(): RenderedEmail {
   return {
-    subject: 'Your Eventrix password was reset',
-    html: wrapEmail('Password reset', `
-      <p>Your password was just reset using the "Forgot password" flow.</p>
-      <p>If this was you, no action is needed. If you didn't request this, your account may be compromised — contact support immediately.</p>
-    `),
+    subject: `Your ${COMPANY_NAME} password was reset`,
+    html: wrapEmail(
+      'Your password was reset',
+      `
+      <p>Your ${COMPANY_NAME} password was just reset using the "Forgot password" flow.</p>
+      <p>If this was you, no action is needed. If you didn't request this, your account may be compromised — contact us immediately at <a href="mailto:${SUPPORT_EMAIL}" style="color:${BRAND_COLOR};">${SUPPORT_EMAIL}</a>.</p>
+      `,
+      'Your password was just reset — here\'s what to do if that wasn\'t you.',
+    ),
   };
 }
 
@@ -98,19 +178,29 @@ export function passwordResetConfirmationEmail(): RenderedEmail {
 
 export function eventChangedEmail(): RenderedEmail {
   return {
-    subject: 'Event updated',
-    html: wrapEmail('An event you booked has changed', `
-      <p>One of the events you're attending has been updated — check the details in the app to see what changed.</p>
-    `),
+    subject: 'An event you\'re attending has been updated',
+    html: wrapEmail(
+      'An event you booked has changed',
+      `
+      <p>One of the events you're attending has been updated by its organizer — details like the time, venue, or description may have changed.</p>
+      <p>Open the ${COMPANY_NAME} app and check My Bookings to see exactly what changed.</p>
+      `,
+      'One of your upcoming events has been updated — check what changed.',
+    ),
   };
 }
 
 export function waitlistPromotedEmail(): RenderedEmail {
   return {
-    subject: "You're in!",
-    html: wrapEmail("You're off the waitlist!", `
-      <p>A spot opened up and you've been moved off the waitlist. Your ticket is now confirmed — check My Bookings for details.</p>
-    `),
+    subject: `You're in! A spot opened up`,
+    html: wrapEmail(
+      "You're off the waitlist!",
+      `
+      <p>Good news — a spot opened up and you've been moved off the waitlist. Your ticket is now confirmed.</p>
+      <p>Open the ${COMPANY_NAME} app and check My Bookings to view your ticket.</p>
+      `,
+      'A spot opened up — your ticket is now confirmed.',
+    ),
   };
 }
 
@@ -118,67 +208,122 @@ export function refundStatusEmail(status: string): RenderedEmail {
   if (status === 'requested') {
     return {
       subject: 'Refund request received',
-      html: wrapEmail('Refund request received', `<p>We've received your refund request and will review it shortly.</p>`),
+      html: wrapEmail(
+        'Refund request received',
+        `
+        <p>We've received your refund request and it's now being reviewed.</p>
+        <p>You'll get another email as soon as there's an update — no action is needed from you right now.</p>
+        `,
+        'We\'ve received your refund request and it\'s under review.',
+      ),
     };
   }
+  const safeStatus = escapeHtml(status);
   return {
-    subject: 'Refund update',
-    html: wrapEmail('Refund status update', `<p>Your refund is now "<strong>${status}</strong>".</p>`),
+    subject: `Refund update: ${subjectSafe(status)}`,
+    html: wrapEmail(
+      'Refund status update',
+      `
+      <p>There's an update on your refund request.</p>
+      ${calloutBox('Status', safeStatus)}
+      <p>Open the ${COMPANY_NAME} app and check My Bookings for the full details.</p>
+      `,
+      `Your refund status is now "${status}".`,
+    ),
   };
 }
 
 export function announcementEmail(title: string): RenderedEmail {
+  const safeTitle = escapeHtml(title);
   return {
-    subject: 'Event announcement',
-    html: wrapEmail('New announcement', `<p>${escapeHtml(title)}</p>`),
+    subject: `New announcement: ${subjectSafe(title)}`,
+    html: wrapEmail(
+      'New announcement from an organizer you follow',
+      `
+      ${calloutBox('Announcement', safeTitle)}
+      <p>Open the ${COMPANY_NAME} app to read the full announcement and join the conversation.</p>
+      `,
+      `New announcement: ${title}`,
+    ),
   };
 }
 
 export function organizerFollowedEmail(followerName: string): RenderedEmail {
+  const safeName = escapeHtml(followerName);
   return {
-    subject: 'New follower',
-    html: wrapEmail('You have a new follower', `<p><strong>${escapeHtml(followerName)}</strong> started following you on Eventrix.</p>`),
+    subject: `${subjectSafe(followerName)} started following you`,
+    html: wrapEmail(
+      'You have a new follower',
+      `
+      <p><strong>${safeName}</strong> started following you on ${COMPANY_NAME} and will be notified about your future events.</p>
+      <p>Open the ${COMPANY_NAME} app to view your followers or manage your organizer profile.</p>
+      `,
+      `${followerName} started following you on ${COMPANY_NAME}.`,
+    ),
   };
 }
 
 export function eventCancelledEmail(eventTitle: string, reason?: string): RenderedEmail {
-  const reasonHtml = reason ? `<p><strong>Reason:</strong> ${escapeHtml(reason)}</p>` : '';
+  const safeTitle = escapeHtml(eventTitle);
+  const reasonHtml = reason ? calloutBox('Reason', escapeHtml(reason)) : '';
   return {
-    subject: 'Event cancelled',
-    html: wrapEmail('Event cancelled', `
-      <p>"${escapeHtml(eventTitle)}" has been cancelled.</p>
+    subject: `Event cancelled: ${subjectSafe(eventTitle)}`,
+    html: wrapEmail(
+      'Event cancelled',
+      `
+      <p><strong>${safeTitle}</strong> has been cancelled by its organizer.</p>
       ${reasonHtml}
-      <p>If you paid for this booking, request a refund from My Bookings in the app.</p>
-    `),
+      <p>If you paid for this booking, open the ${COMPANY_NAME} app, go to My Bookings, and request a refund — most refunds are reviewed within a few days.</p>
+      `,
+      `"${eventTitle}" has been cancelled.`,
+    ),
   };
 }
 
 export function bookingConfirmedEmail(eventTitle: string, bookingReference: string, quantity: number): RenderedEmail {
+  const safeTitle = escapeHtml(eventTitle);
+  const safeReference = escapeHtml(bookingReference);
+  const ticketWord = quantity === 1 ? 'ticket' : 'tickets';
   return {
-    subject: 'Booking confirmed!',
-    html: wrapEmail('Booking confirmed', `
-      <p>You're confirmed for <strong>${escapeHtml(eventTitle)}</strong> (${quantity} ticket${quantity === 1 ? '' : 's'}).</p>
-      <p>Booking reference: <strong>${escapeHtml(bookingReference)}</strong></p>
-      <p>View your ticket anytime in the app.</p>
-    `),
+    subject: `Booking confirmed: ${subjectSafe(eventTitle)}`,
+    html: wrapEmail(
+      'Booking confirmed 🎟️',
+      `
+      <p>You're confirmed for <strong>${safeTitle}</strong> (${quantity} ${ticketWord}).</p>
+      ${calloutBox('Booking reference', safeReference)}
+      <p>Open the ${COMPANY_NAME} app and go to My Bookings to view your ticket and QR code anytime.</p>
+      `,
+      `You're confirmed for ${eventTitle} — ${quantity} ${ticketWord}.`,
+    ),
   };
 }
 
 export function organizerVerificationApprovedEmail(): RenderedEmail {
   return {
-    subject: "You're verified!",
-    html: wrapEmail("You're verified!", `<p>Your organizer verification was approved — you can now create and publish events on Eventrix.</p>`),
+    subject: `You're verified! Start creating events`,
+    html: wrapEmail(
+      "You're verified! 🎉",
+      `
+      <p>Your organizer verification was approved — you can now create and publish events on ${COMPANY_NAME}.</p>
+      <p>Open the ${COMPANY_NAME} app and tap "Create Event" to publish your first listing.</p>
+      `,
+      'Your organizer verification was approved — start creating events.',
+    ),
   };
 }
 
 export function organizerVerificationRejectedEmail(reason: string): RenderedEmail {
-  const reasonHtml = reason ? `<p><strong>Reason:</strong> ${escapeHtml(reason)}</p>` : '';
+  const reasonHtml = reason ? calloutBox('Reason', escapeHtml(reason)) : '';
   return {
-    subject: 'Verification needs another look',
-    html: wrapEmail('Verification needs another look', `
+    subject: 'Your organizer verification needs another look',
+    html: wrapEmail(
+      'Verification needs another look',
+      `
       <p>Your organizer verification wasn't approved this time.</p>
       ${reasonHtml}
-      <p>You can update your details and resubmit from your profile.</p>
-    `),
+      <p>Open the ${COMPANY_NAME} app, update your details from your profile, and resubmit for review.</p>
+      `,
+      'Your organizer verification needs another look before you can publish events.',
+    ),
   };
 }
