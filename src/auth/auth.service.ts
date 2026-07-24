@@ -544,7 +544,11 @@ export class AuthService {
     }
 
     if (!match) {
-      throw new UnauthorizedException('Invalid or expired verification code');
+      // Deliberately 400, not 401: this endpoint is already authenticated (JwtAuthGuard),
+      // so a wrong/expired OTP is a bad-input error, not a session problem. The frontend's
+      // authErrorMiddleware force-logs-out on any 401 from any endpoint — a 401 here would
+      // kick the user back to the splash screen instead of showing the error on this screen.
+      throw new BadRequestException('Invalid or expired verification code');
     }
 
     user.isEmailVerified = true;
