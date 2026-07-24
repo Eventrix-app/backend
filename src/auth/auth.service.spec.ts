@@ -6,7 +6,10 @@ import * as bcrypt from 'bcryptjs';
 import { AuthService } from './auth.service';
 import { User } from '../entities/user.entity';
 import { PasswordResetOtp } from '../entities/password-reset-otp.entity';
+import { EmailVerificationOtp } from '../entities/email-verification-otp.entity';
+import { AuthIdentity } from '../entities/auth-identity.entity';
 import { EmailService } from '../email/email.service';
+import { CacheService } from '../common/cache/cache.service';
 
 // Regression tests: reaching /auth/register in this app's flow always follows the full
 // pre-auth onboarding chain (carousel + interests + location + notification prefs), so
@@ -30,9 +33,12 @@ describe('AuthService — hasCompletedOnboarding', () => {
         AuthService,
         { provide: getRepositoryToken(User), useValue: mockUserRepo },
         { provide: getRepositoryToken(PasswordResetOtp), useValue: {} },
+        { provide: getRepositoryToken(EmailVerificationOtp), useValue: {} },
+        { provide: getRepositoryToken(AuthIdentity), useValue: {} },
         { provide: JwtService, useValue: { sign: jest.fn(() => 'signed-token') } },
         { provide: EmailService, useValue: mockEmailService },
         { provide: ConfigService, useValue: { get: jest.fn() } },
+        { provide: CacheService, useValue: { get: jest.fn(), set: jest.fn(), del: jest.fn() } },
       ],
     }).compile();
 
@@ -129,9 +135,12 @@ describe('AuthService — password change/reset security emails', () => {
         AuthService,
         { provide: getRepositoryToken(User), useValue: mockUserRepo },
         { provide: getRepositoryToken(PasswordResetOtp), useValue: mockOtpRepo },
+        { provide: getRepositoryToken(EmailVerificationOtp), useValue: {} },
+        { provide: getRepositoryToken(AuthIdentity), useValue: {} },
         { provide: JwtService, useValue: { sign: jest.fn(() => 'signed-token') } },
         { provide: EmailService, useValue: mockEmailService },
         { provide: ConfigService, useValue: { get: jest.fn() } },
+        { provide: CacheService, useValue: { get: jest.fn(), set: jest.fn(), del: jest.fn() } },
       ],
     }).compile();
 

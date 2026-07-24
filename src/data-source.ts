@@ -16,6 +16,7 @@ import { Payout } from './entities/payout.entity';
 import { NotificationJob } from './entities/notification-job.entity';
 import { EventMedia } from './entities/event-media.entity';
 import { PasswordResetOtp } from './entities/password-reset-otp.entity';
+import { EmailVerificationOtp } from './entities/email-verification-otp.entity';
 import { Favorite } from './entities/favorite.entity';
 import { Follow } from './entities/follow.entity';
 import { ChatMessage } from './entities/chat-message.entity';
@@ -41,6 +42,7 @@ const entities = [
   NotificationJob,
   EventMedia,
   PasswordResetOtp,
+  EmailVerificationOtp,
   Favorite,
   Follow,
   ChatMessage,

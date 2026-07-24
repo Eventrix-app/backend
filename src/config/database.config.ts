@@ -18,6 +18,11 @@ import { Favorite } from '../entities/favorite.entity';
 import { Follow } from '../entities/follow.entity';
 import { EventMedia } from '../entities/event-media.entity';
 import { PasswordResetOtp } from '../entities/password-reset-otp.entity';
+import { EmailVerificationOtp } from '../entities/email-verification-otp.entity';
+import { ChatMessage } from '../entities/chat-message.entity';
+import { EventScheduleItem } from '../entities/event-schedule.entity';
+import { EventAnnouncement } from '../entities/event-announcement.entity';
+import { EventReview } from '../entities/event-review.entity';
 import { Short } from '../entities/short.entity';
 
 const entities = [
@@ -39,6 +44,11 @@ const entities = [
   Follow,
   EventMedia,
   PasswordResetOtp,
+  EmailVerificationOtp,
+  ChatMessage,
+  EventScheduleItem,
+  EventAnnouncement,
+  EventReview,
   Short,
 ];
 
