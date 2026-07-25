@@ -2,6 +2,7 @@ import { Injectable, NotFoundException, Logger, OnModuleInit, BadRequestExceptio
 import { InjectRepository } from '@nestjs/typeorm';
 import { In, Repository } from 'typeorm';
 import { EventCategory } from '../entities/category.entity';
+import { Event } from '../entities/event.entity';
 import { BulkCreateCategoriesDto, CreateCategoryDto } from './category.dto';
 import { PartialType } from '@nestjs/mapped-types';
 import { CacheService } from '../common/cache/cache.service';
@@ -18,6 +19,8 @@ export class CategoryService implements OnModuleInit {
   constructor(
     @InjectRepository(EventCategory)
     private readonly categoryRepo: Repository<EventCategory>,
+    @InjectRepository(Event)
+    private readonly eventRepo: Repository<Event>,
     private readonly cache: CacheService,
   ) {}
 
@@ -111,6 +114,17 @@ export class CategoryService implements OnModuleInit {
 
   async remove(id: string): Promise<void> {
     const cat = await this.findOne(id);
+
+    // events.category_id is NOT NULL with no ON DELETE clause, so removing a category
+    // still referenced by an event would otherwise fail with a raw FK-violation
+    // QueryFailedError — check explicitly and return a clean 409 instead.
+    const eventCount = await this.eventRepo.count({ where: { categoryId: id } });
+    if (eventCount > 0) {
+      throw new ConflictException(
+        `Cannot delete category "${cat.name}": ${eventCount} event(s) still use it`,
+      );
+    }
+
     await this.categoryRepo.remove(cat);
     await this.cache.del(CATEGORIES_CACHE_KEY);
   }

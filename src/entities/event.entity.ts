@@ -75,7 +75,9 @@ export class Event {
   @Column({ name: 'created_by_user_id', type: 'uuid' })
   createdByUserId!: string;
 
-  @ManyToOne(() => Organizer, (organizer) => organizer.events, { onDelete: 'CASCADE' })
+  // RESTRICT, not CASCADE — see the matching comment on Organizer.user. A hard-deleted
+  // organizer should not silently take every one of their events down with it.
+  @ManyToOne(() => Organizer, (organizer) => organizer.events, { onDelete: 'RESTRICT' })
   @JoinColumn({ name: 'organizer_id' })
   organizer!: Organizer;
 

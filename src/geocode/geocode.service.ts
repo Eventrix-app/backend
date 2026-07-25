@@ -31,7 +31,17 @@ export class GeocodeService {
 
     const url = `https://maps.googleapis.com/maps/api/geocode/json?latlng=${lat},${lng}&key=${this.apiKey}`;
     try {
-      const res = await fetch(url);
+      // Without a timeout, Google's endpoint simply hanging (no response, no error) would
+      // leave this request open indefinitely instead of failing — the catch block below
+      // only handles a genuine network error or non-OK status, not a stall.
+      const controller = new AbortController();
+      const timeout = setTimeout(() => controller.abort(), 5000);
+      let res: Response;
+      try {
+        res = await fetch(url, { signal: controller.signal });
+      } finally {
+        clearTimeout(timeout);
+      }
       const data = await res.json();
       if (data.status !== 'OK' || !data.results?.length) {
         // A pin over open water / no addressable result is a normal outcome, not an

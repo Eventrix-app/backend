@@ -7,10 +7,12 @@ describe('OrganizerService', () => {
   let mockOrganizersRepo: any;
   let mockEventsRepo: any;
   let mockFollowsRepo: any;
+  let mockSessionsRepo: any;
   let mockDataSource: any;
   let mockCacheService: any;
   let mockNotificationService: any;
   let mockUploadsService: any;
+  let mockEmailService: any;
 
   beforeEach(() => {
     mockUsersRepo = { save: jest.fn((u) => Promise.resolve(u)), findOne: jest.fn().mockResolvedValue(null) };
@@ -52,15 +54,19 @@ describe('OrganizerService', () => {
       notifyOrganizerVerificationRejected: jest.fn().mockResolvedValue(undefined),
     };
     mockUploadsService = { createSignedReadUrl: jest.fn().mockResolvedValue('https://signed.example.com') };
+    mockSessionsRepo = { update: jest.fn() };
+    mockEmailService = { send: jest.fn() };
     service = new OrganizerService(
       mockUsersRepo,
       mockOrganizersRepo,
       mockEventsRepo,
       mockFollowsRepo,
+      mockSessionsRepo,
       mockDataSource,
       mockCacheService,
       mockNotificationService,
       mockUploadsService,
+      mockEmailService,
     );
   });
 

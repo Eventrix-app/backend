@@ -1,10 +1,11 @@
-import { Body, Controller, DefaultValuePipe, Get, Param, ParseIntPipe, ParseUUIDPipe, Post, Query, Request } from '@nestjs/common';
+import { Body, Controller, DefaultValuePipe, Get, Param, ParseUUIDPipe, Post, Query, Request } from '@nestjs/common';
 import { ApiTags } from '@nestjs/swagger';
 import { Throttle } from '@nestjs/throttler';
 import { ChatService } from './chat.service';
 import { ChatRealtimeService } from './chat-realtime.service';
 import { SendChatMessageDto } from './dto/send-chat-message.dto';
 import { JwtPayload } from '../auth/jwt.util';
+import { ParseLimitIntPipe, ParsePageIntPipe } from '../common/pipes/pagination.pipe';
 
 @ApiTags('chat')
 @Controller('events/:eventId/chat')
@@ -17,8 +18,8 @@ export class ChatController {
   @Get('messages')
   async getMessages(
     @Param('eventId', ParseUUIDPipe) eventId: string,
-    @Query('page', new DefaultValuePipe(1), ParseIntPipe) page: number,
-    @Query('limit', new DefaultValuePipe(50), ParseIntPipe) limit: number,
+    @Query('page', new DefaultValuePipe(1), ParsePageIntPipe()) page: number,
+    @Query('limit', new DefaultValuePipe(50), ParseLimitIntPipe()) limit: number,
     @Request() req: Request & { user?: JwtPayload },
   ) {
     return await this.chatService.getHistory(eventId, req.user?.id, req.user?.roles ?? [], page, limit);

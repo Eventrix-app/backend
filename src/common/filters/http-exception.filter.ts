@@ -46,7 +46,14 @@ export class HttpExceptionFilter implements ExceptionFilter {
         details = (exceptionResponse as any).error || null;
       }
     } else if (exception instanceof Error) {
-      message = exception.message;
+      // Fails CLOSED, same convention as AuthService's ALLOW_DEV_OTP_BYPASS: requires an
+      // explicit opt-in env var rather than inferring "dev" from NODE_ENV not being
+      // 'production', since NODE_ENV isn't required/validated anywhere in this app
+      // (env.validation.ts) — a deployment that simply never set it would otherwise leak
+      // raw exception text (DB constraint names, internal paths, stack-adjacent detail) to
+      // every client hitting an unhandled error. Unset/misconfigured now leaves this off.
+      const exposeErrorDetails = this.configService.get<string>('EXPOSE_ERROR_DETAILS') === 'true';
+      message = exposeErrorDetails ? exception.message : 'Internal server error';
     }
 
     // Determine user role from the request's bearer token, if any.

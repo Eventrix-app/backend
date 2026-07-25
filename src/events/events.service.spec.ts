@@ -10,7 +10,7 @@ import { TicketType } from '../entities/ticket-type.entity';
 import { Favorite } from '../entities/favorite.entity';
 import { Follow } from '../entities/follow.entity';
 import { EventMedia } from '../entities/event-media.entity';
-import { DataSource } from 'typeorm';
+import { DataSource, Not } from 'typeorm';
 import { JwtService } from '@nestjs/jwt';
 import { NotFoundException, BadRequestException, ConflictException, ForbiddenException } from '@nestjs/common';
 import { AuditLogService } from '../common/audit-log/audit-log.service';
@@ -52,6 +52,7 @@ describe('EventsService - Fixed Issues', () => {
       find: jest.fn(),
       count: jest.fn(),
       exist: jest.fn(),
+      query: jest.fn(),
     };
 
     mockOrganizerRepo = {
@@ -497,6 +498,34 @@ describe('EventsService - Fixed Issues', () => {
       expect(mockTicketTypeRepo.save).not.toHaveBeenCalled();
     });
 
+    it('rejects a ticket type whose sales window start is not before its end', async () => {
+      const mockEvent = {
+        id: 'event-1',
+        organizerId: 'org-1',
+        approvalStatus: EventApprovalStatus.APPROVED,
+        eventDate: '2099-01-05',
+        startTime: '10:00',
+      };
+      mockEventRepo.findOne.mockResolvedValue(mockEvent);
+      mockOrganizerRepo.findOne.mockResolvedValue({ id: 'org-1', userId: 'user-1' });
+
+      await expect(
+        service.createTicketType(
+          'event-1',
+          {
+            name: 'GA',
+            price: 10,
+            quantityTotal: 10,
+            salesStartAt: '2099-01-01T12:00:00.000Z',
+            salesEndAt: '2099-01-01T10:00:00.000Z',
+          } as any,
+          'user-1',
+          [],
+        ),
+      ).rejects.toThrow(BadRequestException);
+      expect(mockTicketTypeRepo.save).not.toHaveBeenCalled();
+    });
+
     it('hides ticket types from a public viewer when the event is not approved', async () => {
       const mockEvent = { id: 'event-1', organizerId: 'org-1', approvalStatus: EventApprovalStatus.PENDING_APPROVAL, isApproved: () => false };
       mockEventRepo.findOne.mockResolvedValue(mockEvent);
@@ -753,6 +782,45 @@ describe('EventsService - Fixed Issues', () => {
       await service.enroll('event-1', 'user-1', 'tt-1');
     });
 
+    it('allows re-enrolling in the same event after a previous booking was cancelled', async () => {
+      // Regression test: enroll() previously checked for *any* existing enrollment
+      // (Enrollment.findOne({ eventId, userId })) regardless of status, so a cancelled
+      // booking left a row that made every future enroll() attempt for that event 409
+      // forever, matching the DB's old unconditional @Unique(['userId','eventId']).
+      const mockEvent = {
+        id: 'event-1',
+        title: 'Free Meetup',
+        approvalStatus: EventApprovalStatus.APPROVED,
+        status: EventStatus.UPCOMING,
+        capacity: null,
+        ticketTypes: [{ id: 'tt-1', quantitySold: 0, quantityTotal: 10 }],
+        canEnroll: () => true,
+      };
+      let existingEnrollmentQuery: any;
+
+      mockDataSource.transaction.mockImplementation(async (callback: any) => {
+        const mockManager = {
+          findOne: jest.fn()
+            .mockResolvedValueOnce(mockEvent)
+            .mockImplementationOnce((entity: any, opts: any) => {
+              existingEnrollmentQuery = opts;
+              // A real DB-level partial-unique-index query would return null here for a
+              // user whose only prior row is cancelled — asserting that behavior.
+              return Promise.resolve(null);
+            }),
+          query: jest.fn().mockResolvedValue([[{ id: 'tt-1', price: '0.00' }], 1]),
+          create: jest.fn().mockImplementation((entity: any, data: any) => data),
+          save: jest.fn().mockImplementation((entity: any, data: any) => Promise.resolve({ id: 'enr-2', quantity: 1, ...data })),
+        };
+        return callback(mockManager);
+      });
+
+      const result = await service.enroll('event-1', 'user-1', 'tt-1');
+
+      expect(existingEnrollmentQuery.where.status).toEqual(Not('cancelled'));
+      expect((result as any).soldOut).toBeFalsy();
+    });
+
     it('rejects check-in when the booking has not been paid for', async () => {
       mockJwtService.verify.mockReturnValue({ enrollmentId: 'enr-1', eventId: 'event-1' });
       mockEnrollmentRepo.findOne.mockResolvedValue({
@@ -777,11 +845,32 @@ describe('EventsService - Fixed Issues', () => {
         event: { organizerId: 'org-1' },
       };
       mockEnrollmentRepo.findOne.mockResolvedValue(enrollment);
-      mockEnrollmentRepo.save.mockImplementation((data: any) => Promise.resolve(data));
+      mockEnrollmentRepo.query.mockResolvedValue([{ used_date: new Date() }]);
 
       const result = await service.checkIn('token', 'admin-1', ['admin']);
 
       expect(result.checkedInAt).toBeInstanceOf(Date);
+    });
+
+    it('rejects a second concurrent check-in of the same ticket', async () => {
+      // Regression test: checkIn() previously did a read-then-write (check
+      // enrollment.checkedInAt, then save()), which raced when the same ticket was
+      // scanned twice concurrently — both calls could read checkedInAt as null before
+      // either write landed. The atomic UPDATE ... WHERE used_date IS NULL claim
+      // returns zero rows for the losing call, which must surface as a 409, not a
+      // silent double check-in.
+      mockJwtService.verify.mockReturnValue({ enrollmentId: 'enr-1', eventId: 'event-1' });
+      const enrollment = {
+        id: 'enr-1',
+        eventId: 'event-1',
+        paymentStatus: 'paid',
+        checkedInAt: null,
+        event: { organizerId: 'org-1' },
+      };
+      mockEnrollmentRepo.findOne.mockResolvedValue(enrollment);
+      mockEnrollmentRepo.query.mockResolvedValue([]);
+
+      await expect(service.checkIn('token', 'admin-1', ['admin'])).rejects.toThrow(ConflictException);
     });
   });
 

@@ -52,23 +52,32 @@ export class NotificationService {
   // ever throws, but even a hypothetical failure here must never fail the job itself,
   // since callers (e.g. PaymentsService.approveRefund) await enqueue() as part of a larger
   // state transition that has already committed.
-  async enqueue(userId: string, type: NotificationType, payload: Record<string, unknown>): Promise<NotificationJob> {
-    const job = this.notificationJobsRepository.create({ userId, type, payload, status: NotificationJobStatus.PENDING });
-    const saved = await this.notificationJobsRepository.save(job);
+  async enqueue(userId: string, type: NotificationType, payload: Record<string, unknown>): Promise<NotificationJob | undefined> {
+    try {
+      const job = this.notificationJobsRepository.create({ userId, type, payload, status: NotificationJobStatus.PENDING });
+      const saved = await this.notificationJobsRepository.save(job);
 
-    saved.status = NotificationJobStatus.SENT;
-    saved.sentAt = new Date();
-    await this.notificationJobsRepository.save(saved);
+      saved.status = NotificationJobStatus.SENT;
+      saved.sentAt = new Date();
+      await this.notificationJobsRepository.save(saved);
 
-    this.logger.log(`Notification [${type}] delivered to user ${userId}: ${JSON.stringify(payload)}`);
+      this.logger.log(`Notification [${type}] delivered to user ${userId}: ${JSON.stringify(payload)}`);
 
-    const user = await this.usersRepository.findOne({ where: { id: userId } });
-    await Promise.all([
-      this.sendEmailForJob(user, type, payload),
-      this.sendPushForJob(user, type, payload),
-    ]);
+      const user = await this.usersRepository.findOne({ where: { id: userId } });
+      await Promise.all([
+        this.sendEmailForJob(user, type, payload),
+        this.sendPushForJob(user, type, payload),
+      ]);
 
-    return saved;
+      return saved;
+    } catch (err) {
+      // Must never fail the caller's already-committed operation (event approval, booking
+      // confirmation, etc.) — a DB hiccup while queuing a notification should be logged and
+      // swallowed here, not left to reject and potentially crash the process via an
+      // unhandled rejection at a `void enqueue(...)` call site.
+      this.logger.error(`Failed to enqueue notification [${type}] for user ${userId}: ${err instanceof Error ? err.message : String(err)}`);
+      return undefined;
+    }
   }
 
   private async sendEmailForJob(user: User | null, type: NotificationType, payload: Record<string, unknown>): Promise<void> {

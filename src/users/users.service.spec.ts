@@ -1,16 +1,26 @@
 import { Test, TestingModule } from '@nestjs/testing';
-import { NotFoundException } from '@nestjs/common';
+import { NotFoundException, UnauthorizedException } from '@nestjs/common';
 import { getRepositoryToken } from '@nestjs/typeorm';
+import { DataSource } from 'typeorm';
 import { validate } from 'class-validator';
+import * as bcrypt from 'bcryptjs';
 import { UsersService } from './users.service';
 import { User } from '../entities/user.entity';
 import { EventCategory } from '../entities/category.entity';
 import { Follow } from '../entities/follow.entity';
+import { Favorite } from '../entities/favorite.entity';
+import { WaitlistEntry } from '../entities/waitlist-entry.entity';
+import { UserSession } from '../entities/user-session.entity';
+import { AuthIdentity } from '../entities/auth-identity.entity';
+import { EmailVerificationOtp } from '../entities/email-verification-otp.entity';
+import { PasswordResetOtp } from '../entities/password-reset-otp.entity';
 import { Organizer } from '../entities/organizer.entity';
 import { DeviceToken } from '../entities/device-token.entity';
 import { UpdateInterestsDto } from './participant/dto/update-interests.dto';
 import { EmailService } from '../email/email.service';
 import { CacheService } from '../common/cache/cache.service';
+import { AuditLogService } from '../common/audit-log/audit-log.service';
+import { AuthService } from '../auth/auth.service';
 
 const CAT_A = { id: 'a0eebc99-9c0b-4ef8-bb6d-6bb9bd380a11', name: 'Music' } as EventCategory;
 const CAT_B = { id: 'b1eebc99-9c0b-4ef8-bb6d-6bb9bd380a22', name: 'Sports' } as EventCategory;
@@ -45,8 +55,18 @@ describe('UsersService', () => {
   let mockFollowRepo: jest.Mocked<any>;
   let mockOrganizerRepo: jest.Mocked<any>;
   let mockDeviceTokenRepo: jest.Mocked<any>;
+  let mockFavoriteRepo: jest.Mocked<any>;
+  let mockWaitlistEntryRepo: jest.Mocked<any>;
+  let mockSessionsRepo: jest.Mocked<any>;
+  let mockAuthIdentityRepo: jest.Mocked<any>;
+  let mockEmailVerificationOtpRepo: jest.Mocked<any>;
+  let mockPasswordResetOtpRepo: jest.Mocked<any>;
+  let mockDataSource: jest.Mocked<any>;
   let mockCacheService: jest.Mocked<any>;
   let mockEmailService: jest.Mocked<any>;
+  let mockAuditLogService: jest.Mocked<any>;
+  let mockAuthService: jest.Mocked<any>;
+  let mockManager: jest.Mocked<any>;
 
   beforeEach(async () => {
     mockUserRepo = {
@@ -71,6 +91,19 @@ describe('UsersService', () => {
       delete: jest.fn().mockResolvedValue(undefined),
       find: jest.fn().mockResolvedValue([]),
     };
+    mockFavoriteRepo = {};
+    mockWaitlistEntryRepo = {};
+    mockSessionsRepo = {};
+    mockAuthIdentityRepo = { findOne: jest.fn(), find: jest.fn().mockResolvedValue([]) };
+    mockEmailVerificationOtpRepo = {};
+    mockPasswordResetOtpRepo = {};
+    mockManager = {
+      delete: jest.fn().mockResolvedValue(undefined),
+      update: jest.fn().mockResolvedValue(undefined),
+    };
+    mockDataSource = {
+      transaction: jest.fn().mockImplementation(async (cb: any) => cb(mockManager)),
+    };
     mockEmailService = {
       send: jest.fn().mockResolvedValue(undefined),
     };
@@ -81,6 +114,12 @@ describe('UsersService', () => {
       getVersion: jest.fn().mockResolvedValue(1),
       bumpVersion: jest.fn().mockResolvedValue(undefined),
     };
+    mockAuditLogService = {
+      log: jest.fn().mockResolvedValue(undefined),
+    };
+    mockAuthService = {
+      verifyProviderToken: jest.fn(),
+    };
 
     const module: TestingModule = await Test.createTestingModule({
       providers: [
@@ -88,10 +127,19 @@ describe('UsersService', () => {
         { provide: getRepositoryToken(User), useValue: mockUserRepo },
         { provide: getRepositoryToken(EventCategory), useValue: mockCategoryRepo },
         { provide: getRepositoryToken(Follow), useValue: mockFollowRepo },
+        { provide: getRepositoryToken(Favorite), useValue: mockFavoriteRepo },
+        { provide: getRepositoryToken(WaitlistEntry), useValue: mockWaitlistEntryRepo },
+        { provide: getRepositoryToken(UserSession), useValue: mockSessionsRepo },
+        { provide: getRepositoryToken(AuthIdentity), useValue: mockAuthIdentityRepo },
+        { provide: getRepositoryToken(EmailVerificationOtp), useValue: mockEmailVerificationOtpRepo },
+        { provide: getRepositoryToken(PasswordResetOtp), useValue: mockPasswordResetOtpRepo },
         { provide: getRepositoryToken(Organizer), useValue: mockOrganizerRepo },
         { provide: getRepositoryToken(DeviceToken), useValue: mockDeviceTokenRepo },
+        { provide: DataSource, useValue: mockDataSource },
         { provide: CacheService, useValue: mockCacheService },
         { provide: EmailService, useValue: mockEmailService },
+        { provide: AuditLogService, useValue: mockAuditLogService },
+        { provide: AuthService, useValue: mockAuthService },
       ],
     }).compile();
 
@@ -401,6 +449,79 @@ describe('UsersService', () => {
     it('throws NotFoundException when user does not exist', async () => {
       mockUserRepo.findOne.mockResolvedValue(null);
       await expect(service.exportMyData('missing')).rejects.toThrow(NotFoundException);
+    });
+  });
+
+  // ─── eraseMyData service method (DPDP self-service hard-delete) ────────────
+
+  describe('eraseMyData', () => {
+    it('erases directly-personal data and pseudonymizes the user row after a correct current password', async () => {
+      const passwordHash = await bcrypt.hash('correct-horse', 10);
+      const user = makeUser({ passwordHash, email: 'real@example.com' } as any);
+      mockUserRepo.findOne.mockResolvedValue(user);
+
+      await service.eraseMyData('user-uuid', { currentPassword: 'correct-horse' });
+
+      expect(mockManager.delete).toHaveBeenCalledWith(Favorite, { userId: 'user-uuid' });
+      expect(mockManager.delete).toHaveBeenCalledWith(Follow, { userId: 'user-uuid' });
+      expect(mockManager.delete).toHaveBeenCalledWith(WaitlistEntry, { userId: 'user-uuid' });
+      expect(mockManager.delete).toHaveBeenCalledWith(DeviceToken, { userId: 'user-uuid' });
+      expect(mockManager.delete).toHaveBeenCalledWith(UserSession, { userId: 'user-uuid' });
+      expect(mockManager.delete).toHaveBeenCalledWith(AuthIdentity, { userId: 'user-uuid' });
+      expect(mockManager.delete).toHaveBeenCalledWith(EmailVerificationOtp, { email: 'real@example.com' });
+      expect(mockManager.delete).toHaveBeenCalledWith(PasswordResetOtp, { email: 'real@example.com' });
+
+      const updateCall = mockManager.update.mock.calls.find((c: any[]) => c[0] === User);
+      expect(updateCall[2]).toMatchObject({
+        fullName: 'Deleted User',
+        phoneNumber: null,
+        passwordHash: null,
+        bio: null,
+        isErased: true,
+      });
+      expect(updateCall[2].email).toMatch(/^erased-.+@erased\.eventrix\.app$/);
+
+      expect(mockAuditLogService.log).toHaveBeenCalledWith(
+        expect.objectContaining({ actorId: 'user-uuid', action: 'DATA_ERASURE_SELF_SERVICE' }),
+      );
+    });
+
+    it('rejects with no currentPassword for a password account', async () => {
+      const passwordHash = await bcrypt.hash('correct-horse', 10);
+      mockUserRepo.findOne.mockResolvedValue(makeUser({ passwordHash } as any));
+
+      await expect(service.eraseMyData('user-uuid', {})).rejects.toThrow(UnauthorizedException);
+      expect(mockDataSource.transaction).not.toHaveBeenCalled();
+    });
+
+    it('rejects an incorrect currentPassword', async () => {
+      const passwordHash = await bcrypt.hash('correct-horse', 10);
+      mockUserRepo.findOne.mockResolvedValue(makeUser({ passwordHash } as any));
+
+      await expect(service.eraseMyData('user-uuid', { currentPassword: 'wrong' })).rejects.toThrow(UnauthorizedException);
+      expect(mockDataSource.transaction).not.toHaveBeenCalled();
+    });
+
+    it('for a social-only account, requires reauth and verifies it against a linked identity', async () => {
+      mockUserRepo.findOne.mockResolvedValue(makeUser({ passwordHash: null } as any));
+
+      await expect(service.eraseMyData('user-uuid', {})).rejects.toThrow(UnauthorizedException);
+      expect(mockDataSource.transaction).not.toHaveBeenCalled();
+
+      mockAuthService.verifyProviderToken.mockResolvedValue({ providerUserId: 'google-123' });
+      mockAuthIdentityRepo.findOne.mockResolvedValue(null);
+      await expect(
+        service.eraseMyData('user-uuid', { reauth: { provider: 'google', token: 'tok' } }),
+      ).rejects.toThrow(UnauthorizedException);
+
+      mockAuthIdentityRepo.findOne.mockResolvedValue({ userId: 'user-uuid', provider: 'google', providerUserId: 'google-123' });
+      await service.eraseMyData('user-uuid', { reauth: { provider: 'google', token: 'tok' } });
+      expect(mockDataSource.transaction).toHaveBeenCalled();
+    });
+
+    it('throws NotFoundException when user does not exist', async () => {
+      mockUserRepo.findOne.mockResolvedValue(null);
+      await expect(service.eraseMyData('missing', {})).rejects.toThrow(NotFoundException);
     });
   });
 });

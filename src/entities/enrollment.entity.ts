@@ -7,7 +7,6 @@ import {
   ManyToOne,
   JoinColumn,
   Index,
-  Unique,
 } from 'typeorm';
 import { User } from './user.entity';
 import { Event } from './event.entity';
@@ -23,7 +22,11 @@ export enum EnrollmentStatus {
 
 @Entity('event_bookings')
 @Index(['eventId', 'userId'])
-@Unique(['userId', 'eventId'])
+// Partial unique index, not a plain @Unique — uniqueness only applies while the booking
+// isn't cancelled, so cancelling and re-enrolling in the same event doesn't permanently
+// 409 (see migration PartialUniqueIndexesAndCascadeFix). `where` is raw SQL against the
+// actual DB column name, not the TS property name.
+@Index(['userId', 'eventId'], { unique: true, where: `"booking_status" != 'cancelled'` })
 export class Enrollment {
   @PrimaryGeneratedColumn('uuid')
   id!: string;

@@ -7,7 +7,6 @@ import {
   HttpCode,
   HttpStatus,
   Param,
-  ParseIntPipe,
   ParseUUIDPipe,
   Patch,
   Post,
@@ -22,6 +21,7 @@ import { ApiTags } from '@nestjs/swagger';
 import { JwtPayload } from '../../auth/jwt.util';
 import { Roles } from '../../common/decorators/roles.decorator';
 import { AuditAction } from '../../common/decorators/audit-action.decorator';
+import { ParseLimitIntPipe, ParsePageIntPipe } from '../../common/pipes/pagination.pipe';
 
 const ADMIN_ONLY_FIELDS = ['commissionRate', 'commissionFlatFee', 'verificationLevel', 'autoApproveEvents'] as const;
 
@@ -33,8 +33,8 @@ export class OrganizerController {
 
   @Get()
   async findAll(
-    @Query('page', new DefaultValuePipe(1), ParseIntPipe) page?: number,
-    @Query('limit', new DefaultValuePipe(50), ParseIntPipe) limit?: number,
+    @Query('page', new DefaultValuePipe(1), ParsePageIntPipe()) page?: number,
+    @Query('limit', new DefaultValuePipe(50), ParseLimitIntPipe()) limit?: number,
   ) {
     return await this.organizerService.findAll(page, limit);
   }

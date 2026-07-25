@@ -7,7 +7,6 @@ import { AppService } from './app.service';
 import { DatabaseModule } from './database/database.module';
 import { AuthModule } from './auth/auth.module';
 import { UsersModule } from './users/users.module';
-import { PreviewModule } from './preview/preview.module';
 import { CrudModule } from './crud/crud.module';
 import { EventsModule } from './events/events.module';
 import { PaymentsModule } from './payments/payments.module';
@@ -74,7 +73,6 @@ import { ModerationModule } from './moderation/moderation.module';
     NotificationModule,
     AuthModule,
     UsersModule,
-    PreviewModule,
     CrudModule,
     EventsModule,
     PaymentsModule,

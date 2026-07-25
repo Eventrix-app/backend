@@ -7,7 +7,6 @@ import {
   ManyToOne,
   JoinColumn,
   Index,
-  Unique,
 } from 'typeorm';
 import { Event } from './event.entity';
 import { TicketType } from './ticket-type.entity';
@@ -22,7 +21,11 @@ export enum WaitlistStatus {
 
 @Entity('waitlist_entries')
 @Index(['ticketTypeId', 'status', 'createdAt'])
-@Unique(['userId', 'ticketTypeId'])
+// Partial unique index, not a plain @Unique — uniqueness only applies to an active
+// 'waiting' entry, so a promoted/expired/cancelled entry doesn't permanently block the
+// same user from rejoining the waitlist for that ticket type later (see migration
+// PartialUniqueIndexesAndCascadeFix).
+@Index(['userId', 'ticketTypeId'], { unique: true, where: `"status" = 'waiting'` })
 export class WaitlistEntry {
   @PrimaryGeneratedColumn('uuid')
   id!: string;

@@ -10,7 +10,6 @@ import {
   Post,
   Request,
   Query,
-  ParseIntPipe,
   DefaultValuePipe,
   HttpCode,
   HttpStatus,
@@ -32,6 +31,7 @@ import { Public } from '../common/decorators/public.decorator';
 import { AuditAction } from '../common/decorators/audit-action.decorator';
 import { UploadsService } from '../uploads/uploads.service';
 import { ALLOWED_UPLOAD_CONTENT_TYPES, AllowedUploadContentType, UploadPurpose } from '../uploads/dto/create-signed-url.dto';
+import { ParseLimitIntPipe, ParsePageIntPipe } from '../common/pipes/pagination.pipe';
 
 @ApiTags('events')
 @Controller('events')
@@ -74,8 +74,8 @@ export class EventsController {
   async findAll(
     @Query('categoryId') categoryId?: string,
     @Query('isOnline') isOnline?: string,
-    @Query('page', new DefaultValuePipe(1), ParseIntPipe) page?: number,
-    @Query('limit', new DefaultValuePipe(20), ParseIntPipe) limit?: number,
+    @Query('page', new DefaultValuePipe(1), ParsePageIntPipe()) page?: number,
+    @Query('limit', new DefaultValuePipe(20), ParseLimitIntPipe()) limit?: number,
     @Query('search') search?: string,
     @Query('priceMin') priceMin?: string,
     @Query('priceMax') priceMax?: string,
@@ -118,8 +118,8 @@ export class EventsController {
   @Roles('admin')
   @Get('pending')
   async findPending(
-    @Query('page', new DefaultValuePipe(1), ParseIntPipe) page?: number,
-    @Query('limit', new DefaultValuePipe(20), ParseIntPipe) limit?: number,
+    @Query('page', new DefaultValuePipe(1), ParsePageIntPipe()) page?: number,
+    @Query('limit', new DefaultValuePipe(20), ParseLimitIntPipe()) limit?: number,
   ) {
     return await this.eventsService.findPending(page, limit);
   }
@@ -132,8 +132,8 @@ export class EventsController {
   async findAllForAdmin(
     @Query('approvalStatus') approvalStatus?: EventApprovalStatus,
     @Query('status') status?: EventStatus,
-    @Query('page', new DefaultValuePipe(1), ParseIntPipe) page?: number,
-    @Query('limit', new DefaultValuePipe(20), ParseIntPipe) limit?: number,
+    @Query('page', new DefaultValuePipe(1), ParsePageIntPipe()) page?: number,
+    @Query('limit', new DefaultValuePipe(20), ParseLimitIntPipe()) limit?: number,
   ) {
     if (approvalStatus !== undefined && !Object.values(EventApprovalStatus).includes(approvalStatus)) {
       throw new BadRequestException('Invalid approvalStatus');
@@ -170,8 +170,8 @@ export class EventsController {
   @Get('from-following')
   async findFromFollowing(
     @Request() req: Request & { user: JwtPayload },
-    @Query('page', new DefaultValuePipe(1), ParseIntPipe) page?: number,
-    @Query('limit', new DefaultValuePipe(20), ParseIntPipe) limit?: number,
+    @Query('page', new DefaultValuePipe(1), ParsePageIntPipe()) page?: number,
+    @Query('limit', new DefaultValuePipe(20), ParseLimitIntPipe()) limit?: number,
   ) {
     return await this.eventsService.findFromFollowing(req.user.id, page, limit);
   }
@@ -183,8 +183,8 @@ export class EventsController {
   @Get('by-organizer/:organizerId')
   async findPublicEventsByOrganizer(
     @Param('organizerId', ParseUUIDPipe) organizerId: string,
-    @Query('page', new DefaultValuePipe(1), ParseIntPipe) page?: number,
-    @Query('limit', new DefaultValuePipe(20), ParseIntPipe) limit?: number,
+    @Query('page', new DefaultValuePipe(1), ParsePageIntPipe()) page?: number,
+    @Query('limit', new DefaultValuePipe(20), ParseLimitIntPipe()) limit?: number,
   ) {
     return await this.eventsService.findPublicEventsByOrganizer(organizerId, page, limit);
   }

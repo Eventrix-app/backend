@@ -301,12 +301,7 @@ export class AuthService {
     // Verify the token with the provider and extract the user's profile. Each branch
     // cryptographically verifies the token against the provider itself (signature/audience/
     // issuer/expiry as applicable) rather than trusting whatever the client asserts.
-    const { providerUserId, email, fullName, pictureUrl } =
-      provider === 'google'
-        ? await this.verifyGoogleToken(token)
-        : provider === 'apple'
-          ? await this.verifyAppleToken(token)
-          : await this.verifyFacebookToken(token);
+    const { providerUserId, email, fullName, pictureUrl } = await this.verifyProviderToken(provider, token);
 
     // Find existing identity or create a new user
     let identity = await this.authIdentityRepository.findOne({
@@ -335,7 +330,22 @@ export class AuthService {
         providerUserId,
         accessToken: token,
       });
-      await this.authIdentityRepository.save(identity);
+      try {
+        await this.authIdentityRepository.save(identity);
+      } catch (err: any) {
+        // Lost a concurrent double-tap/two-device race on the same (provider,
+        // providerUserId) pair — AuthIdentity's unique constraint rejected the second
+        // insert. The identity now exists (written by the other request), so re-fetch it
+        // and continue logging in instead of surfacing a raw 500 to the loser.
+        if (err?.code !== '23505') throw err;
+        const existing = await this.authIdentityRepository.findOne({
+          where: { provider: provider as AuthProvider, providerUserId },
+          relations: ['user'],
+        });
+        if (!existing) throw err;
+        identity = existing;
+        user = existing.user;
+      }
     }
 
     // Backfill the provider's avatar for an account that doesn't have one yet (e.g. an
@@ -371,6 +381,17 @@ export class AuthService {
 
   private socialProfile(providerUserId: string, email: string, fullName?: string, pictureUrl?: string) {
     return { providerUserId, email, fullName, pictureUrl };
+  }
+
+  // Public wrapper around the three provider-specific verify* methods below — used by
+  // socialLogin() and, separately, by UsersService.eraseMyData() to re-verify a social-only
+  // account's identity (no password to check) before honoring a data-erasure request.
+  async verifyProviderToken(provider: 'google' | 'apple' | 'facebook', token: string) {
+    return provider === 'google'
+      ? this.verifyGoogleToken(token)
+      : provider === 'apple'
+        ? this.verifyAppleToken(token)
+        : this.verifyFacebookToken(token);
   }
 
   // Verifies the ID token's signature, issuer and expiry via Google's own JWKS (handled
@@ -462,10 +483,22 @@ export class AuthService {
       error?: object;
     };
     if (data.error || data.id !== debugData.data.user_id) throw new UnauthorizedException('Invalid Facebook token');
+    // Facebook omits `email` entirely if the user declined the email permission — unlike
+    // Apple's private-relay fallback (a real address Apple actually delivers mail through),
+    // Facebook has no equivalent, so there is no legitimate address to fall back to. A
+    // fabricated `{id}@facebook.com` would silently become the account's permanent,
+    // unowned "verified" email — breaking password reset, receipts, and any future
+    // verify-your-email UX. Reject instead and ask the user to grant the permission or use
+    // another sign-in method.
+    if (!data.email) {
+      throw new BadRequestException(
+        'Facebook did not share an email address. Please grant email access or sign in another way.',
+      );
+    }
     // is_silhouette means the user has no real profile photo — Facebook's default generic
     // avatar isn't worth saving as if it were one.
     const pictureUrl = data.picture?.data?.is_silhouette ? undefined : data.picture?.data?.url;
-    return this.socialProfile(data.id, data.email ?? `${data.id}@facebook.com`, data.name, pictureUrl);
+    return this.socialProfile(data.id, data.email, data.name, pictureUrl);
   }
 
   // SHA-256 of the plaintext OTP — the code itself only ever exists in the email sent to

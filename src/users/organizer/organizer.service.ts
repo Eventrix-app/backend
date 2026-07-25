@@ -1,16 +1,19 @@
-import { BadRequestException, Injectable, NotFoundException, Logger } from '@nestjs/common';
+import { BadRequestException, Injectable, NotFoundException, Logger, UnauthorizedException } from '@nestjs/common';
 import { InjectRepository } from '@nestjs/typeorm';
-import { DataSource, Not, Repository } from 'typeorm';
+import { DataSource, IsNull, Not, Repository } from 'typeorm';
 import * as bcrypt from 'bcryptjs';
 import { UpdateOrganizerDto } from './dto/update-organizer.dto';
 import { User } from '../../entities/user.entity';
 import { Organizer, VerificationLevel } from '../../entities/organizer.entity';
 import { Event, EventApprovalStatus, EventStatus } from '../../entities/event.entity';
 import { Follow } from '../../entities/follow.entity';
+import { UserSession } from '../../entities/user-session.entity';
 import { CacheService } from '../../common/cache/cache.service';
 import { userMeCacheKey } from '../users.service';
 import { NotificationService } from '../../notifications/notification.service';
 import { UploadsService } from '../../uploads/uploads.service';
+import { EmailService } from '../../email/email.service';
+import { passwordChangedEmail } from '../../email/templates';
 import { SubmitVerificationDto } from './dto/submit-verification.dto';
 
 const BCRYPT_ROUNDS = 10;
@@ -90,10 +93,13 @@ export class OrganizerService {
     private readonly eventsRepository: Repository<Event>,
     @InjectRepository(Follow)
     private readonly followsRepository: Repository<Follow>,
+    @InjectRepository(UserSession)
+    private readonly sessionsRepository: Repository<UserSession>,
     private readonly dataSource: DataSource,
     private readonly cache: CacheService,
     private readonly notificationService: NotificationService,
     private readonly uploadsService: UploadsService,
+    private readonly emailService: EmailService,
   ) {}
 
   private mapToRecord(user: User, organizer: Organizer): OrganizerRecord {
@@ -178,9 +184,21 @@ export class OrganizerService {
         `${dto.firstName ?? curFirst} ${dto.lastName ?? curLast.join(' ')}`.trim();
     }
     if (dto.phone !== undefined) user.phoneNumber = dto.phone;
+    let passwordChanged = false;
     if (dto.password) {
+      // Requires proof of the current password — see the identical check in
+      // ParticipantService.update for why (prevents a stolen-but-valid token from
+      // silently taking over the account via this profile-update endpoint).
+      if (!dto.currentPassword) {
+        throw new UnauthorizedException('Current password is required to set a new password');
+      }
+      const matches = await bcrypt.compare(dto.currentPassword, user.passwordHash ?? '');
+      if (!matches) {
+        throw new UnauthorizedException('Current password is incorrect');
+      }
       user.passwordHash = await bcrypt.hash(dto.password, BCRYPT_ROUNDS);
       user.passwordChangedAt = new Date();
+      passwordChanged = true;
     }
 
     if (dto.companyLogoUrl !== undefined) organizer.companyLogoUrl = dto.companyLogoUrl;
@@ -193,6 +211,13 @@ export class OrganizerService {
     const savedOrganizer = await this.organizersRepository.save(organizer);
 
     this.logger.log(`Updated organizer in database: ${savedUser.email}`);
+
+    if (passwordChanged) {
+      await this.sessionsRepository.update({ userId: savedUser.id, revokedAt: IsNull() }, { revokedAt: new Date() });
+      const changed = passwordChangedEmail();
+      await this.emailService.send(savedUser.email, changed.subject, changed.html);
+    }
+
     return this.mapToRecord(savedUser, savedOrganizer);
   }
 

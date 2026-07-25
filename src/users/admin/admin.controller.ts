@@ -5,7 +5,6 @@ import {
   DefaultValuePipe,
   Get,
   Param,
-  ParseIntPipe,
   ParseUUIDPipe,
   Patch,
   Post,
@@ -19,6 +18,7 @@ import { Roles } from '../../common/decorators/roles.decorator';
 import { Public } from '../../common/decorators/public.decorator';
 import { AuditAction } from '../../common/decorators/audit-action.decorator';
 import { AdminService } from './admin.service';
+import { ParseLimitIntPipe, ParsePageIntPipe } from '../../common/pipes/pagination.pipe';
 
 @ApiTags('admin')
 @Roles('admin')
@@ -40,8 +40,8 @@ export class AdminController {
 
   @Get()
   async findAll(
-    @Query('page', new DefaultValuePipe(1), ParseIntPipe) page?: number,
-    @Query('limit', new DefaultValuePipe(50), ParseIntPipe) limit?: number,
+    @Query('page', new DefaultValuePipe(1), ParsePageIntPipe()) page?: number,
+    @Query('limit', new DefaultValuePipe(50), ParseLimitIntPipe()) limit?: number,
   ) {
     return await this.adminService.findAll(page, limit);
   }

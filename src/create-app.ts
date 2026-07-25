@@ -8,6 +8,16 @@ import { HttpExceptionFilter } from './common/filters/http-exception.filter';
 import { setupSwagger } from './crud/swagger-helper';
 import { initSentry } from './config/sentry';
 
+// Last-resort net for any promise rejection that escapes its own try/catch (e.g. a
+// fire-and-forget `void someAsyncCall()` at a call site that assumed the callee could
+// never reject). Without this, Node's default behavior is to crash the whole process on
+// an unhandled rejection — logging and surviving is strictly better for a long-running
+// API server than taking down every in-flight request over one such bug.
+process.on('unhandledRejection', (reason) => {
+  // eslint-disable-next-line no-console
+  console.error('Unhandled promise rejection:', reason);
+});
+
 // Builds and configures the Nest app without binding a port, so the same setup can be
 // reused by both the traditional long-running server (main.ts) and the Vercel serverless
 // entrypoint (api/index.ts), which must never call app.listen().
@@ -20,10 +30,9 @@ export async function createApp(): Promise<NestExpressApplication> {
 
   // Sets the standard hardening headers (X-Content-Type-Options, X-Frame-Options, HSTS,
   // etc.) that were previously entirely absent. CSP is left off: this app is primarily a
-  // JSON API but does serve Swagger UI (/api/docs) and a couple of server-rendered `.hbs`
-  // views, both of which rely on inline scripts/styles that helmet's default CSP blocks —
-  // enabling it would require hand-tuning a policy for pages this app doesn't treat as
-  // security-sensitive today.
+  // JSON API but does serve Swagger UI (/api/docs), which relies on inline scripts/styles
+  // that helmet's default CSP blocks — enabling it would require hand-tuning a policy for
+  // a page this app doesn't treat as security-sensitive today.
   app.use(helmet({ contentSecurityPolicy: false }));
 
   app.useGlobalPipes(

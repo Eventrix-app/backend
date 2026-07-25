@@ -1,7 +1,4 @@
 import {
-  IsBoolean,
-  IsEmail,
-  IsNotEmpty,
   IsOptional,
   IsString,
   MinLength,
@@ -15,13 +12,16 @@ export class UpdateParticipantDto {
   username!: string;
 
   @IsOptional()
-  @IsEmail()
-  email!: string;
-
-  @IsOptional()
   @IsString()
   @MinLength(8)
   password!: string;
+
+  // Required alongside `password` — proves the caller actually knows the current
+  // password rather than just holding a valid access token, matching the dedicated
+  // change-password flow (AuthService.changePassword). Checked in ParticipantService.update.
+  @IsOptional()
+  @IsString()
+  currentPassword!: string;
 
   @IsOptional()
   @IsString()
@@ -71,8 +71,4 @@ export class UpdateParticipantDto {
   @IsOptional()
   @IsString()
   pincode!: string;
-
-  @IsOptional()
-  @IsBoolean()
-  isActive!: boolean;
 }

@@ -113,6 +113,14 @@ export class User {
   @DeleteDateColumn({ name: 'deleted_at', nullable: true })
   deletedAt!: Date;
 
+  // Set by UsersService.eraseMyData (Settings → Delete My Data) — distinct from deletedAt
+  // (soft deactivation, reversible in principle). true means this row's directly-personal
+  // columns (name/email/phone/etc.) have been scrubbed/pseudonymized; the row itself is
+  // kept because statutorily-retained records (bookings/payments/refunds/payouts) still
+  // hold a live FK to it. See DPDP Act erasure policy in project memory.
+  @Column({ name: 'is_erased', type: 'boolean', default: false })
+  isErased!: boolean;
+
   @OneToMany(() => Organizer, (organizer) => organizer.user)
   organizers!: Organizer[];
 

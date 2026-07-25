@@ -18,6 +18,7 @@ import { UpdateLocationDto } from './participant/dto/update-location.dto';
 import { UpdateNotificationPrefsDto } from './participant/dto/update-notification-prefs.dto';
 import { UpdateNotificationChannelsDto } from './participant/dto/update-notification-channels.dto';
 import { UpdatePushTokenDto } from './participant/dto/update-push-token.dto';
+import { EraseMyDataDto } from './dto/erase-my-data.dto';
 import { UsersService } from './users.service';
 
 @ApiTags('users')
@@ -101,6 +102,20 @@ export class UsersController {
   @HttpCode(HttpStatus.NO_CONTENT)
   async deleteMe(@Request() req: Request & { user: JwtPayload }) {
     await this.usersService.deleteMe(req.user.id);
+  }
+
+  // Self-service DPDP-Act data erasure (Settings → Delete My Data) — distinct from
+  // DELETE /users/me above, which only deactivates the account. Throttled for the same
+  // reason as password-change-adjacent endpoints: it's a sensitive, identity-verified
+  // action that shouldn't be brute-forceable.
+  @Throttle({ default: { limit: 3, ttl: 3600000 } })
+  @Delete('me/data')
+  @HttpCode(HttpStatus.NO_CONTENT)
+  async eraseMyData(
+    @Body() dto: EraseMyDataDto,
+    @Request() req: Request & { user: JwtPayload },
+  ) {
+    await this.usersService.eraseMyData(req.user.id, dto);
   }
 
   // Self-service data export (Settings → Download My Data). Emails a JSON copy to the

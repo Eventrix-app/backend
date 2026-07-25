@@ -819,6 +819,9 @@ export class EventsService {
     await this.assertOwnsEvent(event, userId, userRoles);
     this.assertNotRejected(event);
     this.assertSalesEndWithinEvent(event, dto.salesEndAt);
+    const newSalesStartAt = dto.salesStartAt ? new Date(dto.salesStartAt) : undefined;
+    const newSalesEndAt = dto.salesEndAt ? new Date(dto.salesEndAt) : undefined;
+    this.assertSalesWindowOrdered(newSalesStartAt, newSalesEndAt);
     await this.syncEventPaidStatusForTierPrice(event, dto.price);
 
     const ticketType = this.ticketTypesRepository.create({
@@ -827,8 +830,8 @@ export class EventsService {
       price: dto.price,
       currency: dto.currency ?? event.currency,
       quantityTotal: dto.quantityTotal,
-      salesStartAt: dto.salesStartAt ? new Date(dto.salesStartAt) : undefined,
-      salesEndAt: dto.salesEndAt ? new Date(dto.salesEndAt) : undefined,
+      salesStartAt: newSalesStartAt,
+      salesEndAt: newSalesEndAt,
       minPerOrder: dto.minPerOrder ?? 1,
       maxPerOrder: dto.maxPerOrder,
       isHidden: dto.isHidden ?? false,
@@ -878,6 +881,7 @@ export class EventsService {
 
     if (dto.salesStartAt !== undefined) ticketType.salesStartAt = dto.salesStartAt ? new Date(dto.salesStartAt) : undefined;
     if (dto.salesEndAt !== undefined) ticketType.salesEndAt = dto.salesEndAt ? new Date(dto.salesEndAt) : undefined;
+    this.assertSalesWindowOrdered(ticketType.salesStartAt, ticketType.salesEndAt);
     const { salesStartAt, salesEndAt, ...rest } = dto;
     Object.assign(ticketType, rest);
 
@@ -1047,8 +1051,10 @@ export class EventsService {
         throw new BadRequestException('Ticket sales have ended for this ticket type');
       }
 
+      // Excludes cancelled bookings — a user who cancelled must be able to enroll again,
+      // matching the partial unique index below (booking_status != 'cancelled').
       const existing = await manager.findOne(Enrollment, {
-        where: { eventId, userId },
+        where: { eventId, userId, status: Not('cancelled') },
       });
       if (existing) {
         throw new ConflictException('User already enrolled in this event');
@@ -1350,12 +1356,20 @@ export class EventsService {
       throw new BadRequestException('Cannot check in: payment for this booking is not confirmed');
     }
 
-    if (enrollment.checkedInAt) {
+    // Atomic claim — a plain read-then-write here could let the same ticket be honored
+    // twice if scanned concurrently (a retried request, or the same QR used at two
+    // entrances at once), since two overlapping calls could both read checkedInAt as
+    // null before either write lands. Mirrors the UPDATE ... WHERE ... RETURNING claim
+    // pattern already used for ticket-type capacity in enroll()/tryPromote().
+    const claim = await this.enrollmentRepository.query(
+      `UPDATE event_bookings SET used_date = now() WHERE id = $1 AND used_date IS NULL RETURNING used_date`,
+      [enrollment.id],
+    );
+    if (!claim?.length) {
       throw new ConflictException('Ticket already checked in');
     }
-
-    enrollment.checkedInAt = new Date();
-    return this.enrollmentRepository.save(enrollment);
+    enrollment.checkedInAt = claim[0].used_date;
+    return enrollment;
   }
 
   // Section 4e: fetch a single enrollment — only the owning user or admin may access
@@ -1443,6 +1457,16 @@ export class EventsService {
     if (!salesEndAt) return;
     if (new Date(salesEndAt).getTime() > getEventEndDateTime(event).getTime()) {
       throw new BadRequestException('salesEndAt cannot be after the event ends');
+    }
+  }
+
+  // A start/end typo (e.g. the two fields swapped) would otherwise silently create a tier
+  // whose sales window can never be open — enroll()'s `now < salesStartAt` and
+  // `now > salesEndAt` checks can't both be false at once — with no error surfaced to the
+  // organizer at creation/edit time.
+  private assertSalesWindowOrdered(salesStartAt?: Date, salesEndAt?: Date): void {
+    if (salesStartAt && salesEndAt && salesStartAt.getTime() >= salesEndAt.getTime()) {
+      throw new BadRequestException('salesStartAt must be before salesEndAt');
     }
   }
 }

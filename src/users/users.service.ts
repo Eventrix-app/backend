@@ -1,18 +1,29 @@
-import { Injectable, Logger, NotFoundException } from '@nestjs/common';
+import { Injectable, Logger, NotFoundException, UnauthorizedException } from '@nestjs/common';
 import { InjectRepository } from '@nestjs/typeorm';
-import { Repository } from 'typeorm';
+import { DataSource, IsNull, Repository } from 'typeorm';
+import * as bcrypt from 'bcryptjs';
+import { randomUUID } from 'crypto';
 import { User } from '../entities/user.entity';
 import { EventCategory } from '../entities/category.entity';
 import { Follow } from '../entities/follow.entity';
+import { Favorite } from '../entities/favorite.entity';
+import { WaitlistEntry } from '../entities/waitlist-entry.entity';
+import { UserSession } from '../entities/user-session.entity';
+import { AuthIdentity, AuthProvider } from '../entities/auth-identity.entity';
+import { EmailVerificationOtp } from '../entities/email-verification-otp.entity';
+import { PasswordResetOtp } from '../entities/password-reset-otp.entity';
 import { Organizer } from '../entities/organizer.entity';
 import { DeviceToken } from '../entities/device-token.entity';
 import { UpdateInterestsDto } from './participant/dto/update-interests.dto';
 import { UpdateLocationDto } from './participant/dto/update-location.dto';
 import { UpdateNotificationPrefsDto } from './participant/dto/update-notification-prefs.dto';
 import { UpdateNotificationChannelsDto } from './participant/dto/update-notification-channels.dto';
+import { EraseMyDataDto } from './dto/erase-my-data.dto';
 import { CacheService } from '../common/cache/cache.service';
 import { EmailService } from '../email/email.service';
 import { dataExportEmail } from '../email/templates';
+import { AuditLogService } from '../common/audit-log/audit-log.service';
+import { AuthService } from '../auth/auth.service';
 
 // Exported so ParticipantService (a separate service writing to the same `users` row via
 // PATCH /participants/:id) can invalidate the same cache entry this module populates.
@@ -28,6 +39,13 @@ export type CurrentUserResponse = {
   phoneNumber: string | null;
   profilePictureUrl: string | null;
   isEmailVerified: boolean;
+  // Tells the client whether Settings → Delete My Data should collect a current-password
+  // confirmation or trigger social re-authentication instead — a social-only account
+  // (Google/Apple/Facebook, never set a password) has no passwordHash to check.
+  hasPassword: boolean;
+  // Linked social sign-in providers (e.g. ['google']) — lets the client know which
+  // provider to re-authenticate with for Delete My Data when hasPassword is false.
+  authProviders: string[];
   bio: string | null;
   location: string | null;
   city: string;
@@ -61,8 +79,23 @@ export class UsersService {
     private readonly organizerRepository: Repository<Organizer>,
     @InjectRepository(DeviceToken)
     private readonly deviceTokenRepository: Repository<DeviceToken>,
+    @InjectRepository(Favorite)
+    private readonly favoriteRepository: Repository<Favorite>,
+    @InjectRepository(WaitlistEntry)
+    private readonly waitlistEntryRepository: Repository<WaitlistEntry>,
+    @InjectRepository(UserSession)
+    private readonly sessionsRepository: Repository<UserSession>,
+    @InjectRepository(AuthIdentity)
+    private readonly authIdentityRepository: Repository<AuthIdentity>,
+    @InjectRepository(EmailVerificationOtp)
+    private readonly emailVerificationOtpRepository: Repository<EmailVerificationOtp>,
+    @InjectRepository(PasswordResetOtp)
+    private readonly passwordResetOtpRepository: Repository<PasswordResetOtp>,
+    private readonly dataSource: DataSource,
     private readonly cache: CacheService,
     private readonly emailService: EmailService,
+    private readonly auditLogService: AuditLogService,
+    private readonly authService: AuthService,
   ) {}
 
   // Participant-specific fields (city, etc.) are JSON-encoded in the `bio` column (see
@@ -96,6 +129,7 @@ export class UsersService {
     const meta = this.parseMeta(user.bio ?? null);
     const [firstName, ...lastNameParts] = (user.fullName || '').split(' ');
     const followingCount = await this.followsRepository.count({ where: { userId } });
+    const authIdentities = await this.authIdentityRepository.find({ where: { userId } });
 
     const response: CurrentUserResponse = {
       id: user.id,
@@ -106,6 +140,8 @@ export class UsersService {
       phoneNumber: user.phoneNumber ?? null,
       profilePictureUrl: user.profilePictureUrl ?? null,
       isEmailVerified: user.isEmailVerified,
+      hasPassword: !!user.passwordHash,
+      authProviders: authIdentities.map((identity) => identity.provider),
       bio: user.bio ?? null,
       location: user.location ?? null,
       city: meta['city'] || '',
@@ -246,6 +282,111 @@ export class UsersService {
     await this.usersRepository.softRemove(user);
     await this.cache.del(userMeCacheKey(userId));
     this.logger.log(`Account self-deleted: ${user.email}`);
+  }
+
+  // Self-service hard data erasure (Settings → Delete My Data), distinct from deleteMe()
+  // above (a reversible-in-principle deactivation). Implements India's DPDP Act 2023 §12
+  // erasure right: personal data with no independent legal retention basis is erased
+  // outright; statutorily-retained records (bookings/payments/refunds/payouts, organizer
+  // KYC documents, audit logs — see data-retention-policy.md) are left untouched, and this
+  // User row is pseudonymized rather than deleted so those records keep a valid owner
+  // reference. Requires identity verification first (current password, or re-authentication
+  // for a social-only account) — an erasure request must be provably from the account
+  // owner, not just from whoever holds a valid access token.
+  async eraseMyData(userId: string, dto: EraseMyDataDto): Promise<void> {
+    const user = await this.usersRepository.findOne({ where: { id: userId } });
+    if (!user) {
+      throw new NotFoundException(`User ${userId} not found`);
+    }
+
+    if (user.passwordHash) {
+      if (!dto.currentPassword) {
+        throw new UnauthorizedException('Current password is required to erase your data');
+      }
+      const matches = await bcrypt.compare(dto.currentPassword, user.passwordHash);
+      if (!matches) {
+        throw new UnauthorizedException('Current password is incorrect');
+      }
+    } else {
+      if (!dto.reauth) {
+        throw new UnauthorizedException('Re-authentication is required to erase your data');
+      }
+      const profile = await this.authService.verifyProviderToken(dto.reauth.provider, dto.reauth.token);
+      const linkedIdentity = await this.authIdentityRepository.findOne({
+        where: { userId, provider: dto.reauth.provider as AuthProvider, providerUserId: profile.providerUserId },
+      });
+      if (!linkedIdentity) {
+        throw new UnauthorizedException('Re-authentication failed');
+      }
+    }
+
+    const originalEmail = user.email;
+    const erasedCategories = [
+      'favorites',
+      'follows',
+      'waitlist entries',
+      'device tokens',
+      'sessions',
+      'linked social sign-in identities',
+      'pending email/password OTPs',
+      'profile PII (name, email, phone, photo, bio, location, date of birth, gender, notification preferences, password)',
+    ];
+    const retainedCategories = [
+      'bookings/enrollments',
+      'payments',
+      'refunds',
+      'payouts',
+      'organizer KYC documents (where applicable)',
+      'audit logs',
+    ];
+
+    await this.dataSource.transaction(async (manager) => {
+      await manager.delete(Favorite, { userId });
+      await manager.delete(Follow, { userId });
+      await manager.delete(WaitlistEntry, { userId });
+      await manager.delete(DeviceToken, { userId });
+      // Revoke before delete, not strictly necessary since the rows are about to be
+      // removed, but keeps the audit trail (any external session log) consistent with
+      // every other revocation path in this app.
+      await manager.update(UserSession, { userId, revokedAt: IsNull() }, { revokedAt: new Date() });
+      await manager.delete(UserSession, { userId });
+      await manager.delete(AuthIdentity, { userId });
+      await manager.delete(EmailVerificationOtp, { email: originalEmail });
+      await manager.delete(PasswordResetOtp, { email: originalEmail });
+
+      // Several of these columns are nullable in the DB but typed as plain (non-nullable)
+      // strings on the entity — a pre-existing looseness elsewhere in this codebase too
+      // (e.g. events.service.ts's `deletedAt: null as any`) — hence the cast.
+      await manager.update(User, userId, {
+        fullName: 'Deleted User',
+        email: `erased-${randomUUID()}@erased.eventrix.app`,
+        phoneNumber: null,
+        passwordHash: null,
+        profilePictureUrl: null,
+        bio: null,
+        location: null,
+        latitude: null,
+        longitude: null,
+        dateOfBirth: null,
+        gender: null,
+        notificationPrefs: null,
+        isErased: true,
+        deletedAt: new Date(),
+      } as any);
+    });
+
+    await this.cache.del(userMeCacheKey(userId));
+
+    await this.auditLogService.log({
+      actorId: userId,
+      actorEmail: originalEmail,
+      action: 'DATA_ERASURE_SELF_SERVICE',
+      targetType: 'user',
+      targetId: userId,
+      metadata: { erasedCategories, retainedCategories },
+    });
+
+    this.logger.log(`User ${userId} erased their personal data (self-service DPDP request)`);
   }
 
   // Self-service "download my data" (Settings → Data & Privacy). Scoped to the account/

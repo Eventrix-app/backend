@@ -2,12 +2,32 @@ import {
   ForbiddenException,
   Injectable,
   InternalServerErrorException,
+  Logger,
+  OnModuleInit,
   ServiceUnavailableException,
 } from '@nestjs/common';
 import { ConfigService } from '@nestjs/config';
 import { createClient } from '@supabase/supabase-js';
 import { randomUUID } from 'crypto';
 import { AllowedUploadContentType, CreateSignedUrlDto, UploadPurpose } from './dto/create-signed-url.dto';
+
+const MAX_UPLOAD_BYTES = 10 * 1024 * 1024; // 10MB — plenty for a photo or ID-document scan
+
+// Per-bucket allow-list enforced by Supabase Storage itself on every upload through a
+// signed URL, not just the DTO's client-declared contentType (which only ever chose a
+// file extension for the object key — nothing previously stopped a client from PUTting
+// arbitrary bytes, e.g. HTML/SVG with a mismatched Content-Type, to a "png" path). Only
+// `event-images` needs video: it's shared by both EVENT_IMAGE (gallery items, which can be
+// short video clips — see EventMedia.type) and EVENT_COVER (image-only in practice).
+// Every other bucket here is inherently photo-only (profile pictures, logos, KYC document
+// scans) and has no legitimate reason to accept video.
+const BUCKET_CONSTRAINTS: Record<string, { public: boolean; allowedMimeTypes: string[] }> = {
+  'profile-pictures': { public: true, allowedMimeTypes: ['image/png', 'image/jpeg', 'image/jpg', 'image/heic', 'image/webp'] },
+  'event-images': { public: true, allowedMimeTypes: ['image/png', 'image/jpeg', 'image/jpg', 'image/heic', 'image/webp', 'video/mp4', 'video/quicktime'] },
+  'organizer-logos': { public: true, allowedMimeTypes: ['image/png', 'image/jpeg', 'image/jpg', 'image/heic', 'image/webp'] },
+  // isPrivate in PURPOSE_CONFIG above — KYC document scans, never publicly readable.
+  'organizer-kyc-docs': { public: false, allowedMimeTypes: ['image/png', 'image/jpeg', 'image/jpg', 'image/heic', 'image/webp'] },
+};
 
 interface PurposeConfig {
   bucket: string;
@@ -49,8 +69,37 @@ const EXTENSION_BY_CONTENT_TYPE: Record<AllowedUploadContentType, string> = {
 };
 
 @Injectable()
-export class UploadsService {
+export class UploadsService implements OnModuleInit {
+  private readonly logger = new Logger(UploadsService.name);
+
   constructor(private readonly configService: ConfigService) {}
+
+  // Self-healing, idempotent bucket-constraint sync — same spirit as CategoryService's
+  // OnModuleInit seeding. Buckets themselves are still provisioned out-of-band in Supabase,
+  // but their MIME/size limits are enforced from this map on every boot rather than only
+  // living as a manually-set dashboard setting someone could forget to configure (or
+  // accidentally loosen) on a new environment. Must never fail app startup — a missing
+  // Supabase config or a not-yet-created bucket just logs a warning and skips.
+  async onModuleInit(): Promise<void> {
+    const supabaseUrl = this.configService.get<string>('SUPABASE_URL');
+    const supabaseKey = this.configService.get<string>('SUPABASE_SERVICE_ROLE_KEY');
+    if (!supabaseUrl || !supabaseKey) {
+      this.logger.warn('Skipping upload bucket constraint sync — SUPABASE_URL/SUPABASE_SERVICE_ROLE_KEY not configured');
+      return;
+    }
+    const supabase = createClient(supabaseUrl, supabaseKey);
+
+    for (const [bucket, constraints] of Object.entries(BUCKET_CONSTRAINTS)) {
+      const { error } = await supabase.storage.updateBucket(bucket, {
+        public: constraints.public,
+        fileSizeLimit: MAX_UPLOAD_BYTES,
+        allowedMimeTypes: constraints.allowedMimeTypes,
+      });
+      if (error) {
+        this.logger.warn(`Could not sync upload constraints for bucket "${bucket}": ${error.message}`);
+      }
+    }
+  }
 
   // Issues a signed PUT URL scoped to the correct bucket/path for the declared
   // purpose. Bytes never transit this server — the client PUTs directly to Supabase

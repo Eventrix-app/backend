@@ -38,7 +38,11 @@ describe('ChatRealtimeService', () => {
       topic: 'event:event-1',
       event: 'newMessage',
       payload: { id: 'msg-1', message: 'hi' },
-      private: false,
+      // Regression guard: a public (private: false) topic requires no Supabase-side
+      // authorization at all, so anyone holding the app's public anon key could subscribe
+      // directly and read every live chat message — see the comment in
+      // chat-realtime.service.ts on why this must stay `true`.
+      private: true,
     });
   });
 

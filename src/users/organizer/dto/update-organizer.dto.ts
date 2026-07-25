@@ -19,6 +19,12 @@ export class UpdateOrganizerDto {
   @MinLength(8)
   password?: string;
 
+  // Required alongside `password` — proves the caller actually knows the current
+  // password. Checked in OrganizerService.update.
+  @IsOptional()
+  @IsString()
+  currentPassword?: string;
+
   // Previously a dead field on the Organizer entity with no way to set it — the
   // client obtains this URL via POST /uploads/signed-url (purpose: "company-logo"),
   // then saves it here. See multipart.md §3.4.

@@ -43,7 +43,23 @@ export class ChatRealtimeService {
           'Content-Type': 'application/json',
         },
         body: JSON.stringify({
-          messages: [{ topic: `event:${eventId}`, event, payload, private: false }],
+          // private: true — REST-side enrollment/organizer/block checks in ChatService
+          // already gate every read/write, but a `private: false` topic requires no
+          // authorization on Supabase's side at all: anyone holding the app's public anon
+          // key (shipped in the mobile bundle) could subscribe to `event:{id}` directly and
+          // read every live message plus the sender's name/photo, bypassing all of that.
+          // `private: true` makes Supabase deny any subscriber with no matching Realtime
+          // Authorization RLS policy on `realtime.messages` — fail-closed by default.
+          //
+          // Follow-up required outside this app's code: this app's users authenticate via
+          // its own JWT, not Supabase Auth, so `auth.uid()`/`auth.jwt()` (what Postgres RLS
+          // normally checks) has nothing to key off yet for them. Closing this properly
+          // needs a product/infra decision — e.g. registering this app's JWT issuer with
+          // Supabase's third-party-auth support, or moving chat delivery off Supabase
+          // Realtime to a backend-mediated relay — before an RLS policy can actually
+          // authorize real subscribers. Until that lands, live chat delivery will not reach
+          // any client (a safe failure — no delivery — rather than an open one).
+          messages: [{ topic: `event:${eventId}`, event, payload, private: true }],
         }),
       });
       if (!res.ok) {

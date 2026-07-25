@@ -30,7 +30,14 @@ export class Organizer {
   @Column({ name: 'user_id' })
   userId!: string;
 
-  @ManyToOne(() => User, (user) => user.organizers, { onDelete: 'CASCADE' })
+  // RESTRICT, not CASCADE — matches every other financially-sensitive relation in this
+  // schema (Enrollment.user/event, Payment/Refund/Payout.*). A hard DELETE of a user row
+  // should fail loudly rather than silently cascade-deleting their Organizer profile (and,
+  // in turn, every Event they own via Event.organizer below) — nothing in this app hard-
+  // deletes users today (see UsersService.deleteMe/eraseMyData, both soft/pseudonymizing),
+  // but a future ops script or GDPR-erasure path must not be able to destroy event data
+  // this way. See migration PartialUniqueIndexesAndCascadeFix.
+  @ManyToOne(() => User, (user) => user.organizers, { onDelete: 'RESTRICT' })
   @JoinColumn({ name: 'user_id' })
   user!: User;
 

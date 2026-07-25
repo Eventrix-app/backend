@@ -7,7 +7,6 @@ import {
   HttpCode,
   HttpStatus,
   Param,
-  ParseIntPipe,
   ParseUUIDPipe,
   Patch,
   Post,
@@ -22,6 +21,7 @@ import { Roles } from '../../common/decorators/roles.decorator';
 import { Public } from '../../common/decorators/public.decorator';
 import { ApiTags } from '@nestjs/swagger';
 import { JwtPayload } from '../../auth/jwt.util';
+import { ParseLimitIntPipe, ParsePageIntPipe } from '../../common/pipes/pagination.pipe';
 
 @Roles('admin')
 @ApiTags('participants')
@@ -37,8 +37,8 @@ export class ParticipantController {
 
   @Get()
   async findAll(
-    @Query('page', new DefaultValuePipe(1), ParseIntPipe) page?: number,
-    @Query('limit', new DefaultValuePipe(50), ParseIntPipe) limit?: number,
+    @Query('page', new DefaultValuePipe(1), ParsePageIntPipe()) page?: number,
+    @Query('limit', new DefaultValuePipe(50), ParseLimitIntPipe()) limit?: number,
   ) {
     return await this.participantService.findAll(page, limit);
   }

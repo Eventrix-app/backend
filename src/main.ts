@@ -7,9 +7,6 @@ async function bootstrap() {
   const app = await createApp();
   await app.listen(process.env.PORT ?? 3000);
   console.log(
-    `Preview endpoint available at http://localhost:${process.env.PORT ?? 3000}/preview`,
-  );
-  console.log(
     `Swagger documentation available at http://localhost:${process.env.PORT ?? 3000}/api/docs`,
   );
 }

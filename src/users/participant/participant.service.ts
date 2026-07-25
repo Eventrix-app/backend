@@ -1,5 +1,5 @@
-import { ConflictException, Injectable, NotFoundException, Logger } from '@nestjs/common';
-import { In, Raw } from 'typeorm';
+import { ConflictException, Injectable, NotFoundException, Logger, UnauthorizedException } from '@nestjs/common';
+import { In, IsNull, Raw } from 'typeorm';
 import { InjectRepository } from '@nestjs/typeorm';
 import { Repository } from 'typeorm';
 import * as bcrypt from 'bcryptjs';
@@ -11,8 +11,11 @@ import { UpdateLocationDto } from './dto/update-location.dto';
 import { UpdateNotificationPrefsDto } from './dto/update-notification-prefs.dto';
 import { User } from '../../entities/user.entity';
 import { EventCategory } from '../../entities/category.entity';
+import { UserSession } from '../../entities/user-session.entity';
 import { JwtPayload } from '../../auth/jwt.util';
 import { CacheService } from '../../common/cache/cache.service';
+import { EmailService } from '../../email/email.service';
+import { passwordChangedEmail } from '../../email/templates';
 import { userMeCacheKey } from '../users.service';
 
 const BCRYPT_ROUNDS = 10;
@@ -54,8 +57,11 @@ export class ParticipantService {
     private readonly usersRepository: Repository<User>,
     @InjectRepository(EventCategory)
     private readonly categoryRepository: Repository<EventCategory>,
+    @InjectRepository(UserSession)
+    private readonly sessionsRepository: Repository<UserSession>,
     private readonly jwtService: JwtService,
     private readonly cache: CacheService,
+    private readonly emailService: EmailService,
   ) {}
 
   /**
@@ -218,9 +224,22 @@ export class ParticipantService {
     if (dto.dateOfBirth !== undefined) user.dateOfBirth = dto.dateOfBirth;
     if (dto.profileImageUrl !== undefined)
       user.profilePictureUrl = dto.profileImageUrl;
+    let passwordChanged = false;
     if (dto.password) {
+      // Requires proof of the current password — without this, anyone holding a valid
+      // access token (leaked via XSS, a shared device, insecure storage) could silently
+      // overwrite the real owner's password via this profile-update endpoint, bypassing
+      // the dedicated change-password flow's current-password check entirely.
+      if (!dto.currentPassword) {
+        throw new UnauthorizedException('Current password is required to set a new password');
+      }
+      const matches = await bcrypt.compare(dto.currentPassword, user.passwordHash ?? '');
+      if (!matches) {
+        throw new UnauthorizedException('Current password is incorrect');
+      }
       user.passwordHash = await bcrypt.hash(dto.password, BCRYPT_ROUNDS);
       user.passwordChangedAt = new Date();
+      passwordChanged = true;
     }
 
     // Merge meta stored in bio — only fields explicitly provided in DTO
@@ -234,6 +253,16 @@ export class ParticipantService {
     // Writes here land on the same `users` row GET /users/me (UsersService.findMe) reads
     // and caches — bust that cache key too or the caller would see stale data for its TTL.
     await this.cache.del(userMeCacheKey(id));
+
+    if (passwordChanged) {
+      // Matches AuthService.changePassword's behavior: a stolen-but-still-valid session
+      // must stop working the moment the password changes, and the real owner gets a
+      // notice so an unauthorized change doesn't happen silently.
+      await this.sessionsRepository.update({ userId: id, revokedAt: IsNull() }, { revokedAt: new Date() });
+      const changed = passwordChangedEmail();
+      await this.emailService.send(updatedUser.email, changed.subject, changed.html);
+    }
+
     return this.mapUserToParticipantRecord(updatedUser);
   }
 
