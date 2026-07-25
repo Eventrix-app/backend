@@ -24,10 +24,9 @@ import { EmailService } from '../email/email.service';
 import { dataExportEmail } from '../email/templates';
 import { AuditLogService } from '../common/audit-log/audit-log.service';
 import { AuthService } from '../auth/auth.service';
+import { userMeCacheKey } from './user-cache-keys';
+export { userMeCacheKey };
 
-// Exported so ParticipantService (a separate service writing to the same `users` row via
-// PATCH /participants/:id) can invalidate the same cache entry this module populates.
-export const userMeCacheKey = (userId: string): string => `users:me:${userId}`;
 const USER_ME_CACHE_TTL_SECONDS = 60;
 
 export type CurrentUserResponse = {

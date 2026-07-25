@@ -23,7 +23,7 @@ import { PasswordResetOtp } from '../entities/password-reset-otp.entity';
 import { EmailVerificationOtp } from '../entities/email-verification-otp.entity';
 import { UserSession } from '../entities/user-session.entity';
 import { CacheService } from '../common/cache/cache.service';
-import { userMeCacheKey } from '../users/users.service';
+import { userMeCacheKey } from '../users/user-cache-keys';
 import { EmailService } from '../email/email.service';
 import {
   emailVerificationOtpEmail,
@@ -394,11 +394,13 @@ export class AuthService {
         : this.verifyFacebookToken(token);
   }
 
-  // Verifies the ID token's signature, issuer and expiry via Google's own JWKS (handled
-  // internally by google-auth-library) and — critically — checks the `aud` claim against
-  // one of *our* configured client IDs. Without the audience check, any valid Google ID
-  // token issued for any app on Earth would pass verification.
-  private async verifyGoogleToken(idToken: string) {
+  // Verifies a Google token — accepts both ID tokens (JWT, 3 dot-separated segments) and
+  // access tokens (opaque ya29.xxx strings). ID tokens are verified cryptographically via
+  // Google's JWKS and have their `aud` claim checked against our configured client IDs.
+  // Access tokens (which expo-auth-session/providers/google returns when idToken is absent
+  // in the native Android OAuth response) are verified by calling Google's userinfo
+  // endpoint — Google only returns a valid profile if the token is genuine and unexpired.
+  private async verifyGoogleToken(token: string) {
     const audience = [
       this.configService.get<string>('GOOGLE_CLIENT_ID_IOS'),
       this.configService.get<string>('GOOGLE_CLIENT_ID_ANDROID'),
@@ -409,16 +411,38 @@ export class AuthService {
       throw new UnauthorizedException('Google sign-in is not configured on the server');
     }
 
-    let payload: TokenPayload | undefined;
+    // A JWT has exactly 3 base64url segments separated by dots. Google access tokens
+    // (ya29.xxx) are opaque strings that will never match this shape.
+    const isIdToken = token.split('.').length === 3;
+
+    if (isIdToken) {
+      let payload: TokenPayload | undefined;
+      try {
+        const ticket = await this.googleClient.verifyIdToken({ idToken: token, audience });
+        payload = ticket.getPayload();
+      } catch (err) {
+        this.logger.warn(`Google token verification failed: ${err instanceof Error ? err.message : String(err)}`);
+        throw new UnauthorizedException('Invalid Google token');
+      }
+      if (!payload?.sub || !payload.email) throw new UnauthorizedException('Invalid Google token');
+      return this.socialProfile(payload.sub, payload.email, payload.name, payload.picture);
+    }
+
+    // Access token path — validate by asking Google's userinfo endpoint directly.
+    // If the token is expired, revoked, or fabricated, Google returns a 4xx.
+    let userInfo: { sub?: string; email?: string; name?: string; picture?: string };
     try {
-      const ticket = await this.googleClient.verifyIdToken({ idToken, audience });
-      payload = ticket.getPayload();
+      const res = await fetch('https://www.googleapis.com/oauth2/v3/userinfo', {
+        headers: { Authorization: `Bearer ${token}` },
+      });
+      if (!res.ok) throw new Error(`userinfo HTTP ${res.status}`);
+      userInfo = (await res.json()) as typeof userInfo;
     } catch (err) {
-      this.logger.warn(`Google token verification failed: ${err instanceof Error ? err.message : String(err)}`);
+      this.logger.warn(`Google access token userinfo fetch failed: ${err instanceof Error ? err.message : String(err)}`);
       throw new UnauthorizedException('Invalid Google token');
     }
-    if (!payload?.sub || !payload.email) throw new UnauthorizedException('Invalid Google token');
-    return this.socialProfile(payload.sub, payload.email, payload.name, payload.picture);
+    if (!userInfo.sub || !userInfo.email) throw new UnauthorizedException('Invalid Google token');
+    return this.socialProfile(userInfo.sub, userInfo.email, userInfo.name, userInfo.picture);
   }
 
   // apple-signin-auth's verifyIdToken fetches Apple's public keys and verifies the JWT's

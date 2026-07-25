@@ -9,17 +9,11 @@ import { PasswordResetOtp } from '../entities/password-reset-otp.entity';
 import { EmailVerificationOtp } from '../entities/email-verification-otp.entity';
 import { AuthIdentity } from '../entities/auth-identity.entity';
 import { UserSession } from '../entities/user-session.entity';
-import { AdminModule } from '../users/admin/admin.module';
-import { ParticipantModule } from '../users/participant/participant.module';
-import { OrganizerModule } from '../users/organizer/organizer.module';
 import { SESSION_TOKEN_TTL_SECONDS } from './jwt.util';
 
 @Module({
   imports: [
     TypeOrmModule.forFeature([User, PasswordResetOtp, EmailVerificationOtp, AuthIdentity, UserSession]),
-    AdminModule,
-    ParticipantModule,
-    OrganizerModule,
     JwtModule.registerAsync({
       global: true,
       imports: [ConfigModule],
