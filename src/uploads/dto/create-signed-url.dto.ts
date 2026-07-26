@@ -14,6 +14,10 @@ export enum UploadPurpose {
   IDENTITY_PROOF = 'identity-proof',
   ADDRESS_PROOF = 'address-proof',
   PAN_OR_AADHAAR = 'pan-or-aadhaar',
+  // Reel/short media — unlike every purpose above, any authenticated user may request
+  // this one (see UploadsService.PURPOSE_CONFIG's allowedRoles: null), not just
+  // organizers/admins, since reel uploaders are attendees.
+  REEL_VIDEO = 'reel-video',
 }
 
 // Deliberately a fixed allow-list, not a generic "image/*" pattern — only the formats

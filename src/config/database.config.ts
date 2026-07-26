@@ -24,6 +24,7 @@ import { EventScheduleItem } from '../entities/event-schedule.entity';
 import { EventAnnouncement } from '../entities/event-announcement.entity';
 import { EventReview } from '../entities/event-review.entity';
 import { Short } from '../entities/short.entity';
+import { ShortLike } from '../entities/short-like.entity';
 import { UserSession } from '../entities/user-session.entity';
 import { DeviceToken } from '../entities/device-token.entity';
 import { Report } from '../entities/report.entity';
@@ -54,6 +55,7 @@ const entities = [
   EventAnnouncement,
   EventReview,
   Short,
+  ShortLike,
   UserSession,
   DeviceToken,
   Report,

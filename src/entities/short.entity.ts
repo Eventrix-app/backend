@@ -19,10 +19,9 @@ export enum ShortModerationStatus {
   REMOVED = 'removed',
 }
 
-// Deliberately minimal — backs only the admin moderation queue (list/approve/remove).
-// No likes/comments/feed-ranking tables: nothing in the app (RN's ShortsScreen is still
-// fully mock) consumes a real creator-upload/feed API yet, so that larger surface is left
-// for when it's actually needed.
+// Backs the creator upload/feed flow (create/list-mine/delete/like) plus the admin
+// moderation queue (list/approve/remove). Comments/feed-ranking are still deferred —
+// see the "Explicitly out of scope" note in the reels backend plan.
 @Entity('shorts')
 @Index(['moderationStatus'])
 export class Short {
@@ -36,16 +35,20 @@ export class Short {
   @JoinColumn({ name: 'uploader_user_id' })
   uploader!: User;
 
-  // A short may optionally tag the event it was filmed at — not required.
-  @Column({ name: 'event_id', type: 'uuid', nullable: true })
-  eventId?: string;
+  // Every reel belongs to exactly one event — uploads always launch from an event
+  // context (see the Reel Upload screen design), so this is required, not a loose tag.
+  @Column({ name: 'event_id', type: 'uuid' })
+  eventId!: string;
 
-  @ManyToOne(() => Event, { onDelete: 'SET NULL' })
+  // CASCADE, not RESTRICT — a reel has no meaning once its event is gone, unlike a
+  // financial record. Matches EventMedia.event's CASCADE for the same reasoning.
+  @ManyToOne(() => Event, { onDelete: 'CASCADE' })
   @JoinColumn({ name: 'event_id' })
-  event?: Event;
+  event!: Event;
 
-  // Private-bucket storage path, same convention as Organizer's *ProofUrl fields —
-  // resolved to a signed read URL at render time, not a public URL.
+  // Public-bucket URL (event-images bucket, reels/ prefix) — the Shorts feed reads this
+  // table directly via the Supabase client with no backend round-trip, so this must be
+  // a directly playable public URL, not a private path needing a signed read URL.
   @Column({ name: 'media_url', type: 'text' })
   mediaUrl!: string;
 
@@ -69,6 +72,13 @@ export class Short {
 
   @Column({ name: 'view_count', type: 'int', default: 0 })
   viewCount!: number;
+
+  // Denormalized, kept in sync by ShortsService.like()/unlike() via an atomic
+  // UPDATE ... WHERE ... claim (same idiom as ticket-capacity claims elsewhere) —
+  // a live COUNT() per feed row isn't practical once the feed reads directly via
+  // the Supabase client with no backend round-trip per row.
+  @Column({ name: 'like_count', type: 'int', default: 0 })
+  likeCount!: number;
 
   @CreateDateColumn({ name: 'created_at' })
   createdAt!: Date;

@@ -55,6 +55,10 @@ const PURPOSE_CONFIG: Record<UploadPurpose, PurposeConfig> = {
   [UploadPurpose.IDENTITY_PROOF]: { bucket: 'organizer-kyc-docs', pathPrefix: 'identity-proof', allowedRoles: null, isPrivate: true },
   [UploadPurpose.ADDRESS_PROOF]: { bucket: 'organizer-kyc-docs', pathPrefix: 'address-proof', allowedRoles: null, isPrivate: true },
   [UploadPurpose.PAN_OR_AADHAAR]: { bucket: 'organizer-kyc-docs', pathPrefix: 'pan-or-aadhaar', allowedRoles: null, isPrivate: true },
+  // Reuses event-images (already public, already allows video/mp4 + video/quicktime) —
+  // no new bucket to provision. allowedRoles: null since reel uploaders are attendees,
+  // not organizers, unlike EVENT_IMAGE/EVENT_COVER above.
+  [UploadPurpose.REEL_VIDEO]: { bucket: 'event-images', pathPrefix: 'reels', allowedRoles: null },
 };
 
 // Kept in exact 1:1 correspondence with ALLOWED_UPLOAD_CONTENT_TYPES in the DTO.
