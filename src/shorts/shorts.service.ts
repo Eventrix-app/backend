@@ -3,8 +3,10 @@ import { InjectRepository } from '@nestjs/typeorm';
 import { Repository } from 'typeorm';
 import { Short, ShortModerationStatus } from '../entities/short.entity';
 import { ShortLike } from '../entities/short-like.entity';
+import { ShortComment } from '../entities/short-comment.entity';
 import { Event } from '../entities/event.entity';
 import { CreateShortDto } from './dto/create-short.dto';
+import { CreateShortCommentDto } from './dto/create-short-comment.dto';
 import { NotificationService } from '../notifications/notification.service';
 
 const SAFE_UPLOADER_SELECT = {
@@ -18,6 +20,8 @@ export class ShortsService {
     private readonly shortsRepository: Repository<Short>,
     @InjectRepository(ShortLike)
     private readonly shortLikesRepository: Repository<ShortLike>,
+    @InjectRepository(ShortComment)
+    private readonly shortCommentsRepository: Repository<ShortComment>,
     @InjectRepository(Event)
     private readonly eventsRepository: Repository<Event>,
     private readonly notificationService: NotificationService,
@@ -76,6 +80,30 @@ export class ShortsService {
         // coverImageUrl so a reel with no generated thumbnail still has an image to show in
         // the Home "Event Highlights" strip. Already public on every event listing, so this
         // exposes nothing new.
+        event: { id: true, title: true, coverImageUrl: true },
+      } as any,
+      order: { createdAt: 'DESC' },
+      skip: (page - 1) * limit,
+      take: limit,
+    });
+
+    return { shorts, total, page, totalPages: Math.ceil(total / limit) };
+  }
+
+  // Published reels by one uploader, newest first — backs the public profile screen.
+  // Shares findFeed's moderation filter and narrowed projections for the same reasons.
+  async findByUploader(
+    uploaderUserId: string,
+    filters: { page?: number; limit?: number },
+  ): Promise<{ shorts: Short[]; total: number; page: number; totalPages: number }> {
+    const page = Math.max(1, filters.page ?? 1);
+    const limit = Math.min(50, Math.max(1, filters.limit ?? 18));
+
+    const [shorts, total] = await this.shortsRepository.findAndCount({
+      where: { uploaderUserId, moderationStatus: ShortModerationStatus.PUBLISHED },
+      relations: ['uploader', 'event'],
+      select: {
+        uploader: { id: true, fullName: true, profilePictureUrl: true },
         event: { id: true, title: true, coverImageUrl: true },
       } as any,
       order: { createdAt: 'DESC' },
@@ -228,5 +256,107 @@ export class ShortsService {
   async findMyLikedIds(userId: string): Promise<string[]> {
     const likes = await this.shortLikesRepository.find({ where: { userId }, select: ['shortId'] });
     return likes.map((l) => l.shortId);
+  }
+
+  // --- Comments -----------------------------------------------------------------
+
+  // Author identity only — this list is readable by anyone who can see the reel, so the
+  // commenter's email and phone must never be in the projection. Same reasoning as
+  // findFeed()'s uploader select.
+  private static readonly SAFE_COMMENTER_SELECT = {
+    user: { id: true, fullName: true, profilePictureUrl: true },
+  } as const;
+
+  /**
+   * Comments on a reel, oldest first.
+   *
+   * Ascending, unlike every other list in this service: a comment thread reads top to
+   * bottom, and a reply posted after the one it answers has to appear below it. Newest-first
+   * would put replies above their subject.
+   *
+   * Soft-deleted rows are excluded by TypeORM's DeleteDateColumn handling.
+   */
+  async findComments(
+    shortId: string,
+    filters: { page?: number; limit?: number },
+  ): Promise<{ comments: ShortComment[]; total: number; page: number; totalPages: number }> {
+    const page = Math.max(1, filters.page ?? 1);
+    const limit = Math.min(50, Math.max(1, filters.limit ?? 20));
+
+    const [comments, total] = await this.shortCommentsRepository.findAndCount({
+      where: { shortId },
+      relations: ['user'],
+      select: ShortsService.SAFE_COMMENTER_SELECT as any,
+      order: { createdAt: 'ASC' },
+      skip: (page - 1) * limit,
+      take: limit,
+    });
+
+    return { comments, total, page, totalPages: Math.ceil(total / limit) };
+  }
+
+  async addComment(
+    shortId: string,
+    userId: string,
+    dto: CreateShortCommentDto,
+    commenterName?: string,
+  ): Promise<ShortComment> {
+    const short = await this.findOrFail(shortId);
+
+    const comment = this.shortCommentsRepository.create({ shortId, userId, body: dto.body });
+    const saved = await this.shortCommentsRepository.save(comment);
+
+    // Atomic, matching like_count's idiom — two people commenting at once must not clobber
+    // each other's increment via a read-modify-write.
+    await this.shortsRepository.query(
+      `UPDATE shorts SET comment_count = comment_count + 1 WHERE id = $1`,
+      [shortId],
+    );
+
+    // Never for commenting on your own reel. Not awaited: the comment is already saved and
+    // its response must not wait on notification delivery.
+    if (short.uploaderUserId !== userId) {
+      void this.notificationService.notifyShortCommented(
+        short.uploaderUserId,
+        shortId,
+        commenterName ?? 'Someone',
+        dto.body,
+      );
+    }
+
+    // Re-read with the author attached so the client can render the new row immediately
+    // without refetching the whole list.
+    return (await this.shortCommentsRepository.findOne({
+      where: { id: saved.id },
+      relations: ['user'],
+      select: ShortsService.SAFE_COMMENTER_SELECT as any,
+    })) as ShortComment;
+  }
+
+  /**
+   * Deletes a comment.
+   *
+   * Allowed for the comment's author *or* the reel's owner — a creator needs to be able to
+   * clear abuse off their own reel without waiting on admin moderation. Deliberately not
+   * open to anyone else.
+   */
+  async removeComment(commentId: string, userId: string): Promise<void> {
+    const comment = await this.shortCommentsRepository.findOne({ where: { id: commentId } });
+    if (!comment) throw new NotFoundException(`Comment ${commentId} not found`);
+
+    const short = await this.findOrFail(comment.shortId);
+    const isAuthor = comment.userId === userId;
+    const isReelOwner = short.uploaderUserId === userId;
+    if (!isAuthor && !isReelOwner) {
+      throw new ForbiddenException('You can only delete your own comments');
+    }
+
+    await this.shortCommentsRepository.softDelete({ id: commentId });
+    // GREATEST guards the counter against ever going negative if a delete is somehow
+    // retried — same defence as unlike()'s.
+    await this.shortsRepository.query(
+      `UPDATE shorts SET comment_count = GREATEST(comment_count - 1, 0) WHERE id = $1`,
+      [comment.shortId],
+    );
   }
 }

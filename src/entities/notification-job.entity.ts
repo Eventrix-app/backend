@@ -13,6 +13,7 @@ export enum NotificationType {
   ORGANIZER_VERIFICATION_APPROVED = 'organizer_verification_approved',
   ORGANIZER_VERIFICATION_REJECTED = 'organizer_verification_rejected',
   SHORT_LIKED = 'short_liked',
+  SHORT_COMMENTED = 'short_commented',
 }
 
 export enum NotificationJobStatus {

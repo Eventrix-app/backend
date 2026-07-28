@@ -117,6 +117,12 @@ export class Short {
   @Column({ name: 'like_count', type: 'int', default: 0 })
   likeCount!: number;
 
+  // Denormalised for the same reason as like_count: the feed renders a count on every row,
+  // and a COUNT() per row is not practical once the feed is paginated. Kept in sync by
+  // ShortsService's comment create/delete via an atomic UPDATE.
+  @Column({ name: 'comment_count', type: 'int', default: 0 })
+  commentCount!: number;
+
   @CreateDateColumn({ name: 'created_at' })
   createdAt!: Date;
 

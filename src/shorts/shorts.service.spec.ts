@@ -4,6 +4,7 @@ import { ForbiddenException, NotFoundException } from '@nestjs/common';
 import { ShortsService } from './shorts.service';
 import { Short, ShortModerationStatus } from '../entities/short.entity';
 import { ShortLike } from '../entities/short-like.entity';
+import { ShortComment } from '../entities/short-comment.entity';
 import { Event } from '../entities/event.entity';
 import { NotificationService } from '../notifications/notification.service';
 
@@ -13,6 +14,7 @@ describe('ShortsService', () => {
   let mockShortLikesRepo: any;
   let mockEventsRepo: any;
   let mockNotificationService: any;
+  let mockShortCommentsRepo: any;
 
   beforeEach(async () => {
     mockShortsRepo = {
@@ -34,6 +36,14 @@ describe('ShortsService', () => {
     };
     mockNotificationService = {
       notifyShortLiked: jest.fn().mockResolvedValue(undefined),
+      notifyShortCommented: jest.fn().mockResolvedValue(undefined),
+    };
+    mockShortCommentsRepo = {
+      create: jest.fn((d: any) => d),
+      save: jest.fn((d: any) => Promise.resolve({ id: 'comment-1', ...d })),
+      findOne: jest.fn(),
+      findAndCount: jest.fn(),
+      softDelete: jest.fn(),
     };
 
     const module: TestingModule = await Test.createTestingModule({
@@ -41,6 +51,7 @@ describe('ShortsService', () => {
         ShortsService,
         { provide: getRepositoryToken(Short), useValue: mockShortsRepo },
         { provide: getRepositoryToken(ShortLike), useValue: mockShortLikesRepo },
+        { provide: getRepositoryToken(ShortComment), useValue: mockShortCommentsRepo },
         { provide: getRepositoryToken(Event), useValue: mockEventsRepo },
         { provide: NotificationService, useValue: mockNotificationService },
       ],
@@ -98,6 +109,87 @@ describe('ShortsService', () => {
       mockShortsRepo.query.mockResolvedValue([]);
 
       await expect(service.recordView('missing')).rejects.toThrow(NotFoundException);
+    });
+  });
+
+  describe('comments', () => {
+    beforeEach(() => {
+      mockShortsRepo.findOne.mockResolvedValue({ id: 'short-1', uploaderUserId: 'owner-1' });
+      mockShortsRepo.query.mockResolvedValue([]);
+      mockShortCommentsRepo.findOne.mockResolvedValue({ id: 'comment-1', body: 'Nice' });
+    });
+
+    it('notifies the reel owner, with the text so the push is useful on its own', async () => {
+      await service.addComment('short-1', 'commenter-1', { body: 'Nice one' }, 'Aarish');
+
+      expect(mockNotificationService.notifyShortCommented).toHaveBeenCalledWith(
+        'owner-1', 'short-1', 'Aarish', 'Nice one',
+      );
+    });
+
+    it('does not notify you about commenting on your own reel', async () => {
+      await service.addComment('short-1', 'owner-1', { body: 'Mine' }, 'Owner');
+
+      expect(mockNotificationService.notifyShortCommented).not.toHaveBeenCalled();
+    });
+
+    it('increments the denormalised counter atomically', async () => {
+      await service.addComment('short-1', 'commenter-1', { body: 'Hi' }, 'A');
+
+      const [sql] = mockShortsRepo.query.mock.calls[0];
+      expect(sql).toContain('comment_count = comment_count + 1');
+    });
+
+    it('lists oldest first, so replies stay below what they answer', async () => {
+      mockShortCommentsRepo.findAndCount.mockResolvedValue([[], 0]);
+
+      await service.findComments('short-1', {});
+
+      const [options] = mockShortCommentsRepo.findAndCount.mock.calls[0];
+      expect(options.order).toEqual({ createdAt: 'ASC' });
+    });
+
+    it("never exposes a commenter's contact details", async () => {
+      mockShortCommentsRepo.findAndCount.mockResolvedValue([[], 0]);
+
+      await service.findComments('short-1', {});
+
+      const [options] = mockShortCommentsRepo.findAndCount.mock.calls[0];
+      expect(Object.keys(options.select.user).sort()).toEqual(['fullName', 'id', 'profilePictureUrl']);
+    });
+
+    it('lets the comment author delete it', async () => {
+      mockShortCommentsRepo.findOne.mockResolvedValue({ id: 'c1', shortId: 'short-1', userId: 'author-1' });
+
+      await service.removeComment('c1', 'author-1');
+
+      expect(mockShortCommentsRepo.softDelete).toHaveBeenCalledWith({ id: 'c1' });
+    });
+
+    // A creator has to be able to clear abuse off their own reel without waiting on admins.
+    it("lets the reel owner delete someone else's comment", async () => {
+      mockShortCommentsRepo.findOne.mockResolvedValue({ id: 'c1', shortId: 'short-1', userId: 'author-1' });
+
+      await service.removeComment('c1', 'owner-1');
+
+      expect(mockShortCommentsRepo.softDelete).toHaveBeenCalled();
+    });
+
+    it('refuses deletion by an unrelated user', async () => {
+      mockShortCommentsRepo.findOne.mockResolvedValue({ id: 'c1', shortId: 'short-1', userId: 'author-1' });
+
+      await expect(service.removeComment('c1', 'stranger-1')).rejects.toThrow(ForbiddenException);
+      expect(mockShortCommentsRepo.softDelete).not.toHaveBeenCalled();
+    });
+
+    it('soft-deletes rather than hard-deletes, so moderation can still read it', async () => {
+      mockShortCommentsRepo.findOne.mockResolvedValue({ id: 'c1', shortId: 'short-1', userId: 'author-1' });
+
+      await service.removeComment('c1', 'author-1');
+
+      expect(mockShortCommentsRepo.softDelete).toHaveBeenCalled();
+      const [sql] = mockShortsRepo.query.mock.calls[0];
+      expect(sql).toContain('GREATEST(comment_count - 1, 0)');
     });
   });
 

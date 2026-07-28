@@ -3,6 +3,7 @@ import { ApiTags } from '@nestjs/swagger';
 import { ShortsService } from './shorts.service';
 import { CreateShortDto } from './dto/create-short.dto';
 import { RemoveShortDto } from './dto/remove-short.dto';
+import { CreateShortCommentDto } from './dto/create-short-comment.dto';
 import { Roles } from '../common/decorators/roles.decorator';
 import { Public } from '../common/decorators/public.decorator';
 import { AuditAction } from '../common/decorators/audit-action.decorator';
@@ -41,6 +42,18 @@ export class ShortsController {
     return await this.shortsService.findFeed({ page, limit });
   }
 
+  // Literal 'user' segment, declared before the ':id' routes below so it is not swallowed
+  // by them.
+  @Public()
+  @Get('user/:userId')
+  async findByUploader(
+    @Param('userId', ParseUUIDPipe) userId: string,
+    @Query('page', new DefaultValuePipe(1), ParseIntPipe) page?: number,
+    @Query('limit', new DefaultValuePipe(18), ParseIntPipe) limit?: number,
+  ) {
+    return await this.shortsService.findByUploader(userId, { page, limit });
+  }
+
   @Get('mine')
   async findMine(@Request() req: Request & { user: JwtPayload }) {
     return await this.shortsService.findMine(req.user.id);
@@ -58,6 +71,38 @@ export class ShortsController {
   @HttpCode(HttpStatus.OK)
   async recordView(@Param('id', ParseUUIDPipe) id: string) {
     return await this.shortsService.recordView(id);
+  }
+
+  // Public: comments are readable by anyone who can watch the reel, and the feed itself is
+  // browsable signed out. Posting one below still requires authentication.
+  @Public()
+  @Get(':id/comments')
+  async findComments(
+    @Param('id', ParseUUIDPipe) id: string,
+    @Query('page', new DefaultValuePipe(1), ParseIntPipe) page?: number,
+    @Query('limit', new DefaultValuePipe(20), ParseIntPipe) limit?: number,
+  ) {
+    return await this.shortsService.findComments(id, { page, limit });
+  }
+
+  @Post(':id/comments')
+  async addComment(
+    @Param('id', ParseUUIDPipe) id: string,
+    @Body() dto: CreateShortCommentDto,
+    @Request() req: Request & { user: JwtPayload },
+  ) {
+    return await this.shortsService.addComment(id, req.user.id, dto, req.user.full_name);
+  }
+
+  // Under 'comments/' rather than ':id/comments/:commentId' — a comment id is unique on its
+  // own, and the two-param form invites deleting a comment via a reel it does not belong to.
+  @Delete('comments/:commentId')
+  @HttpCode(HttpStatus.NO_CONTENT)
+  async removeComment(
+    @Param('commentId', ParseUUIDPipe) commentId: string,
+    @Request() req: Request & { user: JwtPayload },
+  ) {
+    await this.shortsService.removeComment(commentId, req.user.id);
   }
 
   @Post(':id/like')

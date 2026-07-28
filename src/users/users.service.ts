@@ -111,6 +111,37 @@ export class UsersService {
     }
   }
 
+  /**
+   * The publicly visible slice of a user's account.
+   *
+   * Reachable by anyone (it backs tapping a reel's author), so the projection is an explicit
+   * allow-list rather than findMe() minus a few fields: email, phone, roles, coordinates and
+   * verification state must never appear here, and an allow-list cannot leak a column added
+   * to the entity later.
+   *
+   * 404s for a soft-deleted account rather than returning a tombstone — a deleted user has
+   * no profile to show.
+   */
+  async findPublicProfile(id: string): Promise<{
+    id: string;
+    fullName: string | null;
+    profilePictureUrl: string | null;
+    memberSince: Date;
+  }> {
+    const user = await this.usersRepository.findOne({
+      where: { id },
+      select: { id: true, fullName: true, profilePictureUrl: true, createdAt: true } as any,
+    });
+    if (!user) throw new NotFoundException(`User ${id} not found`);
+
+    return {
+      id: user.id,
+      fullName: user.fullName ?? null,
+      profilePictureUrl: (user as any).profilePictureUrl ?? null,
+      memberSince: user.createdAt,
+    };
+  }
+
   async findMe(userId: string): Promise<CurrentUserResponse> {
     const cacheKey = userMeCacheKey(userId);
     const cached = await this.cache.get<CurrentUserResponse>(cacheKey);

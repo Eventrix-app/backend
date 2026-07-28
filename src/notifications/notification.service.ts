@@ -31,7 +31,10 @@ export interface NotificationRecord {
 }
 
 // Notification types deliberately never sent by email — see sendEmailForJob below.
-const PUSH_ONLY_TYPES: ReadonlySet<NotificationType> = new Set([NotificationType.SHORT_LIKED]);
+const PUSH_ONLY_TYPES: ReadonlySet<NotificationType> = new Set([
+  NotificationType.SHORT_LIKED,
+  NotificationType.SHORT_COMMENTED,
+]);
 
 @Injectable()
 export class NotificationService {
@@ -123,6 +126,18 @@ export class NotificationService {
   // liker changes their display name or deletes their account.
   async notifyShortLiked(ownerUserId: string, shortId: string, likerName: string): Promise<void> {
     await this.enqueue(ownerUserId, NotificationType.SHORT_LIKED, { shortId, likerName });
+  }
+
+  // The comment body rides along so the notification can show what was said rather than
+  // only that something was said — the difference between a useful alert and one that
+  // forces you to open the app to find out.
+  async notifyShortCommented(
+    ownerUserId: string,
+    shortId: string,
+    commenterName: string,
+    body: string,
+  ): Promise<void> {
+    await this.enqueue(ownerUserId, NotificationType.SHORT_COMMENTED, { shortId, commenterName, body });
   }
 
   async notifyEventChanged(
@@ -267,6 +282,14 @@ export class NotificationService {
       case NotificationType.SHORT_LIKED: {
         const likerName = String(payload['likerName'] ?? 'Someone');
         return { title: 'New like', body: `${likerName} liked your reel.` };
+      }
+      case NotificationType.SHORT_COMMENTED: {
+        const commenterName = String(payload['commenterName'] ?? 'Someone');
+        const text = String(payload['body'] ?? '');
+        // Truncated: a push body is clipped by the OS anyway, and an ellipsis reads better
+        // than an arbitrary cut mid-word at the system's own limit.
+        const preview = text.length > 80 ? `${text.slice(0, 80).trimEnd()}…` : text;
+        return { title: `${commenterName} commented`, body: preview || 'commented on your reel.' };
       }
       case NotificationType.EVENT_CANCELLED: {
         const eventTitle = String(payload['eventTitle'] ?? 'An event you booked');

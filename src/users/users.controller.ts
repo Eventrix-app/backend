@@ -5,6 +5,8 @@ import {
   Get,
   HttpCode,
   HttpStatus,
+  Param,
+  ParseUUIDPipe,
   Patch,
   Post,
   Put,
@@ -20,6 +22,7 @@ import { UpdateNotificationChannelsDto } from './participant/dto/update-notifica
 import { UpdatePushTokenDto } from './participant/dto/update-push-token.dto';
 import { EraseMyDataDto } from './dto/erase-my-data.dto';
 import { UsersService } from './users.service';
+import { Public } from '../common/decorators/public.decorator';
 
 @ApiTags('users')
 @Controller('users')
@@ -29,6 +32,15 @@ export class UsersController {
   @Get('me')
   async getMe(@Request() req: Request & { user: JwtPayload }) {
     return await this.usersService.findMe(req.user.id);
+  }
+
+  // Declared after 'me' so the literal segment wins the routing match over this param route.
+  // @Public() because the Shorts feed is browsable signed out, and tapping a reel's author
+  // has to work from there too.
+  @Public()
+  @Get(':id/public')
+  async getPublicProfile(@Param('id', ParseUUIDPipe) id: string) {
+    return await this.usersService.findPublicProfile(id);
   }
 
   @Put('me/interests')
