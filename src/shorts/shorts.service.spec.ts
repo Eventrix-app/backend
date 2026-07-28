@@ -20,6 +20,7 @@ describe('ShortsService', () => {
       save: jest.fn((data: any) => Promise.resolve({ id: 'short-1', likeCount: 0, ...data })),
       remove: jest.fn(),
       query: jest.fn(),
+      findAndCount: jest.fn(),
     };
     mockShortLikesRepo = {
       insert: jest.fn(),
@@ -40,6 +41,46 @@ describe('ShortsService', () => {
     }).compile();
 
     service = module.get<ShortsService>(ShortsService);
+  });
+
+  // GET /shorts/feed is @Public(), so what this method selects is world-readable. These
+  // guard the two properties that make that safe.
+  describe('findFeed', () => {
+    beforeEach(() => {
+      mockShortsRepo.findAndCount.mockResolvedValue([[], 0]);
+    });
+
+    it('only ever returns published reels', async () => {
+      await service.findFeed({});
+
+      const [options] = mockShortsRepo.findAndCount.mock.calls[0];
+      expect(options.where).toEqual({ moderationStatus: ShortModerationStatus.PUBLISHED });
+    });
+
+    it('never projects uploader contact details or roles into the public feed', async () => {
+      await service.findFeed({});
+
+      const [options] = mockShortsRepo.findAndCount.mock.calls[0];
+      expect(Object.keys(options.select.uploader).sort()).toEqual(['fullName', 'id', 'profilePictureUrl']);
+      // Explicit, because these leaking is the specific failure this test exists to catch.
+      expect(options.select.uploader.email).toBeUndefined();
+      expect(options.select.uploader.phone).toBeUndefined();
+      expect(options.select.uploader.roles).toBeUndefined();
+    });
+
+    it('caps the page size so one request cannot drain the table', async () => {
+      await service.findFeed({ limit: 5000 });
+
+      const [options] = mockShortsRepo.findAndCount.mock.calls[0];
+      expect(options.take).toBe(50);
+    });
+
+    it('clamps a nonsensical page number to the first page', async () => {
+      await service.findFeed({ page: -3 });
+
+      const [options] = mockShortsRepo.findAndCount.mock.calls[0];
+      expect(options.skip).toBe(0);
+    });
   });
 
   describe('create', () => {

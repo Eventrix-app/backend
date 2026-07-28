@@ -43,6 +43,47 @@ export class ShortsService {
     return { shorts, total, page, totalPages: Math.ceil(total / limit) };
   }
 
+  // Public reel feed. Newest first, keyset-free offset pagination (the feed is small and
+  // browsed from the top; a cursor buys nothing yet).
+  //
+  // Only PUBLISHED reels are ever returned — `under_review`, `flagged` and `removed` are
+  // excluded here rather than filtered client-side, so a removed reel cannot be surfaced by
+  // a client that ignores the field. Soft-deleted rows are excluded by TypeORM's default
+  // handling of the DeleteDateColumn.
+  //
+  // The uploader is projected down to display name + avatar. This route is @Public(), so
+  // anything selected here is world-readable: emails, phone numbers and roles must never be
+  // in this projection. SAFE_UPLOADER_SELECT above still carries `email`, which is fine for
+  // the admin queue it was written for but not for this one, hence the separate narrower
+  // select below.
+  async findFeed(filters: { page?: number; limit?: number }): Promise<{
+    shorts: Short[];
+    total: number;
+    page: number;
+    totalPages: number;
+  }> {
+    const page = Math.max(1, filters.page ?? 1);
+    // Capped so a client cannot ask for the entire table in one request.
+    const limit = Math.min(50, Math.max(1, filters.limit ?? 10));
+
+    const [shorts, total] = await this.shortsRepository.findAndCount({
+      where: { moderationStatus: ShortModerationStatus.PUBLISHED },
+      relations: ['uploader', 'event'],
+      select: {
+        uploader: { id: true, fullName: true, profilePictureUrl: true },
+        // coverImageUrl so a reel with no generated thumbnail still has an image to show in
+        // the Home "Event Highlights" strip. Already public on every event listing, so this
+        // exposes nothing new.
+        event: { id: true, title: true, coverImageUrl: true },
+      } as any,
+      order: { createdAt: 'DESC' },
+      skip: (page - 1) * limit,
+      take: limit,
+    });
+
+    return { shorts, total, page, totalPages: Math.ceil(total / limit) };
+  }
+
   private async findOrFail(id: string): Promise<Short> {
     const short = await this.shortsRepository.findOne({ where: { id } });
     if (!short) throw new NotFoundException(`Short ${id} not found`);

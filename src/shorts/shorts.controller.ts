@@ -4,6 +4,7 @@ import { ShortsService } from './shorts.service';
 import { CreateShortDto } from './dto/create-short.dto';
 import { RemoveShortDto } from './dto/remove-short.dto';
 import { Roles } from '../common/decorators/roles.decorator';
+import { Public } from '../common/decorators/public.decorator';
 import { AuditAction } from '../common/decorators/audit-action.decorator';
 import { ShortModerationStatus } from '../entities/short.entity';
 import { JwtPayload } from '../auth/jwt.util';
@@ -23,6 +24,21 @@ export class ShortsController {
     @Request() req: Request & { user: JwtPayload },
   ) {
     return await this.shortsService.create(req.user.id, dto);
+  }
+
+  // The public reel feed. @Public() because Shorts is browsable before signing in, the same
+  // way the event listings are. Declared above the ':id'-shaped routes below so the literal
+  // segment wins the routing match (see the shadowing note on create() above).
+  //
+  // Returns published reels only — see findFeed()'s own comment for why the moderation
+  // filter and the narrowed uploader projection both live server-side.
+  @Public()
+  @Get('feed')
+  async findFeed(
+    @Query('page', new DefaultValuePipe(1), ParseIntPipe) page?: number,
+    @Query('limit', new DefaultValuePipe(10), ParseIntPipe) limit?: number,
+  ) {
+    return await this.shortsService.findFeed({ page, limit });
   }
 
   @Get('mine')
