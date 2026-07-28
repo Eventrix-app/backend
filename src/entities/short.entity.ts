@@ -58,6 +58,23 @@ export class Short {
   @Column({ type: 'text', nullable: true })
   caption?: string;
 
+  // Where the reel was shot, as chosen by the uploader — seeded from their own device
+  // position and re-pinnable on a map before sharing. Distinct from the event's venue
+  // coordinates (already reachable via event_id): a reel is often filmed somewhere other
+  // than the venue's exact pin, and attributing it to the venue would be a claim the
+  // uploader never made. Nullable throughout — declining location permission must not
+  // block posting, and a name with no coordinates (or the reverse) is a legitimate
+  // partial result from reverse geocoding.
+  @Column({ name: 'location_name', type: 'text', nullable: true })
+  locationName?: string;
+
+  // Same precision/scale as Event.latitude/longitude so the two are directly comparable.
+  @Column({ type: 'decimal', precision: 10, scale: 8, nullable: true })
+  latitude?: number;
+
+  @Column({ type: 'decimal', precision: 11, scale: 8, nullable: true })
+  longitude?: number;
+
   @Column({
     name: 'moderation_status',
     type: 'varchar',

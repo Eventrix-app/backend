@@ -11,7 +11,13 @@ import { createClient } from '@supabase/supabase-js';
 import { randomUUID } from 'crypto';
 import { AllowedUploadContentType, CreateSignedUrlDto, UploadPurpose } from './dto/create-signed-url.dto';
 
-const MAX_UPLOAD_BYTES = 10 * 1024 * 1024; // 10MB — plenty for a photo or ID-document scan
+const MAX_PHOTO_BYTES = 10 * 1024 * 1024; // 10MB — plenty for a photo or ID-document scan
+// `event-images` also carries reel videos (UploadPurpose.REEL_VIDEO) and event gallery
+// clips, which the 10MB photo limit rejected outright: a 60s phone recording — the maximum
+// RecordReelScreen allows — is routinely 40-80MB, so Supabase Storage failed the PUT and no
+// reel could ever be uploaded. 150MB leaves headroom above that ceiling without making the
+// bucket an unbounded dumping ground.
+const MAX_VIDEO_BYTES = 150 * 1024 * 1024;
 
 // Per-bucket allow-list enforced by Supabase Storage itself on every upload through a
 // signed URL, not just the DTO's client-declared contentType (which only ever chose a
@@ -21,12 +27,14 @@ const MAX_UPLOAD_BYTES = 10 * 1024 * 1024; // 10MB — plenty for a photo or ID-
 // short video clips — see EventMedia.type) and EVENT_COVER (image-only in practice).
 // Every other bucket here is inherently photo-only (profile pictures, logos, KYC document
 // scans) and has no legitimate reason to accept video.
-const BUCKET_CONSTRAINTS: Record<string, { public: boolean; allowedMimeTypes: string[] }> = {
-  'profile-pictures': { public: true, allowedMimeTypes: ['image/png', 'image/jpeg', 'image/jpg', 'image/heic', 'image/webp'] },
-  'event-images': { public: true, allowedMimeTypes: ['image/png', 'image/jpeg', 'image/jpg', 'image/heic', 'image/webp', 'video/mp4', 'video/quicktime'] },
-  'organizer-logos': { public: true, allowedMimeTypes: ['image/png', 'image/jpeg', 'image/jpg', 'image/heic', 'image/webp'] },
+// The size limit is per-bucket rather than one global constant: only `event-images` accepts
+// video, and holding it to the photo-sized limit silently broke every video upload.
+const BUCKET_CONSTRAINTS: Record<string, { public: boolean; allowedMimeTypes: string[]; maxBytes: number }> = {
+  'profile-pictures': { public: true, allowedMimeTypes: ['image/png', 'image/jpeg', 'image/jpg', 'image/heic', 'image/webp'], maxBytes: MAX_PHOTO_BYTES },
+  'event-images': { public: true, allowedMimeTypes: ['image/png', 'image/jpeg', 'image/jpg', 'image/heic', 'image/webp', 'video/mp4', 'video/quicktime'], maxBytes: MAX_VIDEO_BYTES },
+  'organizer-logos': { public: true, allowedMimeTypes: ['image/png', 'image/jpeg', 'image/jpg', 'image/heic', 'image/webp'], maxBytes: MAX_PHOTO_BYTES },
   // isPrivate in PURPOSE_CONFIG above — KYC document scans, never publicly readable.
-  'organizer-kyc-docs': { public: false, allowedMimeTypes: ['image/png', 'image/jpeg', 'image/jpg', 'image/heic', 'image/webp'] },
+  'organizer-kyc-docs': { public: false, allowedMimeTypes: ['image/png', 'image/jpeg', 'image/jpg', 'image/heic', 'image/webp'], maxBytes: MAX_PHOTO_BYTES },
 };
 
 interface PurposeConfig {
@@ -96,7 +104,7 @@ export class UploadsService implements OnModuleInit {
     for (const [bucket, constraints] of Object.entries(BUCKET_CONSTRAINTS)) {
       const { error } = await supabase.storage.updateBucket(bucket, {
         public: constraints.public,
-        fileSizeLimit: MAX_UPLOAD_BYTES,
+        fileSizeLimit: constraints.maxBytes,
         allowedMimeTypes: constraints.allowedMimeTypes,
       });
       if (error) {

@@ -79,6 +79,9 @@ export class ShortsService {
       mediaUrl: dto.mediaUrl,
       thumbnailUrl: dto.thumbnailUrl,
       caption: dto.caption,
+      locationName: dto.locationName,
+      latitude: dto.latitude,
+      longitude: dto.longitude,
       moderationStatus: ShortModerationStatus.PUBLISHED,
     });
     return this.shortsRepository.save(short);
