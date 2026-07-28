@@ -5,12 +5,14 @@ import { ShortsService } from './shorts.service';
 import { Short, ShortModerationStatus } from '../entities/short.entity';
 import { ShortLike } from '../entities/short-like.entity';
 import { Event } from '../entities/event.entity';
+import { NotificationService } from '../notifications/notification.service';
 
 describe('ShortsService', () => {
   let service: ShortsService;
   let mockShortsRepo: any;
   let mockShortLikesRepo: any;
   let mockEventsRepo: any;
+  let mockNotificationService: any;
 
   beforeEach(async () => {
     mockShortsRepo = {
@@ -30,6 +32,9 @@ describe('ShortsService', () => {
     mockEventsRepo = {
       exists: jest.fn(),
     };
+    mockNotificationService = {
+      notifyShortLiked: jest.fn().mockResolvedValue(undefined),
+    };
 
     const module: TestingModule = await Test.createTestingModule({
       providers: [
@@ -37,6 +42,7 @@ describe('ShortsService', () => {
         { provide: getRepositoryToken(Short), useValue: mockShortsRepo },
         { provide: getRepositoryToken(ShortLike), useValue: mockShortLikesRepo },
         { provide: getRepositoryToken(Event), useValue: mockEventsRepo },
+        { provide: NotificationService, useValue: mockNotificationService },
       ],
     }).compile();
 
@@ -45,6 +51,56 @@ describe('ShortsService', () => {
 
   // GET /shorts/feed is @Public(), so what this method selects is world-readable. These
   // guard the two properties that make that safe.
+  describe('like notifications', () => {
+    beforeEach(() => {
+      mockShortsRepo.findOne.mockResolvedValue({ id: 'short-1', uploaderUserId: 'owner-1', likeCount: 3 });
+      mockShortLikesRepo.insert.mockResolvedValue(undefined);
+      mockShortsRepo.query.mockResolvedValue([{ like_count: 4 }]);
+    });
+
+    it('notifies the uploader when someone else likes their reel', async () => {
+      await service.like('short-1', 'liker-1', 'Aarish');
+
+      expect(mockNotificationService.notifyShortLiked).toHaveBeenCalledWith('owner-1', 'short-1', 'Aarish');
+    });
+
+    it('does not notify you about liking your own reel', async () => {
+      await service.like('short-1', 'owner-1', 'Owner');
+
+      expect(mockNotificationService.notifyShortLiked).not.toHaveBeenCalled();
+    });
+
+    // A double tap or a retried request hits the unique constraint. The like is already
+    // recorded, so re-notifying would send a second "someone liked your reel" for one like.
+    it('does not re-notify when the like already exists', async () => {
+      mockShortLikesRepo.insert.mockRejectedValue({ code: '23505' });
+
+      const result = await service.like('short-1', 'liker-1', 'Aarish');
+
+      expect(result).toEqual({ liked: true, likeCount: 3 });
+      expect(mockNotificationService.notifyShortLiked).not.toHaveBeenCalled();
+    });
+  });
+
+  describe('recordView', () => {
+    it('increments atomically and skips soft-deleted reels', async () => {
+      mockShortsRepo.query.mockResolvedValue([{ view_count: 12 }]);
+
+      const result = await service.recordView('short-1');
+
+      expect(result).toEqual({ viewCount: 12 });
+      const [sql] = mockShortsRepo.query.mock.calls[0];
+      expect(sql).toContain('view_count = view_count + 1');
+      expect(sql).toContain('deleted_at IS NULL');
+    });
+
+    it('rejects an unknown reel rather than reporting a phantom count', async () => {
+      mockShortsRepo.query.mockResolvedValue([]);
+
+      await expect(service.recordView('missing')).rejects.toThrow(NotFoundException);
+    });
+  });
+
   describe('findFeed', () => {
     beforeEach(() => {
       mockShortsRepo.findAndCount.mockResolvedValue([[], 0]);

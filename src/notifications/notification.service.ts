@@ -30,6 +30,9 @@ export interface NotificationRecord {
   readAt: Date | null;
 }
 
+// Notification types deliberately never sent by email — see sendEmailForJob below.
+const PUSH_ONLY_TYPES: ReadonlySet<NotificationType> = new Set([NotificationType.SHORT_LIKED]);
+
 @Injectable()
 export class NotificationService {
   private readonly logger = new Logger(NotificationService.name);
@@ -83,6 +86,12 @@ export class NotificationService {
   private async sendEmailForJob(user: User | null, type: NotificationType, payload: Record<string, unknown>): Promise<void> {
     try {
       if (!user?.email || user.emailEnabled === false) return;
+      // describeEmail() falls through to a generic template for any type without a bespoke
+      // one, so a new type is emailed by default. That is right for the low-frequency,
+      // consequential events here (a booking, a cancellation, a refund) and wrong for social
+      // signals: one email per like on a reel is spam, and the surest way to get a sending
+      // domain marked as such. Those reach the user in-app and by push instead.
+      if (PUSH_ONLY_TYPES.has(type)) return;
       const { subject, html } = this.describeEmail(type, payload);
       await this.emailService.send(user.email, subject, html);
     } catch (err) {
@@ -106,6 +115,14 @@ export class NotificationService {
     } catch (err) {
       this.logger.warn(`Failed to push notification [${type}] to user ${user?.id}: ${err instanceof Error ? err.message : String(err)}`);
     }
+  }
+
+  // shortId rides along so tapping the push can open the reel itself. likerName is
+  // denormalised into the payload rather than looked up at render time: a notification is a
+  // record of something that happened, and it should still read correctly later even if the
+  // liker changes their display name or deletes their account.
+  async notifyShortLiked(ownerUserId: string, shortId: string, likerName: string): Promise<void> {
+    await this.enqueue(ownerUserId, NotificationType.SHORT_LIKED, { shortId, likerName });
   }
 
   async notifyEventChanged(
@@ -246,6 +263,10 @@ export class NotificationService {
       case NotificationType.ORGANIZER_FOLLOWED: {
         const followerName = String(payload['followerName'] ?? 'Someone');
         return { title: 'New follower', body: `${followerName} started following you.` };
+      }
+      case NotificationType.SHORT_LIKED: {
+        const likerName = String(payload['likerName'] ?? 'Someone');
+        return { title: 'New like', body: `${likerName} liked your reel.` };
       }
       case NotificationType.EVENT_CANCELLED: {
         const eventTitle = String(payload['eventTitle'] ?? 'An event you booked');

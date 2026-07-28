@@ -12,6 +12,7 @@ export enum NotificationType {
   EVENT_REJECTED = 'event_rejected',
   ORGANIZER_VERIFICATION_APPROVED = 'organizer_verification_approved',
   ORGANIZER_VERIFICATION_REJECTED = 'organizer_verification_rejected',
+  SHORT_LIKED = 'short_liked',
 }
 
 export enum NotificationJobStatus {

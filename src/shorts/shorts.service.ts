@@ -5,6 +5,7 @@ import { Short, ShortModerationStatus } from '../entities/short.entity';
 import { ShortLike } from '../entities/short-like.entity';
 import { Event } from '../entities/event.entity';
 import { CreateShortDto } from './dto/create-short.dto';
+import { NotificationService } from '../notifications/notification.service';
 
 const SAFE_UPLOADER_SELECT = {
   uploader: { id: true, fullName: true, email: true, profilePictureUrl: true },
@@ -19,6 +20,7 @@ export class ShortsService {
     private readonly shortLikesRepository: Repository<ShortLike>,
     @InjectRepository(Event)
     private readonly eventsRepository: Repository<Event>,
+    private readonly notificationService: NotificationService,
   ) {}
 
   async findAllForAdmin(filters: {
@@ -154,13 +156,15 @@ export class ShortsService {
   // Race-tolerant: a duplicate like (double-tap, two devices) hits the unique
   // (user_id, short_id) constraint rather than double-incrementing like_count — same
   // 23505-catch pattern as AuthService's social-login race handling.
-  async like(id: string, userId: string): Promise<{ liked: boolean; likeCount: number }> {
-    await this.findOrFail(id);
+  async like(id: string, userId: string, likerName?: string): Promise<{ liked: boolean; likeCount: number }> {
+    const short = await this.findOrFail(id);
     try {
       await this.shortLikesRepository.insert({ userId, shortId: id });
     } catch (err) {
       if ((err as { code?: string })?.code === '23505') {
         const existing = await this.findOrFail(id);
+        // Already liked — return the current count without re-notifying. A double tap, or a
+        // retried request, must not fire a second "someone liked your reel".
         return { liked: true, likeCount: existing.likeCount };
       }
       throw err;
@@ -170,7 +174,36 @@ export class ShortsService {
       `UPDATE shorts SET like_count = like_count + 1 WHERE id = $1 RETURNING like_count`,
       [id],
     );
+
+    // Only on a genuinely new like, and never for liking your own reel. Not awaited: the
+    // like has already been recorded and its response must not wait on notification
+    // delivery. enqueue() swallows its own errors, so this cannot reject.
+    if (short.uploaderUserId !== userId) {
+      void this.notificationService.notifyShortLiked(short.uploaderUserId, id, likerName ?? 'Someone');
+    }
+
     return { liked: true, likeCount: claim[0].like_count };
+  }
+
+  /**
+   * Records a view.
+   *
+   * Deliberately fire-and-forget from the client's perspective and idempotence-free: a view
+   * is a soft engagement metric, not an accounting record, so a dropped or duplicated
+   * increment costs nothing. Counting is atomic in SQL rather than read-modify-write so
+   * concurrent viewers cannot clobber each other's increments.
+   *
+   * Rate limiting is left to the client, which only calls this once per reel per session
+   * (see ShortsScreen) — enforcing "one view per user per reel" server-side would need a
+   * per-user-per-short row, which is a lot of storage for a vanity counter.
+   */
+  async recordView(id: string): Promise<{ viewCount: number }> {
+    const claim = await this.shortsRepository.query(
+      `UPDATE shorts SET view_count = view_count + 1 WHERE id = $1 AND deleted_at IS NULL RETURNING view_count`,
+      [id],
+    );
+    if (!claim.length) throw new NotFoundException(`Short ${id} not found`);
+    return { viewCount: claim[0].view_count };
   }
 
   // Only decrements when a like row was actually deleted — a repeat unlike call (double

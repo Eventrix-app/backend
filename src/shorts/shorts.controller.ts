@@ -51,13 +51,24 @@ export class ShortsController {
     return await this.shortsService.findMyLikedIds(req.user.id);
   }
 
+  // Public: a view is counted for anyone watching, signed in or not, and the feed itself
+  // is browsable signed out.
+  @Public()
+  @Post(':id/view')
+  @HttpCode(HttpStatus.OK)
+  async recordView(@Param('id', ParseUUIDPipe) id: string) {
+    return await this.shortsService.recordView(id);
+  }
+
   @Post(':id/like')
   @HttpCode(HttpStatus.OK)
   async like(
     @Param('id', ParseUUIDPipe) id: string,
     @Request() req: Request & { user: JwtPayload },
   ) {
-    return await this.shortsService.like(id, req.user.id);
+    // full_name comes off the JWT rather than a user lookup — the liker's name is only
+    // needed to render "X liked your reel", and it is already in hand.
+    return await this.shortsService.like(id, req.user.id, req.user.full_name);
   }
 
   @Delete(':id/like')

@@ -5,9 +5,10 @@ import { ShortLike } from '../entities/short-like.entity';
 import { Event } from '../entities/event.entity';
 import { ShortsController } from './shorts.controller';
 import { ShortsService } from './shorts.service';
+import { NotificationModule } from '../notifications/notification.module';
 
 @Module({
-  imports: [TypeOrmModule.forFeature([Short, ShortLike, Event])],
+  imports: [TypeOrmModule.forFeature([Short, ShortLike, Event]), NotificationModule],
   controllers: [ShortsController],
   providers: [ShortsService],
 })
