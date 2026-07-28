@@ -58,6 +58,26 @@ export class Short {
   @Column({ type: 'text', nullable: true })
   caption?: string;
 
+  // Text the creator positioned over the video, with its colour, face, size and placement.
+  // See ShortOverlayDto for the shape and for why every geometric value is a ratio of the
+  // rendered video rather than a pixel measurement.
+  //
+  // jsonb, not separate columns: it is one presentation blob, read and written whole, and
+  // nothing queries or sorts by its parts. Nullable — most reels have no overlay, and every
+  // reel that predates this column has none.
+  //
+  // Not composited into the video file: the app draws this over the playing video, so the
+  // stored media itself carries no text.
+  @Column({ type: 'jsonb', nullable: true })
+  overlay?: {
+    text: string;
+    color: string;
+    fontFamily: string;
+    fontSizeRatio: number;
+    xRatio: number;
+    yRatio: number;
+  };
+
   // Where the reel was shot, as chosen by the uploader — seeded from their own device
   // position and re-pinnable on a map before sharing. Distinct from the event's venue
   // coordinates (already reachable via event_id): a reel is often filmed somewhere other

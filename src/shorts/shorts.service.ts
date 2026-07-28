@@ -123,6 +123,7 @@ export class ShortsService {
       locationName: dto.locationName,
       latitude: dto.latitude,
       longitude: dto.longitude,
+      overlay: dto.overlay,
       moderationStatus: ShortModerationStatus.PUBLISHED,
     });
     return this.shortsRepository.save(short);

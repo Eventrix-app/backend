@@ -1,5 +1,6 @@
 import { Type } from 'class-transformer';
-import { IsLatitude, IsLongitude, IsOptional, IsString, IsUUID, IsUrl, MaxLength } from 'class-validator';
+import { IsLatitude, IsLongitude, IsObject, IsOptional, IsString, IsUUID, IsUrl, MaxLength, ValidateNested } from 'class-validator';
+import { ShortOverlayDto } from './short-overlay.dto';
 
 export class CreateShortDto {
   @IsUrl()
@@ -40,4 +41,17 @@ export class CreateShortDto {
   @Type(() => Number)
   @IsLongitude()
   longitude?: number;
+
+  // Text the creator placed over the video on the edit screen. Stored as JSON rather than
+  // flattened into columns because it is a single opaque presentation blob that is only ever
+  // read and written whole — nothing queries or sorts by its parts.
+  //
+  // @ValidateNested + @Type are both required: without them class-validator treats this as
+  // a plain object and applies none of ShortOverlayDto's rules, which would let an
+  // unvalidated blob straight into the column and out to every viewer's render path.
+  @IsOptional()
+  @IsObject()
+  @ValidateNested()
+  @Type(() => ShortOverlayDto)
+  overlay?: ShortOverlayDto;
 }
