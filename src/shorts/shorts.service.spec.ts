@@ -5,6 +5,7 @@ import { ShortsService } from './shorts.service';
 import { Short, ShortModerationStatus } from '../entities/short.entity';
 import { ShortLike } from '../entities/short-like.entity';
 import { ShortComment } from '../entities/short-comment.entity';
+import { ShortView } from '../entities/short-view.entity';
 import { Event } from '../entities/event.entity';
 import { NotificationService } from '../notifications/notification.service';
 
@@ -15,6 +16,7 @@ describe('ShortsService', () => {
   let mockEventsRepo: any;
   let mockNotificationService: any;
   let mockShortCommentsRepo: any;
+  let mockShortViewsRepo: any;
 
   beforeEach(async () => {
     mockShortsRepo = {
@@ -38,6 +40,7 @@ describe('ShortsService', () => {
       notifyShortLiked: jest.fn().mockResolvedValue(undefined),
       notifyShortCommented: jest.fn().mockResolvedValue(undefined),
     };
+    mockShortViewsRepo = { insert: jest.fn() };
     mockShortCommentsRepo = {
       create: jest.fn((d: any) => d),
       save: jest.fn((d: any) => Promise.resolve({ id: 'comment-1', ...d })),
@@ -52,6 +55,7 @@ describe('ShortsService', () => {
         { provide: getRepositoryToken(Short), useValue: mockShortsRepo },
         { provide: getRepositoryToken(ShortLike), useValue: mockShortLikesRepo },
         { provide: getRepositoryToken(ShortComment), useValue: mockShortCommentsRepo },
+        { provide: getRepositoryToken(ShortView), useValue: mockShortViewsRepo },
         { provide: getRepositoryToken(Event), useValue: mockEventsRepo },
         { provide: NotificationService, useValue: mockNotificationService },
       ],
@@ -93,22 +97,61 @@ describe('ShortsService', () => {
     });
   });
 
+  // One account, one view. The counter previously moved on every play, so relaunching the
+  // app and rewatching inflated it without limit.
   describe('recordView', () => {
-    it('increments atomically and skips soft-deleted reels', async () => {
-      mockShortsRepo.query.mockResolvedValue([{ view_count: 12 }]);
-
-      const result = await service.recordView('short-1');
-
-      expect(result).toEqual({ viewCount: 12 });
-      const [sql] = mockShortsRepo.query.mock.calls[0];
-      expect(sql).toContain('view_count = view_count + 1');
-      expect(sql).toContain('deleted_at IS NULL');
+    beforeEach(() => {
+      mockShortsRepo.findOne.mockResolvedValue({ id: 'short-1', viewCount: 7 });
+      mockShortViewsRepo.insert.mockResolvedValue(undefined);
+      mockShortsRepo.query.mockResolvedValue([{ view_count: 8 }]);
     });
 
-    it('rejects an unknown reel rather than reporting a phantom count', async () => {
-      mockShortsRepo.query.mockResolvedValue([]);
+    it('counts a first-time viewer', async () => {
+      const result = await service.recordView('short-1', 'viewer-1');
 
-      await expect(service.recordView('missing')).rejects.toThrow(NotFoundException);
+      expect(mockShortViewsRepo.insert).toHaveBeenCalledWith({ userId: 'viewer-1', shortId: 'short-1' });
+      expect(result).toEqual({ viewCount: 8 });
+      const [sql] = mockShortsRepo.query.mock.calls[0];
+      expect(sql).toContain('view_count = view_count + 1');
+    });
+
+    // The unique constraint is what decides this, not a client-side guard - which is the
+    // whole point, since a client guard dies with the app process.
+    it('does not count the same account twice, however many times it rewatches', async () => {
+      mockShortViewsRepo.insert.mockRejectedValue({ code: '23505' });
+
+      const result = await service.recordView('short-1', 'viewer-1');
+
+      expect(result).toEqual({ viewCount: 7 });
+      expect(mockShortsRepo.query).not.toHaveBeenCalled();
+    });
+
+    it('still returns the current total on a repeat view rather than failing', async () => {
+      mockShortViewsRepo.insert.mockRejectedValue({ code: '23505' });
+
+      await expect(service.recordView('short-1', 'viewer-1')).resolves.toEqual({ viewCount: 7 });
+    });
+
+    it('counts two different accounts separately', async () => {
+      await service.recordView('short-1', 'viewer-1');
+      mockShortsRepo.query.mockResolvedValue([{ view_count: 9 }]);
+      const second = await service.recordView('short-1', 'viewer-2');
+
+      expect(second).toEqual({ viewCount: 9 });
+      expect(mockShortViewsRepo.insert).toHaveBeenCalledTimes(2);
+    });
+
+    it('rejects an unknown reel', async () => {
+      mockShortsRepo.findOne.mockResolvedValue(null);
+
+      await expect(service.recordView('missing', 'viewer-1')).rejects.toThrow(NotFoundException);
+    });
+
+    // A non-duplicate database failure must surface, not be swallowed as "already viewed".
+    it('rethrows an insert failure that is not a duplicate', async () => {
+      mockShortViewsRepo.insert.mockRejectedValue({ code: '23503' });
+
+      await expect(service.recordView('short-1', 'viewer-1')).rejects.toBeDefined();
     });
   });
 

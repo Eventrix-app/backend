@@ -4,6 +4,7 @@ import { Repository } from 'typeorm';
 import { Short, ShortModerationStatus } from '../entities/short.entity';
 import { ShortLike } from '../entities/short-like.entity';
 import { ShortComment } from '../entities/short-comment.entity';
+import { ShortView } from '../entities/short-view.entity';
 import { Event } from '../entities/event.entity';
 import { CreateShortDto } from './dto/create-short.dto';
 import { CreateShortCommentDto } from './dto/create-short-comment.dto';
@@ -22,6 +23,8 @@ export class ShortsService {
     private readonly shortLikesRepository: Repository<ShortLike>,
     @InjectRepository(ShortComment)
     private readonly shortCommentsRepository: Repository<ShortComment>,
+    @InjectRepository(ShortView)
+    private readonly shortViewsRepository: Repository<ShortView>,
     @InjectRepository(Event)
     private readonly eventsRepository: Repository<Event>,
     private readonly notificationService: NotificationService,
@@ -214,18 +217,36 @@ export class ShortsService {
   }
 
   /**
-   * Records a view.
+   * Records that an account has watched a reel.
    *
-   * Deliberately fire-and-forget from the client's perspective and idempotence-free: a view
-   * is a soft engagement metric, not an accounting record, so a dropped or duplicated
-   * increment costs nothing. Counting is atomic in SQL rather than read-modify-write so
-   * concurrent viewers cannot clobber each other's increments.
+   * One account, one view, permanently. The counter previously moved on every play, so
+   * watching the same reel again after relaunching the app inflated it without limit — a
+   * client-side guard only lasts as long as the process, which is why the rule is enforced
+   * here instead.
    *
-   * Rate limiting is left to the client, which only calls this once per reel per session
-   * (see ShortsScreen) — enforcing "one view per user per reel" server-side would need a
-   * per-user-per-short row, which is a lot of storage for a vanity counter.
+   * The unique (user_id, short_id) constraint does the deduplicating: the insert either
+   * succeeds, meaning a genuinely new viewer, or raises 23505, meaning this account has
+   * watched before. Only the first case touches the counter. That is race-free in a way a
+   * read-then-write check is not — two concurrent requests for the same pair cannot both
+   * decide they are first.
+   *
+   * Keyed by account rather than device: a device key would let one person inflate a count
+   * by reinstalling, and a signed-out viewer has no stable identity to key on at all.
    */
-  async recordView(id: string): Promise<{ viewCount: number }> {
+  async recordView(id: string, userId: string): Promise<{ viewCount: number }> {
+    const short = await this.findOrFail(id);
+
+    try {
+      await this.shortViewsRepository.insert({ userId, shortId: id });
+    } catch (err) {
+      if ((err as { code?: string })?.code === '23505') {
+        // Already counted. Returns the current total so the client still renders the right
+        // number rather than treating this as a failure.
+        return { viewCount: short.viewCount };
+      }
+      throw err;
+    }
+
     const claim = await this.shortsRepository.query(
       `UPDATE shorts SET view_count = view_count + 1 WHERE id = $1 AND deleted_at IS NULL RETURNING view_count`,
       [id],
@@ -250,9 +271,9 @@ export class ShortsService {
     return { liked: false, likeCount: claim[0].like_count };
   }
 
-  // Backs the "which hearts are filled" state for a feed the client fetched directly
-  // from Supabase — that read path has no way to know who's asking, so the app merges
-  // this authenticated list with the direct-read feed client-side.
+  // Backs the "which hearts are filled" state for a feed the client fetched separately —
+  // that read path has no way to know who's asking, so the app merges this authenticated
+  // list with the feed client-side.
   async findMyLikedIds(userId: string): Promise<string[]> {
     const likes = await this.shortLikesRepository.find({ where: { userId }, select: ['shortId'] });
     return likes.map((l) => l.shortId);

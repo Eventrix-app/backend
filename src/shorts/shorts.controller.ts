@@ -64,13 +64,17 @@ export class ShortsController {
     return await this.shortsService.findMyLikedIds(req.user.id);
   }
 
-  // Public: a view is counted for anyone watching, signed in or not, and the feed itself
-  // is browsable signed out.
-  @Public()
+  // Deliberately NOT @Public(), unlike the feed itself. A view is counted once per account,
+  // so it needs an account to count against — an anonymous viewer has no stable identity to
+  // deduplicate on, and a device key would let one person inflate a count by reinstalling.
+  // Signed-out viewers can watch; their views simply are not counted.
   @Post(':id/view')
   @HttpCode(HttpStatus.OK)
-  async recordView(@Param('id', ParseUUIDPipe) id: string) {
-    return await this.shortsService.recordView(id);
+  async recordView(
+    @Param('id', ParseUUIDPipe) id: string,
+    @Request() req: Request & { user: JwtPayload },
+  ) {
+    return await this.shortsService.recordView(id, req.user.id);
   }
 
   // Public: comments are readable by anyone who can watch the reel, and the feed itself is

@@ -26,6 +26,7 @@ import { EventReview } from './entities/event-review.entity';
 import { Short } from './entities/short.entity';
 import { ShortLike } from './entities/short-like.entity';
 import { ShortComment } from './entities/short-comment.entity';
+import { ShortView } from './entities/short-view.entity';
 import { UserSession } from './entities/user-session.entity';
 import { DeviceToken } from './entities/device-token.entity';
 import { Report } from './entities/report.entity';
@@ -58,6 +59,7 @@ const entities = [
   Short,
   ShortLike,
   ShortComment,
+  ShortView,
   UserSession,
   DeviceToken,
   Report,
