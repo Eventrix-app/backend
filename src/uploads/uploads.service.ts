@@ -108,7 +108,21 @@ export class UploadsService implements OnModuleInit {
         allowedMimeTypes: constraints.allowedMimeTypes,
       });
       if (error) {
-        this.logger.warn(`Could not sync upload constraints for bucket "${bucket}": ${error.message}`);
+        // Raised from warn to error: when this fails the bucket silently keeps whatever
+        // limits it was provisioned with, and the only symptom is uploads being rejected by
+        // Storage with a 400 that never mentions the bucket. That is far too quiet for a
+        // misconfiguration that breaks a whole feature.
+        this.logger.error(
+          `Could not sync upload constraints for bucket "${bucket}": ${error.message}. ` +
+            `Uploads to this bucket will be rejected by Storage if its existing limits are narrower than expected.`,
+        );
+      } else {
+        // Logged on success too, so "did the video MIME types actually get applied?" is
+        // answerable from the boot log instead of the Supabase dashboard.
+        this.logger.log(
+          `Synced bucket "${bucket}": ${Math.round(constraints.maxBytes / (1024 * 1024))}MB max, ` +
+            `types [${constraints.allowedMimeTypes.join(', ')}]`,
+        );
       }
     }
   }
