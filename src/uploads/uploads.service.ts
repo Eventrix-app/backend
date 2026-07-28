@@ -13,11 +13,18 @@ import { AllowedUploadContentType, CreateSignedUrlDto, UploadPurpose } from './d
 
 const MAX_PHOTO_BYTES = 10 * 1024 * 1024; // 10MB — plenty for a photo or ID-document scan
 // `event-images` also carries reel videos (UploadPurpose.REEL_VIDEO) and event gallery
-// clips, which the 10MB photo limit rejected outright: a 60s phone recording — the maximum
-// RecordReelScreen allows — is routinely 40-80MB, so Supabase Storage failed the PUT and no
-// reel could ever be uploaded. 150MB leaves headroom above that ceiling without making the
-// bucket an unbounded dumping ground.
-const MAX_VIDEO_BYTES = 150 * 1024 * 1024;
+// clips, which the 10MB photo limit rejected outright — no reel could ever be uploaded.
+//
+// 50MB, not more: a Supabase project has its own global file size limit that a bucket
+// cannot exceed, and this project's is 50MB. Asking for anything above it makes
+// updateBucket fail outright, which would leave the bucket on its previous (10MB) limit —
+// so a larger number here does not mean larger uploads, it means no change at all.
+//
+// The client is held to the same ceiling from two directions so a user never records or
+// picks a file that is guaranteed to be rejected: RecordReelScreen caps the recording with
+// maxFileSize, and reelUploadManager checks the file before spending any upload bandwidth.
+// If the project limit is ever raised, all three move together.
+const MAX_VIDEO_BYTES = 50 * 1024 * 1024;
 
 // Per-bucket allow-list enforced by Supabase Storage itself on every upload through a
 // signed URL, not just the DTO's client-declared contentType (which only ever chose a
