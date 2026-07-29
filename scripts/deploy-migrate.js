@@ -72,6 +72,23 @@ if (result.error) {
 }
 
 if (result.status !== 0) {
+  // Supabase's direct host (db.<ref>.supabase.co) resolves to IPv6 only, and CI builders
+  // frequently have no IPv6 route - the connection then fails with ENETUNREACH against an
+  // address the logs show but never explain. The fix is not a credential or a firewall
+  // rule, it is a different host, so it is worth naming here rather than leaving the next
+  // person to derive it from a raw errno.
+  if (/db\.[a-z0-9]+\.supabase\.co/.test(url)) {
+    console.error('');
+    console.error('[migrate] Hint: this is the *direct* Supabase host, which is IPv6-only.');
+    console.error('[migrate] Build machines commonly have no IPv6 route, which surfaces as');
+    console.error('[migrate] ENETUNREACH against an address the log shows but never explains.');
+    console.error('[migrate] Use the SESSION pooler instead: aws-0-<region>.pooler.supabase.com');
+    console.error('[migrate] on port 5432. It is IPv4, and holds one backend session per');
+    console.error('[migrate] connection so DDL behaves normally.');
+    console.error('[migrate] Do NOT use the transaction pooler on 6543 - statements there can');
+    console.error('[migrate] land on different sessions, which breaks migrations.');
+  }
+
   console.error(
     `[migrate] Migrations failed (exit ${result.status}). Failing the build on purpose —\n` +
       '[migrate] deploying code whose schema was not applied is how a live endpoint starts\n' +
