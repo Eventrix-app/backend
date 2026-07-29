@@ -4,6 +4,7 @@ import { JwtService } from '@nestjs/jwt';
 import { ConfigService } from '@nestjs/config';
 import * as bcrypt from 'bcryptjs';
 import { AuthService } from './auth.service';
+import { hashPassword } from './password.util';
 import { User } from '../entities/user.entity';
 import { PasswordResetOtp } from '../entities/password-reset-otp.entity';
 import { EmailVerificationOtp } from '../entities/email-verification-otp.entity';
@@ -106,6 +107,60 @@ describe('AuthService — hasCompletedOnboarding', () => {
       const result = await service.login({ email: 'existing@example.com', password: 'password123' } as any);
 
       expect(result.hasCompletedOnboarding).toBe(true);
+      // This fixture has no passwordHashVersion, i.e. a pre-pepper account, so login does
+      // legitimately write to it — to upgrade the hash. Asserting save() was never called
+      // was only ever a proxy for what this test is actually about; assert that directly
+      // instead, so the onboarding flag is checked rather than the absence of any write.
+      for (const [saved] of mockUserRepo.save.mock.calls) {
+        expect(saved.hasCompletedOnboarding).toBe(true);
+      }
+    });
+
+    it('transparently upgrades a pre-pepper password hash on successful login', async () => {
+      // Existing accounts cannot be migrated in bulk — converting a v1 hash to v2 needs the
+      // plaintext, which only exists at login. This is the whole migration strategy, so it
+      // has to actually fire.
+      const user = {
+        id: 'user-legacy',
+        email: 'legacy@example.com',
+        passwordHash: await bcrypt.hash('password123', 10),
+        passwordHashVersion: 1,
+        roles: ['user'],
+        fullName: 'Legacy User',
+        isBanned: false,
+        hasCompletedOnboarding: true,
+      };
+      mockUserRepo.findOne.mockResolvedValue(user);
+      // Captured before login: the service upgrades the entity in place, so by the time the
+      // assertions run `user.passwordHash` is already the new value and comparing against it
+      // would compare the string to itself.
+      const originalHash = user.passwordHash;
+
+      await service.login({ email: 'legacy@example.com', password: 'password123' } as any);
+
+      expect(mockUserRepo.save).toHaveBeenCalled();
+      const [saved] = mockUserRepo.save.mock.calls[0];
+      expect(saved.passwordHashVersion).toBe(2);
+      // Re-hashed, not merely relabelled — a version bump without a new hash would lock the
+      // account out on its next login.
+      expect(saved.passwordHash).not.toBe(originalHash);
+    });
+
+    it('does not rewrite a hash that is already on the current version', async () => {
+      const current = await hashPassword('password123');
+      mockUserRepo.findOne.mockResolvedValue({
+        id: 'user-current',
+        email: 'current@example.com',
+        passwordHash: current.hash,
+        passwordHashVersion: current.version,
+        roles: ['user'],
+        fullName: 'Current User',
+        isBanned: false,
+        hasCompletedOnboarding: true,
+      });
+
+      await service.login({ email: 'current@example.com', password: 'password123' } as any);
+
       expect(mockUserRepo.save).not.toHaveBeenCalled();
     });
 

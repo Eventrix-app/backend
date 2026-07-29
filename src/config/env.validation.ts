@@ -17,6 +17,18 @@ export const validateEnv = (config: Record<string, unknown>) => {
     // knows the source).
     JWT_SECRET: Joi.string().min(32).required(),
     JWT_EXPIRES_IN: Joi.string().optional(),
+    // Secret mixed into every password hash (auth/password.util.ts). Required for the same
+    // reason JWT_SECRET above is: an optional-with-a-fallback pepper is the worst of both
+    // worlds — hashes that look protected but aren't, which then all stop verifying the
+    // moment someone does set the variable. Failing at boot is the honest outcome.
+    //
+    // Generate with:
+    //   node -e "console.log(require('crypto').randomBytes(32).toString('base64'))"
+    //
+    // Treat it like a signing key: never commit it, never log it, and never change it once
+    // accounts exist — rotating it invalidates every peppered hash, so a rotation has to be
+    // staged as a new hash version rather than an edit to this value.
+    PASSWORD_PEPPER: Joi.string().min(32).required(),
     // Opt-in only — enables the "123456" forgot-password OTP bypass in AuthService for
     // local testing without email configured. Must be explicitly set to the string
     // 'true'; anything else (including unset) keeps the bypass off. Never set this in a

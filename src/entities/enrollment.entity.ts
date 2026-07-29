@@ -79,6 +79,17 @@ export class Enrollment {
   @Column({ name: 'used_date', type: 'timestamp', nullable: true })
   checkedInAt?: Date;
 
+  // Identity of the scan that claimed this ticket, generated on the scanning device before
+  // its first send attempt and reused for every retry of that same scan. Lets checkIn()
+  // answer "is this the same scan arriving twice, or a different one?" — see checkIn().
+  @Column({ name: 'check_in_key', type: 'text', nullable: true })
+  checkInKey?: string;
+
+  // The organizer/admin user whose device claimed it. Only used to explain a rejected
+  // duplicate ("already admitted at 19:38"), never for authorization.
+  @Column({ name: 'checked_in_by', type: 'uuid', nullable: true })
+  checkedInBy?: string;
+
   @Column({ name: 'booking_date', type: 'timestamp', nullable: true })
   bookingDate?: Date;
 

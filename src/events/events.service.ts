@@ -1325,7 +1325,12 @@ export class EventsService {
   }
 
   // Section 5c: check-in endpoint — ownership-based, signed token verification
-  async checkIn(ticketCode: string, userId: string, userRoles: string[]): Promise<Enrollment> {
+  async checkIn(
+    ticketCode: string,
+    userId: string,
+    userRoles: string[],
+    idempotencyKey?: string,
+  ): Promise<Enrollment> {
     let payload: { sub?: string; eventId: string; enrollmentId?: string };
     try {
       payload = this.jwtService.verify(ticketCode);
@@ -1361,15 +1366,55 @@ export class EventsService {
     // entrances at once), since two overlapping calls could both read checkedInAt as
     // null before either write lands. Mirrors the UPDATE ... WHERE ... RETURNING claim
     // pattern already used for ticket-type capacity in enroll()/tryPromote().
+    //
+    // The claim also stamps *which* scan won, which is what makes the losing branch below
+    // able to distinguish a retry from a genuine second scan.
     const claim = await this.enrollmentRepository.query(
-      `UPDATE event_bookings SET used_date = now() WHERE id = $1 AND used_date IS NULL RETURNING used_date`,
+      `UPDATE event_bookings SET used_date = now(), check_in_key = $2, checked_in_by = $3
+       WHERE id = $1 AND used_date IS NULL
+       RETURNING used_date`,
+      [enrollment.id, idempotencyKey ?? null, userId],
+    );
+
+    if (claim?.length) {
+      enrollment.checkedInAt = claim[0].used_date;
+      enrollment.checkInKey = idempotencyKey;
+      enrollment.checkedInBy = userId;
+      return enrollment;
+    }
+
+    // Lost the claim: the ticket was already used. Whether that is a problem depends
+    // entirely on *whose* scan got there first.
+    const [existing] = await this.enrollmentRepository.query(
+      `SELECT used_date, check_in_key, checked_in_by FROM event_bookings WHERE id = $1`,
       [enrollment.id],
     );
-    if (!claim?.length) {
-      throw new ConflictException('Ticket already checked in');
+
+    // Same scan arriving twice — a retry after a dropped response, or an offline queue
+    // replaying a scan that had actually reached us before connectivity died. Nobody got in
+    // twice, so this is a success, not a conflict. Without this branch the client could not
+    // tell it apart from the duplicate case below and had to assume the benign one.
+    if (idempotencyKey && existing?.check_in_key === idempotencyKey) {
+      enrollment.checkedInAt = existing.used_date;
+      enrollment.checkInKey = existing.check_in_key;
+      enrollment.checkedInBy = existing.checked_in_by;
+      return enrollment;
     }
-    enrollment.checkedInAt = claim[0].used_date;
-    return enrollment;
+
+    // A different scan claimed it. Offline, two gates genuinely can both admit the same
+    // ticket — that cannot be prevented without a network between them — so the useful
+    // thing is to report it precisely enough for the organizer to act on.
+    throw new ConflictException({
+      message: 'Ticket already checked in',
+      error: 'Conflict',
+      statusCode: 409,
+      alreadyCheckedIn: true,
+      checkedInAt: existing?.used_date ?? null,
+      checkedInBy: existing?.checked_in_by ?? null,
+      // The distinction the client actually branches on: true means a second scan really
+      // did happen and somebody may have been admitted twice.
+      duplicateScan: true,
+    });
   }
 
   // Section 4e: fetch a single enrollment — only the owning user or admin may access

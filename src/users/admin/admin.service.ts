@@ -1,12 +1,11 @@
 import { ConflictException, ForbiddenException, Injectable, NotFoundException, Logger } from '@nestjs/common';
 import { In, Raw, DataSource, EntityManager, Repository } from 'typeorm';
 import { InjectRepository } from '@nestjs/typeorm';
-import * as bcrypt from 'bcryptjs';
+import { hashPassword, verifyPassword } from '../../auth/password.util';
 import { CreateAdminDto } from './dto/create-admin.dto';
 import { UpdateAdminDto } from './dto/update-admin.dto';
 import { User } from '../../entities/user.entity';
 
-const BCRYPT_ROUNDS = 10;
 
 // Arbitrary fixed key for the Postgres advisory lock bootstrap() takes — unique within
 // this app (nothing else calls pg_advisory_xact_lock), just needs to be some constant both
@@ -109,9 +108,8 @@ export class AdminService {
 
     const { email, firstName, lastName, phone, username } = createAdminDto;
     const fullName = `${firstName} ${lastName}`.trim();
-    const passwordHash = await bcrypt.hash(
+    const { hash: passwordHash, version: passwordHashVersion } = await hashPassword(
       createAdminDto.password,
-      BCRYPT_ROUNDS,
     );
 
     const user = repo.create({
@@ -119,6 +117,10 @@ export class AdminService {
       fullName,
       phoneNumber: phone ?? null,
       passwordHash,
+      // Must be set explicitly. The column defaults to 1 (for pre-existing rows), so
+      // omitting it here would mark a freshly peppered hash as unpeppered and the account
+      // would never be able to log in.
+      passwordHashVersion,
       roles: ['admin'],
       bio: JSON.stringify({ username }),
       isEmailVerified: false,
@@ -183,7 +185,9 @@ export class AdminService {
     }
 
     if (password) {
-      user.passwordHash = await bcrypt.hash(password, BCRYPT_ROUNDS);
+      const rehashed = await hashPassword(password);
+      user.passwordHash = rehashed.hash;
+      user.passwordHashVersion = rehashed.version;
     }
 
     const updatedUser = await this.usersRepository.save(user);

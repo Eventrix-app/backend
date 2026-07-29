@@ -1,7 +1,7 @@
 import { BadRequestException, Injectable, NotFoundException, Logger, UnauthorizedException } from '@nestjs/common';
 import { InjectRepository } from '@nestjs/typeorm';
 import { DataSource, IsNull, Not, Repository } from 'typeorm';
-import * as bcrypt from 'bcryptjs';
+import { hashPassword, verifyPassword } from '../../auth/password.util';
 import { UpdateOrganizerDto } from './dto/update-organizer.dto';
 import { User } from '../../entities/user.entity';
 import { Organizer, VerificationLevel } from '../../entities/organizer.entity';
@@ -16,7 +16,6 @@ import { EmailService } from '../../email/email.service';
 import { passwordChangedEmail } from '../../email/templates';
 import { SubmitVerificationDto } from './dto/submit-verification.dto';
 
-const BCRYPT_ROUNDS = 10;
 
 // Deliberately excludes everything OrganizerRecord carries that a stranger browsing the
 // app has no business seeing: email, phone (PII), commissionRate/commissionFlatFee/
@@ -192,11 +191,13 @@ export class OrganizerService {
       if (!dto.currentPassword) {
         throw new UnauthorizedException('Current password is required to set a new password');
       }
-      const matches = await bcrypt.compare(dto.currentPassword, user.passwordHash ?? '');
+      const matches = await verifyPassword(dto.currentPassword, user.passwordHash ?? '', user.passwordHashVersion);
       if (!matches) {
         throw new UnauthorizedException('Current password is incorrect');
       }
-      user.passwordHash = await bcrypt.hash(dto.password, BCRYPT_ROUNDS);
+      const changed = await hashPassword(dto.password);
+      user.passwordHash = changed.hash;
+      user.passwordHashVersion = changed.version;
       user.passwordChangedAt = new Date();
       passwordChanged = true;
     }

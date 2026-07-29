@@ -872,6 +872,63 @@ describe('EventsService - Fixed Issues', () => {
 
       await expect(service.checkIn('token', 'admin-1', ['admin'])).rejects.toThrow(ConflictException);
     });
+
+    it('treats a replay of the same scan as success, not a conflict', async () => {
+      // The offline queue replays a scan whose response was lost, or which reached the
+      // server just as connectivity died. The claim loses (used_date is already set), but
+      // the stored key proves it was *this* scan that set it — nobody was admitted twice,
+      // so surfacing a 409 here would make the client discard a legitimately synced entry
+      // and would show the organizer a duplicate warning for their own retry.
+      mockJwtService.verify.mockReturnValue({ enrollmentId: 'enr-1', eventId: 'event-1' });
+      const claimedAt = new Date();
+      mockEnrollmentRepo.findOne.mockResolvedValue({
+        id: 'enr-1',
+        eventId: 'event-1',
+        paymentStatus: 'paid',
+        checkedInAt: null,
+        event: { organizerId: 'org-1' },
+      });
+      mockEnrollmentRepo.query
+        .mockResolvedValueOnce([]) // claim lost — already checked in
+        .mockResolvedValueOnce([
+          { used_date: claimedAt, check_in_key: 'scan-abc', checked_in_by: 'admin-1' },
+        ]);
+
+      const result = await service.checkIn('token', 'admin-1', ['admin'], 'scan-abc');
+
+      expect(result.checkedInAt).toBe(claimedAt);
+    });
+
+    it('reports a different scan of an already-used ticket as a duplicate', async () => {
+      // The two-offline-gates case: device B scanned a ticket device A had already claimed.
+      // This one must stay a 409 — but carrying enough detail (when, and by whom) for the
+      // client to record it as a real double-entry rather than silently dropping it the way
+      // it has to when a bare "already checked in" is all it gets.
+      mockJwtService.verify.mockReturnValue({ enrollmentId: 'enr-1', eventId: 'event-1' });
+      const firstScanAt = new Date();
+      mockEnrollmentRepo.findOne.mockResolvedValue({
+        id: 'enr-1',
+        eventId: 'event-1',
+        paymentStatus: 'paid',
+        checkedInAt: null,
+        event: { organizerId: 'org-1' },
+      });
+      mockEnrollmentRepo.query
+        .mockResolvedValueOnce([])
+        .mockResolvedValueOnce([
+          { used_date: firstScanAt, check_in_key: 'scan-from-gate-1', checked_in_by: 'organizer-1' },
+        ]);
+
+      await expect(
+        service.checkIn('token', 'admin-1', ['admin'], 'scan-from-gate-2'),
+      ).rejects.toMatchObject({
+        response: {
+          duplicateScan: true,
+          checkedInAt: firstScanAt,
+          checkedInBy: 'organizer-1',
+        },
+      });
+    });
   });
 
   describe('findMyEnrollments', () => {

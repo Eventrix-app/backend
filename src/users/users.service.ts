@@ -1,7 +1,7 @@
 import { Injectable, Logger, NotFoundException, UnauthorizedException } from '@nestjs/common';
 import { InjectRepository } from '@nestjs/typeorm';
 import { DataSource, IsNull, Repository } from 'typeorm';
-import * as bcrypt from 'bcryptjs';
+import { verifyPassword } from '../auth/password.util';
 import { randomUUID } from 'crypto';
 import { User } from '../entities/user.entity';
 import { EventCategory } from '../entities/category.entity';
@@ -333,7 +333,11 @@ export class UsersService {
       if (!dto.currentPassword) {
         throw new UnauthorizedException('Current password is required to erase your data');
       }
-      const matches = await bcrypt.compare(dto.currentPassword, user.passwordHash);
+      const matches = await verifyPassword(
+        dto.currentPassword,
+        user.passwordHash,
+        user.passwordHashVersion,
+      );
       if (!matches) {
         throw new UnauthorizedException('Current password is incorrect');
       }

@@ -7,7 +7,6 @@ import {
 } from '@nestjs/common';
 import { InjectRepository } from '@nestjs/typeorm';
 import { IsNull, MoreThan, Not, Repository } from 'typeorm';
-import * as bcrypt from 'bcryptjs';
 import { createHash, createHmac, randomInt, timingSafeEqual } from 'crypto';
 import { JwtService } from '@nestjs/jwt';
 import { ConfigService } from '@nestjs/config';
@@ -17,6 +16,7 @@ import { LoginDto } from './dto/login.dto';
 import { CreateUserDto } from './dto/create-user.dto';
 import { AuthResponseDto } from './dto/auth-response.dto';
 import { JwtPayload, SESSION_TOKEN_TTL_SECONDS } from './jwt.util';
+import { burnPasswordCompare, hashPassword, needsRehash, verifyPassword } from './password.util';
 import { User } from '../entities/user.entity';
 import { AuthIdentity, AuthProvider } from '../entities/auth-identity.entity';
 import { PasswordResetOtp } from '../entities/password-reset-otp.entity';
@@ -34,7 +34,6 @@ import {
 } from '../email/templates';
 
 const BCRYPT_PREFIXES = ['$2a$', '$2b$', '$2y$'];
-const BCRYPT_ROUNDS = 10;
 const OTP_TTL_MINUTES = 10;
 
 export interface SessionRecord {
@@ -123,7 +122,7 @@ export class AuthService {
       // wrong-password rejection below — otherwise "no such account" returns near-instantly
       // while a real account's wrong password waits on bcrypt, letting an attacker enumerate
       // registered emails purely from response latency despite the identical error text.
-      await bcrypt.compare(password, DUMMY_BCRYPT_HASH);
+      await burnPasswordCompare(password, DUMMY_BCRYPT_HASH);
       this.logger.warn(`Login failed: user not found for email ${email}`);
       throw new UnauthorizedException('Invalid email or password');
     }
@@ -147,24 +146,35 @@ export class AuthService {
       // (if any) such rows should still exist, but the comparison itself costs nothing to
       // harden properly.
       passwordMatches = timingSafeStringEqual(stored, password);
-      if (passwordMatches) {
-        try {
-          user.passwordHash = await bcrypt.hash(password, BCRYPT_ROUNDS);
-          await this.usersRepository.save(user);
-          this.logger.log(`Re-hashed legacy password for user ${user.email}`);
-        } catch (err) {
-          this.logger.warn(
-            `Failed to upgrade legacy password for ${user.email}: ${err instanceof Error ? err.message : String(err)}`,
-          );
-        }
-      }
     } else {
-      passwordMatches = await bcrypt.compare(password, stored);
+      passwordMatches = await verifyPassword(password, stored, user.passwordHashVersion);
     }
 
     if (!passwordMatches) {
       this.logger.warn(`Login failed: password mismatch for email ${email}`);
       throw new UnauthorizedException('Invalid email or password');
+    }
+
+    // Transparent upgrade to the current hashing scheme. Login is the only place this can
+    // happen — re-hashing needs the plaintext, and this is the one moment the server holds
+    // it. Covers both the ancient unhashed rows above and v1 (unpeppered bcrypt) rows.
+    //
+    // Best-effort on purpose: a failure here means the account stays on the older scheme and
+    // gets another chance next login. It must never turn a valid login into a failed one.
+    if (isLegacyPlaintext || needsRehash(user.passwordHashVersion)) {
+      try {
+        const upgraded = await hashPassword(password);
+        user.passwordHash = upgraded.hash;
+        user.passwordHashVersion = upgraded.version;
+        await this.usersRepository.save(user);
+        this.logger.log(
+          `Upgraded password hash for user ${user.email} to version ${upgraded.version}`,
+        );
+      } catch (err) {
+        this.logger.warn(
+          `Failed to upgrade password hash for ${user.email}: ${err instanceof Error ? err.message : String(err)}`,
+        );
+      }
     }
 
     const userRoles = user.roles?.length ? user.roles : ['user'];
@@ -201,7 +211,7 @@ export class AuthService {
     }
 
     const fullName = `${dto.firstName} ${dto.lastName}`.trim();
-    const passwordHash = await bcrypt.hash(dto.password, BCRYPT_ROUNDS);
+    const { hash: passwordHash, version: passwordHashVersion } = await hashPassword(dto.password);
 
     const username = dto.username || dto.email.split('@')[0];
 
@@ -209,6 +219,7 @@ export class AuthService {
       email: dto.email,
       fullName,
       passwordHash,
+      passwordHashVersion,
       dateOfBirth: dto.dateOfBirth,
       roles: ['user'],
       bio: JSON.stringify({ username }),
@@ -598,7 +609,9 @@ export class AuthService {
       throw new UnauthorizedException('User not found');
     }
 
-    user.passwordHash = await bcrypt.hash(password, BCRYPT_ROUNDS);
+    const resetHash = await hashPassword(password);
+    user.passwordHash = resetHash.hash;
+    user.passwordHashVersion = resetHash.version;
     user.passwordChangedAt = new Date();
     await this.usersRepository.save(user);
     await this.otpRepository.delete({ email: match.email });
@@ -691,12 +704,14 @@ export class AuthService {
       throw new UnauthorizedException('Account no longer exists');
     }
 
-    const matches = await bcrypt.compare(currentPassword, user.passwordHash ?? '');
+    const matches = await verifyPassword(currentPassword, user.passwordHash ?? '', user.passwordHashVersion);
     if (!matches) {
       throw new UnauthorizedException('Current password is incorrect');
     }
 
-    user.passwordHash = await bcrypt.hash(newPassword, BCRYPT_ROUNDS);
+    const changed = await hashPassword(newPassword);
+    user.passwordHash = changed.hash;
+    user.passwordHashVersion = changed.version;
     user.passwordChangedAt = new Date();
     await this.usersRepository.save(user);
     await this.revokeAllSessions(user.id);

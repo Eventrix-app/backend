@@ -2,7 +2,7 @@ import { ConflictException, Injectable, NotFoundException, Logger, UnauthorizedE
 import { In, IsNull, Raw } from 'typeorm';
 import { InjectRepository } from '@nestjs/typeorm';
 import { Repository } from 'typeorm';
-import * as bcrypt from 'bcryptjs';
+import { hashPassword, verifyPassword } from '../../auth/password.util';
 import { JwtService } from '@nestjs/jwt';
 import { CreateParticipantDto } from './dto/create-participant.dto';
 import { UpdateParticipantDto } from './dto/update-participant.dto';
@@ -18,7 +18,6 @@ import { EmailService } from '../../email/email.service';
 import { passwordChangedEmail } from '../../email/templates';
 import { userMeCacheKey } from '../users.service';
 
-const BCRYPT_ROUNDS = 10;
 
 export interface ParticipantRecord {
   id: string;
@@ -140,13 +139,16 @@ export class ParticipantService {
     }
 
     const fullName = `${dto.firstName} ${dto.lastName}`.trim();
-    const passwordHash = await bcrypt.hash(dto.password, BCRYPT_ROUNDS);
+    const { hash: passwordHash, version: passwordHashVersion } = await hashPassword(dto.password);
 
     const user = this.usersRepository.create({
       email: dto.email,
       fullName,
       phoneNumber: dto.phone,
       passwordHash,
+      // Must be set explicitly — the column defaults to 1 for pre-existing rows, so omitting
+      // it would label this peppered hash as unpeppered and lock the new account out.
+      passwordHashVersion,
       gender: dto.gender,
       dateOfBirth: dto.dateOfBirth,
       profilePictureUrl: dto.profileImageUrl,
@@ -233,11 +235,13 @@ export class ParticipantService {
       if (!dto.currentPassword) {
         throw new UnauthorizedException('Current password is required to set a new password');
       }
-      const matches = await bcrypt.compare(dto.currentPassword, user.passwordHash ?? '');
+      const matches = await verifyPassword(dto.currentPassword, user.passwordHash ?? '', user.passwordHashVersion);
       if (!matches) {
         throw new UnauthorizedException('Current password is incorrect');
       }
-      user.passwordHash = await bcrypt.hash(dto.password, BCRYPT_ROUNDS);
+      const changed = await hashPassword(dto.password);
+      user.passwordHash = changed.hash;
+      user.passwordHashVersion = changed.version;
       user.passwordChangedAt = new Date();
       passwordChanged = true;
     }

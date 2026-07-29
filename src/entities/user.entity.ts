@@ -31,6 +31,13 @@ export class User {
   @Column({ name: 'password_hash', type: 'varchar', nullable: true })
   passwordHash!: string;
 
+  // Which scheme passwordHash was written with — 1 = bcrypt(password), 2 = bcrypt of the
+  // peppered HMAC. Kept per row rather than assumed globally so introducing the pepper did
+  // not require re-hashing (impossible without plaintext) or locking anyone out; a v1 row is
+  // upgraded in place on its owner's next successful login. See auth/password.util.ts.
+  @Column({ name: 'password_hash_version', type: 'smallint', default: 1 })
+  passwordHashVersion!: number;
+
   // Set on every successful password change/reset — JwtAuthGuard compares this against the
   // token's `iat` claim so a still-valid access token minted before the most recent
   // password change stops working immediately, instead of remaining usable for its full
