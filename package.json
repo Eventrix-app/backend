@@ -21,6 +21,7 @@
     "test:integration": "jest --config ./test/jest-integration.json",
     "typeorm": "ts-node -r tsconfig-paths/register ./node_modules/typeorm/cli.js -d src/data-source.ts",
     "migration:run": "npm run typeorm -- migration:run",
+    "migrate:deploy": "node scripts/deploy-migrate.js",
     "migration:revert": "npm run typeorm -- migration:revert",
     "migration:generate": "npm run typeorm -- migration:generate",
     "migration:create": "npm run typeorm -- migration:create"

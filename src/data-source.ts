@@ -66,14 +66,34 @@ const entities = [
   Block,
 ];
 
+// MIGRATION_DATABASE_URL takes precedence so migrations can run over a *direct* connection
+// while the app itself keeps using the pooled one. DDL through a transaction-mode pooler
+// (Supabase's port 6543) is unreliable — statements can land on different backend sessions.
+// Falls back to DATABASE_URL when they are the same connection, which is the common case.
+const migrationDatabaseUrl = process.env.MIGRATION_DATABASE_URL || process.env.DATABASE_URL;
+
+// Derived from whichever URL is actually in use, not from DATABASE_URL specifically — the
+// previous check read the wrong variable the moment MIGRATION_DATABASE_URL was set, which
+// would have silently disabled TLS against a remote database. Any non-local host gets SSL,
+// matching config/database.config.ts.
+function requiresSsl(url: string | undefined): boolean {
+  if (!url) return false;
+  try {
+    const { hostname } = new URL(url);
+    return !!hostname && !['localhost', '127.0.0.1'].includes(hostname);
+  } catch {
+    return false;
+  }
+}
+
 export const AppDataSource = new DataSource({
   type: 'postgres',
-  url: process.env.DATABASE_URL,
+  url: migrationDatabaseUrl,
   entities,
   synchronize: false,
-  ssl: process.env.DATABASE_URL?.includes('supabase.co')
-    ? { rejectUnauthorized: false }
-    : false,
+  ssl: requiresSsl(migrationDatabaseUrl) ? { rejectUnauthorized: false } : false,
+  // Both extensions: .ts when driven by ts-node locally, .js when run from dist/ on a
+  // deploy. __dirname resolves to src/ or dist/ accordingly, so one glob covers both.
   migrations: [
     __dirname + '/database/migrations/*.{ts,js}',
   ],
