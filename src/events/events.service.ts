@@ -7,7 +7,7 @@ import { Enrollment } from '../entities/enrollment.entity';
 import { Organizer, VerificationLevel } from '../entities/organizer.entity';
 import { User } from '../entities/user.entity';
 import { EventCategory } from '../entities/category.entity';
-import { TicketType } from '../entities/ticket-type.entity';
+import { TicketType, TicketCategory, TICKET_CATEGORY_LABELS } from '../entities/ticket-type.entity';
 import { Favorite } from '../entities/favorite.entity';
 import { Follow } from '../entities/follow.entity';
 import { EventMedia } from '../entities/event-media.entity';
@@ -196,7 +196,11 @@ export class EventsService {
         const ticketTypeEntities = ticketTypes.map((t) =>
           manager.create(TicketType, {
             eventId: savedEvent.id,
-            name: t.name,
+            category: t.category,
+            // Derived, not taken from the client — see CreateTicketTypeDto's comment on why
+            // there is no `name` field to trust in the first place.
+            name: TICKET_CATEGORY_LABELS[t.category],
+            benefits: t.benefits,
             price: t.price,
             currency: t.currency ?? savedEvent.currency,
             quantityTotal: t.quantityTotal,
@@ -305,7 +309,7 @@ export class EventsService {
         isOnline: false,
         pricePerTicket: 0,
         totalCapacity: 100,
-        ticketTypes: [{ name: 'General Admission', price: 0, quantityTotal: 100 }],
+        ticketTypes: [{ category: TicketCategory.GENERAL, price: 0, quantityTotal: 100 }],
       };
 
       const event = await this.createForUser(dto, userId, userRoles);
@@ -826,7 +830,9 @@ export class EventsService {
 
     const ticketType = this.ticketTypesRepository.create({
       eventId,
-      name: dto.name,
+      category: dto.category,
+      name: TICKET_CATEGORY_LABELS[dto.category],
+      benefits: dto.benefits,
       price: dto.price,
       currency: dto.currency ?? event.currency,
       quantityTotal: dto.quantityTotal,
@@ -882,8 +888,14 @@ export class EventsService {
     if (dto.salesStartAt !== undefined) ticketType.salesStartAt = dto.salesStartAt ? new Date(dto.salesStartAt) : undefined;
     if (dto.salesEndAt !== undefined) ticketType.salesEndAt = dto.salesEndAt ? new Date(dto.salesEndAt) : undefined;
     this.assertSalesWindowOrdered(ticketType.salesStartAt, ticketType.salesEndAt);
-    const { salesStartAt, salesEndAt, ...rest } = dto;
+    // category is pulled out rather than left in `rest`: assigning it alone would leave the
+    // stored `name` describing the *old* category, since nothing else recomputes it.
+    const { salesStartAt, salesEndAt, category, ...rest } = dto;
     Object.assign(ticketType, rest);
+    if (category !== undefined) {
+      ticketType.category = category;
+      ticketType.name = TICKET_CATEGORY_LABELS[category];
+    }
 
     const saved = await this.ticketTypesRepository.save(ticketType);
     this.logger.log(`Updated ticket type ${saved.id} on event ${eventId}`);

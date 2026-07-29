@@ -6,7 +6,7 @@ import { Enrollment } from '../entities/enrollment.entity';
 import { Organizer } from '../entities/organizer.entity';
 import { User } from '../entities/user.entity';
 import { EventCategory } from '../entities/category.entity';
-import { TicketType } from '../entities/ticket-type.entity';
+import { TicketType, TicketCategory } from '../entities/ticket-type.entity';
 import { Favorite } from '../entities/favorite.entity';
 import { Follow } from '../entities/follow.entity';
 import { EventMedia } from '../entities/event-media.entity';
@@ -493,7 +493,7 @@ describe('EventsService - Fixed Issues', () => {
       mockOrganizerRepo.findOne.mockResolvedValue({ id: 'org-1', userId: 'user-1' });
 
       await expect(
-        service.createTicketType('event-1', { name: 'GA', price: 10, quantityTotal: 10 } as any, 'user-1', []),
+        service.createTicketType('event-1', { category: TicketCategory.GENERAL, price: 10, quantityTotal: 10 } as any, 'user-1', []),
       ).rejects.toThrow(BadRequestException);
       expect(mockTicketTypeRepo.save).not.toHaveBeenCalled();
     });
@@ -513,7 +513,7 @@ describe('EventsService - Fixed Issues', () => {
         service.createTicketType(
           'event-1',
           {
-            name: 'GA',
+            category: TicketCategory.GENERAL,
             price: 10,
             quantityTotal: 10,
             salesStartAt: '2099-01-01T12:00:00.000Z',
@@ -642,7 +642,7 @@ describe('EventsService - Fixed Issues', () => {
       mockTicketTypeRepo.create.mockImplementation((data: any) => data);
       mockTicketTypeRepo.save.mockImplementation((data: any) => Promise.resolve(data));
 
-      await service.createTicketType('event-1', { name: 'VIP', price: 500 } as any, 'user-1', []);
+      await service.createTicketType('event-1', { category: TicketCategory.VIP, price: 500 } as any, 'user-1', []);
 
       expect(mockEventRepo.save).toHaveBeenCalledWith(
         expect.objectContaining({
@@ -667,7 +667,7 @@ describe('EventsService - Fixed Issues', () => {
       mockTicketTypeRepo.create.mockImplementation((data: any) => data);
       mockTicketTypeRepo.save.mockImplementation((data: any) => Promise.resolve(data));
 
-      await service.createTicketType('event-1', { name: 'GA', price: 0 } as any, 'user-1', []);
+      await service.createTicketType('event-1', { category: TicketCategory.GENERAL, price: 0 } as any, 'user-1', []);
 
       expect(mockEventRepo.save).not.toHaveBeenCalled();
     });
@@ -707,6 +707,105 @@ describe('EventsService - Fixed Issues', () => {
       await service.updateTicketType('event-1', 'tt-1', { price: 350 } as any, 'user-1', []);
 
       expect(mockEventRepo.save).not.toHaveBeenCalled();
+    });
+  });
+
+  // Regression coverage for the switch from a free-text tier name to a fixed category
+  // vocabulary (EARLY_BIRD / GENERAL / VIP): CreateTicketTypeDto no longer has a `name`
+  // field at all, so the stored name has to come from somewhere, and it has to come from
+  // the server — not the client — or the whole point of the enum (a controlled, comparable
+  // set of ticket types across every event) is defeated by a client that just sends
+  // `category: 'VIP', name: 'anything I want'` alongside it.
+  describe('ticket type category -> name derivation', () => {
+    it('createTicketType stores the category label as name, not anything client-supplied', async () => {
+      const mockEvent = {
+        id: 'event-1',
+        organizerId: 'org-1',
+        isPaid: true,
+        approvalStatus: EventApprovalStatus.APPROVED,
+      };
+      mockEventRepo.findOne.mockResolvedValue(mockEvent);
+      mockOrganizerRepo.findOne.mockResolvedValue({ id: 'org-1', userId: 'user-1' });
+      mockTicketTypeRepo.create.mockImplementation((data: any) => data);
+      mockTicketTypeRepo.save.mockImplementation((data: any) => Promise.resolve(data));
+
+      const result = await service.createTicketType(
+        'event-1',
+        { category: TicketCategory.VIP, price: 499, name: 'Ignore Me' } as any,
+        'user-1',
+        [],
+      );
+
+      expect(result.category).toBe(TicketCategory.VIP);
+      expect(result.name).toBe('VIP Pass');
+    });
+
+    it('createTicketType persists the benefits list as given', async () => {
+      const mockEvent = {
+        id: 'event-1',
+        organizerId: 'org-1',
+        isPaid: true,
+        approvalStatus: EventApprovalStatus.APPROVED,
+      };
+      mockEventRepo.findOne.mockResolvedValue(mockEvent);
+      mockOrganizerRepo.findOne.mockResolvedValue({ id: 'org-1', userId: 'user-1' });
+      mockTicketTypeRepo.create.mockImplementation((data: any) => data);
+      mockTicketTypeRepo.save.mockImplementation((data: any) => Promise.resolve(data));
+
+      const result = await service.createTicketType(
+        'event-1',
+        { category: TicketCategory.EARLY_BIRD, price: 199, benefits: ['Marathon entry', 'Finisher medal'] } as any,
+        'user-1',
+        [],
+      );
+
+      expect(result.benefits).toEqual(['Marathon entry', 'Finisher medal']);
+    });
+
+    it('updateTicketType recomputes name when the category changes', async () => {
+      const mockEvent = { id: 'event-1', organizerId: 'org-1', isPaid: true, approvalStatus: EventApprovalStatus.APPROVED };
+      mockEventRepo.findOne.mockResolvedValue(mockEvent);
+      mockOrganizerRepo.findOne.mockResolvedValue({ id: 'org-1', userId: 'user-1' });
+      mockTicketTypeRepo.findOne.mockResolvedValue({
+        id: 'tt-1',
+        eventId: 'event-1',
+        category: TicketCategory.GENERAL,
+        name: 'General Pass',
+        price: 200,
+        quantitySold: 0,
+      });
+      mockTicketTypeRepo.save.mockImplementation((data: any) => Promise.resolve(data));
+
+      const result = await service.updateTicketType(
+        'event-1',
+        'tt-1',
+        { category: TicketCategory.VIP } as any,
+        'user-1',
+        [],
+      );
+
+      expect(result.category).toBe(TicketCategory.VIP);
+      expect(result.name).toBe('VIP Pass');
+    });
+
+    it('updateTicketType leaves name and category untouched when neither is part of the update', async () => {
+      const mockEvent = { id: 'event-1', organizerId: 'org-1', isPaid: true, approvalStatus: EventApprovalStatus.APPROVED };
+      mockEventRepo.findOne.mockResolvedValue(mockEvent);
+      mockOrganizerRepo.findOne.mockResolvedValue({ id: 'org-1', userId: 'user-1' });
+      mockTicketTypeRepo.findOne.mockResolvedValue({
+        id: 'tt-1',
+        eventId: 'event-1',
+        category: TicketCategory.EARLY_BIRD,
+        name: 'Early Bird Pass',
+        price: 200,
+        quantitySold: 0,
+      });
+      mockTicketTypeRepo.save.mockImplementation((data: any) => Promise.resolve(data));
+
+      const result = await service.updateTicketType('event-1', 'tt-1', { price: 250 } as any, 'user-1', []);
+
+      expect(result.category).toBe(TicketCategory.EARLY_BIRD);
+      expect(result.name).toBe('Early Bird Pass');
     });
   });
 
