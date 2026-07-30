@@ -20,7 +20,7 @@ import { AuditLogService } from '../common/audit-log/audit-log.service';
 import { WaitlistService, WaitlistEntryWithPosition } from '../waitlist/waitlist.service';
 import { WaitlistEntry } from '../entities/waitlist-entry.entity';
 import { NotificationService } from '../notifications/notification.service';
-import { getEventEndDateTime } from './utils/event-dates.util';
+import { getEventEndDateTime, isEventOver, todayIstDateKey } from './utils/event-dates.util';
 import { EVENTS_LIST_VERSION_KEY, eventDetailCacheKey, invalidateEventCaches } from './utils/event-cache.util';
 import { CacheService } from '../common/cache/cache.service';
 
@@ -96,9 +96,10 @@ export class EventsService {
     priceMax: number | undefined,
     dateFrom: string | undefined,
     dateTo: string | undefined,
+    sortBy: string,
   ): Promise<string> {
     const version = await this.cache.getVersion(EVENTS_LIST_VERSION_KEY);
-    return `events:list:${version}:${categoryId ?? 'all'}:${isOnline ?? 'all'}:${page}:${limit}:${priceMin ?? '-'}:${priceMax ?? '-'}:${dateFrom ?? '-'}:${dateTo ?? '-'}`;
+    return `events:list:${version}:${categoryId ?? 'all'}:${isOnline ?? 'all'}:${page}:${limit}:${priceMin ?? '-'}:${priceMax ?? '-'}:${dateFrom ?? '-'}:${dateTo ?? '-'}:${sortBy}`;
   }
 
   async create(createEventDto: CreateEventDto): Promise<Event> {
@@ -335,8 +336,11 @@ export class EventsService {
     // 'YYYY-MM-DD', matched against Event.eventDate (a date column, not a timestamp).
     dateFrom?: string;
     dateTo?: string;
+    // 'eventDate' (default): soonest-upcoming first — the long-standing browse order.
+    // 'newest': most-recently-created first, for Home's latest feed and Explore's full catalog.
+    sortBy?: 'eventDate' | 'newest';
   }): Promise<{ events: Event[]; total: number; page: number; totalPages: number }> {
-    const { categoryId, isOnline, page = 1, limit = 20, search, priceMin, priceMax, dateFrom, dateTo } = filters;
+    const { categoryId, isOnline, page = 1, limit = 20, search, priceMin, priceMax, dateFrom, dateTo, sortBy = 'eventDate' } = filters;
 
     // Free-text search bypasses the cache: caching would mean one cache entry per distinct
     // search string ever typed, most never hit again — unbounded cache growth for near-zero
@@ -344,7 +348,7 @@ export class EventsService {
     const trimmedSearch = search?.trim();
     const cacheKey = trimmedSearch
       ? null
-      : await this.eventsListCacheKey(categoryId, isOnline, page, limit, priceMin, priceMax, dateFrom, dateTo);
+      : await this.eventsListCacheKey(categoryId, isOnline, page, limit, priceMin, priceMax, dateFrom, dateTo, sortBy);
     if (cacheKey) {
       const cached = await this.cache.get<{ events: Event[]; total: number; page: number; totalPages: number }>(cacheKey);
       if (cached) return cached;
@@ -367,9 +371,12 @@ export class EventsService {
     else if (priceMin !== undefined) base.pricePerTicket = MoreThanOrEqual(priceMin);
     else if (priceMax !== undefined) base.pricePerTicket = LessThanOrEqual(priceMax);
 
-    if (dateFrom && dateTo) base.eventDate = Between(dateFrom, dateTo);
-    else if (dateFrom) base.eventDate = MoreThanOrEqual(dateFrom);
-    else if (dateTo) base.eventDate = LessThanOrEqual(dateTo);
+    // Floored at today (IST) so a caller-supplied dateFrom can only push this later, never
+    // earlier — public browse/search never surfaces an event that's already happened, using
+    // the same indexed eventDate comparisons dateFrom/dateTo already relied on.
+    const todayKey = todayIstDateKey();
+    const effectiveDateFrom = dateFrom && dateFrom > todayKey ? dateFrom : todayKey;
+    base.eventDate = dateTo ? Between(effectiveDateFrom, dateTo) : MoreThanOrEqual(effectiveDateFrom);
 
     // SearchScreen previously only filtered events already paginated into the client — a
     // real, bookable event several pages deep in the catalog would never surface. Matching
@@ -385,13 +392,16 @@ export class EventsService {
       where,
       relations: ['organizer', 'organizer.user', 'category', 'ticketTypes'],
       select: SAFE_ORGANIZER_SELECT,
-      order: { eventDate: 'ASC', startTime: 'ASC' },
+      // id as a tiebreaker: bulk-seeded/rapidly-created rows can share a createdAt down to
+      // the millisecond, and ORDER BY createdAt DESC alone is then free to return ties in a
+      // different order per request/page — id makes ordering (and pagination) deterministic.
+      order: sortBy === 'newest' ? { createdAt: 'DESC', id: 'DESC' } : { eventDate: 'ASC', startTime: 'ASC' },
       skip,
       take: limit,
     });
 
     const result = {
-      events: events.map((e) => this.withComputedSeats(e)),
+      events: events.map((e) => this.withComputedFields(e)),
       total,
       page,
       totalPages: Math.ceil(total / limit),
@@ -409,7 +419,11 @@ export class EventsService {
   // tier's own quantityTotal, same derivation as before that field existed. Either way,
   // "sold" is always the live sum across all tiers, so a capacity entered after some
   // tickets are already sold still nets out correctly.
-  private withComputedSeats<T extends Event>(event: T): T {
+  //
+  // isCompleted is likewise never persisted — Event.status only ever advances to CANCELLED
+  // (see cancelEvent below), so a completed event's status stays 'upcoming' forever. Every
+  // screen that needs to know an event is over reads this instead of status.
+  private withComputedFields<T extends Event>(event: T): T {
     const tiers = event.ticketTypes;
     const totalSold = tiers?.length ? tiers.reduce((sum, t) => sum + t.quantitySold, 0) : 0;
     const tierDerivedCapacity =
@@ -421,6 +435,7 @@ export class EventsService {
       ...event,
       totalCapacity,
       availableTickets: totalCapacity != null ? Math.max(totalCapacity - totalSold, 0) : undefined,
+      isCompleted: isEventOver(event),
       ticketTypes: undefined,
     } as T;
   }
@@ -480,7 +495,7 @@ export class EventsService {
       }
     }
 
-    return this.withComputedSeats(event);
+    return this.withComputedFields(event);
   }
 
   async update(id: string, updateEventDto: UpdateEventDto, userId: string, userRoles: string[]): Promise<Event> {
@@ -690,11 +705,12 @@ export class EventsService {
   async findMyEvents(userId: string): Promise<Event[]> {
     const organizer = await this.organizersRepository.findOne({ where: { userId } });
     if (!organizer) return [];
-    return await this.eventsRepository.find({
+    const events = await this.eventsRepository.find({
       where: { organizerId: organizer.id, deletedAt: null as any },
       relations: ['organizer', 'organizer.user'],
       select: SAFE_ORGANIZER_SELECT,
     });
+    return events.map((e) => this.withComputedFields(e));
   }
 
   async findMyWaitlistEntries(userId: string): Promise<WaitlistEntryWithPosition[]> {
@@ -727,7 +743,7 @@ export class EventsService {
       relations: ['organizer', 'organizer.user', 'category'],
       select: SAFE_ORGANIZER_SELECT,
     });
-    const eventById = new Map(events.map((e) => [e.id, e]));
+    const eventById = new Map(events.map((e) => [e.id, this.withComputedFields(e)]));
     // Preserve favorites' own createdAt DESC order (most-recently-saved first) rather than
     // whatever order eventsRepository.find(In(...)) happens to return.
     return favorites.map((f) => eventById.get(f.eventId)).filter((e): e is Event => !!e);
@@ -750,6 +766,7 @@ export class EventsService {
         approvalStatus: EventApprovalStatus.APPROVED,
         status: Not(EventStatus.CANCELLED),
         deletedAt: null as any,
+        eventDate: MoreThanOrEqual(todayIstDateKey()),
       },
       relations: ['organizer', 'organizer.user', 'category', 'ticketTypes'],
       select: SAFE_ORGANIZER_SELECT,
@@ -757,7 +774,7 @@ export class EventsService {
       skip,
       take: limit,
     });
-    return events.map((e) => this.withComputedSeats(e));
+    return events.map((e) => this.withComputedFields(e));
   }
 
   async addFavorite(eventId: string, userId: string): Promise<void> {
@@ -1148,7 +1165,7 @@ export class EventsService {
     }
 
     // The confirmed enrollment just changed this ticket type's quantitySold, which
-    // availableTickets (withComputedSeats) is derived from — invalidate so list/detail
+    // availableTickets (withComputedFields) is derived from — invalidate so list/detail
     // reads don't keep serving the pre-booking count for the rest of the cache TTL.
     await invalidateEventCaches(this.cache, eventId);
 
@@ -1313,7 +1330,7 @@ export class EventsService {
     });
 
     return {
-      events: events.map((e) => this.withComputedSeats(e)),
+      events: events.map((e) => this.withComputedFields(e)),
       total,
       page,
       totalPages: Math.ceil(total / limit),

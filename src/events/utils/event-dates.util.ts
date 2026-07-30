@@ -28,6 +28,12 @@ export function getEventEndDateTime(
   return combineDateAndTime(endDate, event.endTime ?? event.startTime);
 }
 
+export function isEventOver(
+  event: Pick<EventDateFields, 'eventDate' | 'eventEndDate' | 'startTime' | 'endTime'>,
+): boolean {
+  return getEventEndDateTime(event).getTime() < Date.now();
+}
+
 // No timezone is captured anywhere on the event (organizers and venues are India-only —
 // Bangalore/Mumbai/Delhi per EventsService), so eventDate/startTime are civil wall-clock
 // values meant to be read as IST. Without an explicit offset, `new Date("...T...")` parses
@@ -35,7 +41,14 @@ export function getEventEndDateTime(
 // derived boundary (refund cutoff, sales windows, payout eligibility) by 5.5h. Appending a
 // fixed +05:30 offset makes parsing correct regardless of where the process runs.
 const IST_OFFSET = '+05:30';
+const IST_TIME_ZONE = 'Asia/Kolkata';
 
 function combineDateAndTime(date: string, time: string): Date {
   return new Date(`${date}T${time}${IST_OFFSET}`);
+}
+
+// en-CA formats as YYYY-MM-DD, which doubles as the 'date' column's own string form —
+// lets callers compare it directly against eventDate/eventEndDate without parsing either side.
+export function todayIstDateKey(): string {
+  return new Intl.DateTimeFormat('en-CA', { timeZone: IST_TIME_ZONE }).format(new Date());
 }

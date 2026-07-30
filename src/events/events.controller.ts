@@ -81,8 +81,13 @@ export class EventsController {
     @Query('priceMax') priceMax?: string,
     @Query('dateFrom') dateFrom?: string,
     @Query('dateTo') dateTo?: string,
+    @Query('sortBy') sortBy?: string,
   ) {
     const onlineFlag = isOnline === undefined ? undefined : isOnline === 'true';
+
+    if (sortBy !== undefined && sortBy !== 'eventDate' && sortBy !== 'newest') {
+      throw new BadRequestException("sortBy must be 'eventDate' or 'newest'");
+    }
 
     const parsedPriceMin = priceMin !== undefined ? Number(priceMin) : undefined;
     const parsedPriceMax = priceMax !== undefined ? Number(priceMax) : undefined;
@@ -111,6 +116,7 @@ export class EventsController {
       priceMax: parsedPriceMax,
       dateFrom,
       dateTo,
+      sortBy: sortBy as 'eventDate' | 'newest' | undefined,
     });
   }
 

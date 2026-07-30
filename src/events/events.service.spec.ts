@@ -565,9 +565,10 @@ describe('EventsService - Fixed Issues', () => {
       const result = await service.findOneForViewer('event-1', 'user-1', []);
 
       // Not toBe: findOneForViewer now returns a fresh object with totalCapacity/
-      // availableTickets recomputed from ticketTypes (withComputedSeats), not the raw
-      // entity instance — same content, new reference.
-      expect(result).toEqual(mockEvent);
+      // availableTickets/isCompleted recomputed (withComputedFields), not the raw entity
+      // instance — same content, new reference. isCompleted is false here since this mock
+      // has no eventDate/startTime, so getEventEndDateTime resolves to an invalid (NaN) time.
+      expect(result).toEqual({ ...mockEvent, isCompleted: false });
     });
 
     it('findOneForViewer hides a cancelled event from an anonymous or non-enrolled viewer', async () => {
@@ -599,7 +600,7 @@ describe('EventsService - Fixed Issues', () => {
       mockEnrollmentRepo.exist.mockResolvedValue(true);
 
       const result = await service.findOneForViewer('event-1', 'attendee-1', []);
-      expect(result).toEqual(mockEvent);
+      expect(result).toEqual({ ...mockEvent, isCompleted: false });
       expect(mockEnrollmentRepo.exist).toHaveBeenCalledWith({ where: { eventId: 'event-1', userId: 'attendee-1' } });
     });
 
@@ -615,7 +616,7 @@ describe('EventsService - Fixed Issues', () => {
       mockOrganizerRepo.findOne.mockResolvedValue({ id: 'org-1', userId: 'user-1' });
 
       const result = await service.findOneForViewer('event-1', 'user-1', []);
-      expect(result).toEqual(mockEvent);
+      expect(result).toEqual({ ...mockEvent, isCompleted: false });
       expect(mockEnrollmentRepo.exist).not.toHaveBeenCalled();
     });
   });
