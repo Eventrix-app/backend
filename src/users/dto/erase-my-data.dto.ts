@@ -2,8 +2,8 @@ import { IsIn, IsOptional, IsString, ValidateNested } from 'class-validator';
 import { Type } from 'class-transformer';
 
 class ReauthDto {
-  @IsIn(['google', 'apple', 'facebook'])
-  provider!: 'google' | 'apple' | 'facebook';
+  @IsIn(['google'])
+  provider!: 'google';
 
   @IsString()
   token!: string;

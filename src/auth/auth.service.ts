@@ -7,11 +7,10 @@ import {
 } from '@nestjs/common';
 import { InjectRepository } from '@nestjs/typeorm';
 import { IsNull, MoreThan, Not, Repository } from 'typeorm';
-import { createHash, createHmac, randomInt, timingSafeEqual } from 'crypto';
+import { createHash, randomInt, timingSafeEqual } from 'crypto';
 import { JwtService } from '@nestjs/jwt';
 import { ConfigService } from '@nestjs/config';
 import { OAuth2Client, TokenPayload } from 'google-auth-library';
-import appleSignin from 'apple-signin-auth';
 import { LoginDto } from './dto/login.dto';
 import { CreateUserDto } from './dto/create-user.dto';
 import { AuthResponseDto } from './dto/auth-response.dto';
@@ -304,7 +303,7 @@ export class AuthService {
   }
 
   async socialLogin(
-    provider: 'google' | 'apple' | 'facebook',
+    provider: 'google',
     token: string,
     deviceLabel?: string,
     userAgent?: string,
@@ -394,15 +393,11 @@ export class AuthService {
     return { providerUserId, email, fullName, pictureUrl };
   }
 
-  // Public wrapper around the three provider-specific verify* methods below — used by
-  // socialLogin() and, separately, by UsersService.eraseMyData() to re-verify a social-only
-  // account's identity (no password to check) before honoring a data-erasure request.
-  async verifyProviderToken(provider: 'google' | 'apple' | 'facebook', token: string) {
-    return provider === 'google'
-      ? this.verifyGoogleToken(token)
-      : provider === 'apple'
-        ? this.verifyAppleToken(token)
-        : this.verifyFacebookToken(token);
+  // Public wrapper around verifyGoogleToken below — used by socialLogin() and, separately,
+  // by UsersService.eraseMyData() to re-verify a social-only account's identity (no password
+  // to check) before honoring a data-erasure request.
+  async verifyProviderToken(provider: 'google', token: string) {
+    return this.verifyGoogleToken(token);
   }
 
   // Verifies a Google token — accepts both ID tokens (JWT, 3 dot-separated segments) and
@@ -454,86 +449,6 @@ export class AuthService {
     }
     if (!userInfo.sub || !userInfo.email) throw new UnauthorizedException('Invalid Google token');
     return this.socialProfile(userInfo.sub, userInfo.email, userInfo.name, userInfo.picture);
-  }
-
-  // apple-signin-auth's verifyIdToken fetches Apple's public keys and verifies the JWT's
-  // signature/issuer/expiry — real cryptographic verification, unlike the previous
-  // implementation which only base64-decoded the payload without checking the signature at
-  // all. `audience` is only enforced when APPLE_CLIENT_ID is configured: Sign in with Apple
-  // isn't wired up client-side yet (no bundle/services ID has been issued), so we still
-  // verify every other claim rather than rejecting the whole provider outright.
-  private async verifyAppleToken(idToken: string) {
-    const audience = this.configService.get<string>('APPLE_CLIENT_ID') || undefined;
-    let payload: Awaited<ReturnType<typeof appleSignin.verifyIdToken>>;
-    try {
-      payload = await appleSignin.verifyIdToken(idToken, audience ? { audience } : undefined);
-    } catch (err) {
-      this.logger.warn(`Apple token verification failed: ${err instanceof Error ? err.message : String(err)}`);
-      throw new UnauthorizedException('Invalid Apple token');
-    }
-    if (!payload?.sub) throw new UnauthorizedException('Invalid Apple token');
-    return this.socialProfile(
-      payload.sub,
-      payload.email ?? `${payload.sub}@privaterelay.appleid.com`,
-      undefined,
-    );
-  }
-
-  // Facebook has no signed-JWT equivalent — the access token is an opaque string, so it
-  // must be verified by asking Facebook's own Graph API about it (debug_token), rather than
-  // trusting the client's claimed provider/token pairing. appsecret_proof additionally
-  // proves the /me call itself originates from a party holding our app secret, per Meta's
-  // recommended hardening: https://developers.facebook.com/docs/graph-api/securing-requests
-  private async verifyFacebookToken(token: string) {
-    const appId = this.configService.get<string>('FACEBOOK_APP_ID');
-    const appSecret = this.configService.get<string>('FACEBOOK_APP_SECRET');
-    if (!appId || !appSecret) {
-      this.logger.error('Facebook sign-in attempted but FACEBOOK_APP_ID/FACEBOOK_APP_SECRET are not configured');
-      throw new UnauthorizedException('Facebook sign-in is not configured on the server');
-    }
-    const appsecretProof = createHmac('sha256', appSecret).update(token).digest('hex');
-
-    const debugRes = await fetch(
-      `https://graph.facebook.com/debug_token?input_token=${encodeURIComponent(token)}` +
-        `&access_token=${encodeURIComponent(`${appId}|${appSecret}`)}`,
-    );
-    if (!debugRes.ok) throw new UnauthorizedException('Invalid Facebook token');
-    const debugData = (await debugRes.json()) as {
-      data?: { is_valid?: boolean; app_id?: string; user_id?: string };
-    };
-    if (!debugData.data?.is_valid || debugData.data.app_id !== appId) {
-      throw new UnauthorizedException('Invalid Facebook token');
-    }
-
-    const profileRes = await fetch(
-      `https://graph.facebook.com/me?fields=id,name,email,picture.type(large)` +
-        `&access_token=${encodeURIComponent(token)}&appsecret_proof=${appsecretProof}`,
-    );
-    if (!profileRes.ok) throw new UnauthorizedException('Invalid Facebook token');
-    const data = (await profileRes.json()) as {
-      id: string;
-      name?: string;
-      email?: string;
-      picture?: { data?: { url?: string; is_silhouette?: boolean } };
-      error?: object;
-    };
-    if (data.error || data.id !== debugData.data.user_id) throw new UnauthorizedException('Invalid Facebook token');
-    // Facebook omits `email` entirely if the user declined the email permission — unlike
-    // Apple's private-relay fallback (a real address Apple actually delivers mail through),
-    // Facebook has no equivalent, so there is no legitimate address to fall back to. A
-    // fabricated `{id}@facebook.com` would silently become the account's permanent,
-    // unowned "verified" email — breaking password reset, receipts, and any future
-    // verify-your-email UX. Reject instead and ask the user to grant the permission or use
-    // another sign-in method.
-    if (!data.email) {
-      throw new BadRequestException(
-        'Facebook did not share an email address. Please grant email access or sign in another way.',
-      );
-    }
-    // is_silhouette means the user has no real profile photo — Facebook's default generic
-    // avatar isn't worth saving as if it were one.
-    const pictureUrl = data.picture?.data?.is_silhouette ? undefined : data.picture?.data?.url;
-    return this.socialProfile(data.id, data.email, data.name, pictureUrl);
   }
 
   // SHA-256 of the plaintext OTP — the code itself only ever exists in the email sent to

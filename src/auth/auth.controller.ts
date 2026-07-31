@@ -14,8 +14,8 @@ import { JwtPayload } from './jwt.util';
 import { IsIn, IsOptional, IsString, MaxLength } from 'class-validator';
 
 class SocialLoginDto {
-  @IsIn(['google', 'apple', 'facebook'])
-  provider!: 'google' | 'apple' | 'facebook';
+  @IsIn(['google'])
+  provider!: 'google';
 
   @IsString()
   token!: string;
