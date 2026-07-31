@@ -74,6 +74,9 @@ const PURPOSE_CONFIG: Record<UploadPurpose, PurposeConfig> = {
   // no new bucket to provision. allowedRoles: null since reel uploaders are attendees,
   // not organizers, unlike EVENT_IMAGE/EVENT_COVER above.
   [UploadPurpose.REEL_VIDEO]: { bucket: 'event-images', pathPrefix: 'reels', allowedRoles: null },
+  // Reuses event-images too — a category icon is just another admin-managed image, not
+  // worth its own bucket.
+  [UploadPurpose.CATEGORY_ICON]: { bucket: 'event-images', pathPrefix: 'category-icons', allowedRoles: ['admin'] },
 };
 
 // Kept in exact 1:1 correspondence with ALLOWED_UPLOAD_CONTENT_TYPES in the DTO.

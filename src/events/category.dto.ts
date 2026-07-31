@@ -16,6 +16,10 @@ export class CreateCategoryDto {
   @IsOptional()
   @IsString()
   description?: string;
+
+  @IsOptional()
+  @IsString()
+  iconUrl?: string;
 }
 
 export class BulkCreateCategoriesDto {

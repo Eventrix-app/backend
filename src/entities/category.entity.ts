@@ -18,6 +18,9 @@ export class EventCategory {
   @Column({ type: 'text', nullable: true })
   description?: string;
 
+  @Column({ name: 'icon_url', type: 'text', nullable: true })
+  iconUrl?: string;
+
   @CreateDateColumn({ name: 'created_at' })
   createdAt!: Date;
 

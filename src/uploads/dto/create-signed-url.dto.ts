@@ -18,6 +18,7 @@ export enum UploadPurpose {
   // this one (see UploadsService.PURPOSE_CONFIG's allowedRoles: null), not just
   // organizers/admins, since reel uploaders are attendees.
   REEL_VIDEO = 'reel-video',
+  CATEGORY_ICON = 'category-icon',
 }
 
 // Deliberately a fixed allow-list, not a generic "image/*" pattern — only the formats
