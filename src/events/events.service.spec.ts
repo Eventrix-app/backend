@@ -17,6 +17,7 @@ import { AuditLogService } from '../common/audit-log/audit-log.service';
 import { WaitlistService } from '../waitlist/waitlist.service';
 import { NotificationService } from '../notifications/notification.service';
 import { CacheService } from '../common/cache/cache.service';
+import { FeeCalculationService } from '../payments/fee-calculation.service';
 
 describe('EventsService - Fixed Issues', () => {
   let service: EventsService;
@@ -35,6 +36,7 @@ describe('EventsService - Fixed Issues', () => {
   let mockWaitlistService: any;
   let mockNotificationService: any;
   let mockCacheService: any;
+  let mockFeeCalculationService: any;
 
   beforeEach(async () => {
     mockEventRepo = {
@@ -116,6 +118,7 @@ describe('EventsService - Fixed Issues', () => {
       join: jest.fn(),
       findMyEntries: jest.fn(),
       promoteNext: jest.fn(),
+      hasWaitingEntries: jest.fn().mockResolvedValue(false),
     };
 
     mockNotificationService = {
@@ -136,6 +139,10 @@ describe('EventsService - Fixed Issues', () => {
       bumpVersion: jest.fn().mockResolvedValue(undefined),
     };
 
+    mockFeeCalculationService = {
+      calculate: jest.fn(),
+    };
+
     const module: TestingModule = await Test.createTestingModule({
       providers: [
         EventsService,
@@ -154,6 +161,7 @@ describe('EventsService - Fixed Issues', () => {
         { provide: WaitlistService, useValue: mockWaitlistService },
         { provide: NotificationService, useValue: mockNotificationService },
         { provide: CacheService, useValue: mockCacheService },
+        { provide: FeeCalculationService, useValue: mockFeeCalculationService },
       ],
     }).compile();
 
@@ -231,6 +239,126 @@ describe('EventsService - Fixed Issues', () => {
       });
 
       await service.enroll('event-1', 'user-1', 'tt-1');
+    });
+
+    it('charges the participant-fee markup when the event passes fees to the buyer', async () => {
+      const mockEvent = {
+        id: 'event-1',
+        organizerId: 'org-1',
+        approvalStatus: EventApprovalStatus.APPROVED,
+        status: EventStatus.UPCOMING,
+        capacity: null,
+        feePayer: 'participant',
+        ticketTypes: [{ id: 'tt-1', quantitySold: 0, quantityTotal: 10 }],
+        canEnroll: () => true,
+      };
+      mockFeeCalculationService.calculate.mockReturnValue({ buyerPrice: 110 });
+
+      mockDataSource.transaction.mockImplementation(async (callback) => {
+        const mockManager = {
+          findOne: jest.fn()
+            .mockResolvedValueOnce({ isEmailVerified: true }) // user email-verification check
+            .mockResolvedValueOnce(mockEvent) // initial event fetch (with ticketTypes)
+            .mockResolvedValueOnce(null) // enrollment duplicate check
+            .mockResolvedValueOnce({ commissionRate: 8, commissionFlatFee: 2 }), // organizer commission config
+          query: jest.fn().mockResolvedValue([[{ id: 'tt-1', price: '100.00' }], 1]),
+          create: jest.fn().mockImplementation((entity, data) => data),
+          save: jest.fn().mockImplementation((entity, data) => {
+            if (entity === Enrollment) {
+              expect(data.totalAmount).toBe(110);
+            }
+            return Promise.resolve(data);
+          }),
+        };
+        return callback(mockManager);
+      });
+
+      await service.enroll('event-1', 'user-1', 'tt-1');
+
+      expect(mockFeeCalculationService.calculate).toHaveBeenCalledWith(
+        100,
+        { commissionRate: 8, commissionFlatFee: 2 },
+        'participant',
+      );
+    });
+  });
+
+  describe('Ticket type access password', () => {
+    const mockEvent = {
+      id: 'event-1',
+      approvalStatus: EventApprovalStatus.APPROVED,
+      status: EventStatus.UPCOMING,
+      capacity: null,
+      ticketTypes: [{ id: 'tt-1', quantitySold: 0, quantityTotal: 10, minPerOrder: 1, accessPassword: 'secret123' }],
+      canEnroll: () => true,
+    };
+
+    it('rejects enrollment in a password-protected ticket type with no password supplied', async () => {
+      mockDataSource.transaction.mockImplementation(async (callback) => {
+        const mockManager = {
+          findOne: jest.fn()
+            .mockResolvedValueOnce({ isEmailVerified: true })
+            .mockResolvedValueOnce(mockEvent)
+            .mockResolvedValueOnce(null),
+        };
+        return callback(mockManager);
+      });
+
+      await expect(service.enroll('event-1', 'user-1', 'tt-1')).rejects.toThrow(ForbiddenException);
+    });
+
+    it('rejects enrollment with the wrong password', async () => {
+      mockDataSource.transaction.mockImplementation(async (callback) => {
+        const mockManager = {
+          findOne: jest.fn()
+            .mockResolvedValueOnce({ isEmailVerified: true })
+            .mockResolvedValueOnce(mockEvent)
+            .mockResolvedValueOnce(null),
+        };
+        return callback(mockManager);
+      });
+
+      await expect(service.enroll('event-1', 'user-1', 'tt-1', 1, 'wrong-password')).rejects.toThrow(ForbiddenException);
+    });
+
+    it('allows enrollment with the correct password', async () => {
+      mockDataSource.transaction.mockImplementation(async (callback) => {
+        const mockManager = {
+          findOne: jest.fn()
+            .mockResolvedValueOnce({ isEmailVerified: true })
+            .mockResolvedValueOnce(mockEvent)
+            .mockResolvedValueOnce(null),
+          query: jest.fn().mockResolvedValue([[{ id: 'tt-1', price: '0.00' }], 1]),
+          create: jest.fn().mockImplementation((entity, data) => data),
+          save: jest.fn().mockImplementation((entity, data) => Promise.resolve(data)),
+        };
+        return callback(mockManager);
+      });
+
+      await expect(service.enroll('event-1', 'user-1', 'tt-1', 1, 'secret123')).resolves.toBeDefined();
+    });
+  });
+
+  describe('removeTicketType', () => {
+    const mockEvent = { id: 'event-1', organizerId: 'org-1' };
+
+    it('rejects removal when people are currently waitlisted for the tier, even with zero sales', async () => {
+      mockEventRepo.findOne.mockResolvedValue(mockEvent);
+      mockTicketTypeRepo.findOne.mockResolvedValue({ id: 'tt-1', eventId: 'event-1', quantitySold: 0 });
+      mockWaitlistService.hasWaitingEntries.mockResolvedValue(true);
+
+      await expect(service.removeTicketType('event-1', 'tt-1', 'admin-1', ['admin'])).rejects.toThrow(ForbiddenException);
+      expect(mockTicketTypeRepo.remove).not.toHaveBeenCalled();
+    });
+
+    it('allows removal when there are no sales and nobody is waitlisted', async () => {
+      mockEventRepo.findOne.mockResolvedValue(mockEvent);
+      mockTicketTypeRepo.findOne.mockResolvedValue({ id: 'tt-1', eventId: 'event-1', quantitySold: 0 });
+      mockWaitlistService.hasWaitingEntries.mockResolvedValue(false);
+
+      await service.removeTicketType('event-1', 'tt-1', 'admin-1', ['admin']);
+
+      expect(mockTicketTypeRepo.remove).toHaveBeenCalled();
     });
   });
 

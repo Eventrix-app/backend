@@ -1,6 +1,8 @@
-import { ConflictException, ForbiddenException, Injectable, NotFoundException, Logger } from '@nestjs/common';
+import { ConflictException, ForbiddenException, Injectable, NotFoundException, Logger, UnauthorizedException } from '@nestjs/common';
 import { In, Raw, DataSource, EntityManager, Repository } from 'typeorm';
 import { InjectRepository } from '@nestjs/typeorm';
+import { ConfigService } from '@nestjs/config';
+import * as crypto from 'crypto';
 import { hashPassword, verifyPassword } from '../../auth/password.util';
 import { CreateAdminDto } from './dto/create-admin.dto';
 import { UpdateAdminDto } from './dto/update-admin.dto';
@@ -36,6 +38,7 @@ export class AdminService {
     @InjectRepository(User)
     private readonly usersRepository: Repository<User>,
     private readonly dataSource: DataSource,
+    private readonly configService: ConfigService,
   ) {}
 
   private parseMeta(bio: string | null): Record<string, string> {
@@ -77,7 +80,16 @@ export class AdminService {
   // lock scoped to the rest of this transaction makes the second racing call actually wait
   // for the first to finish (and commit) before it re-checks the count, so it correctly
   // sees the now-existing admin and gets the ForbiddenException instead of also succeeding.
-  async bootstrap(createAdminDto: CreateAdminDto): Promise<AdminRecord> {
+  // Defense in depth beyond "only when zero admins exist" — this endpoint is permanently
+  // @Public(), so if every admin account were ever removed post-launch, the count-based
+  // check alone would silently reopen it to any unauthenticated caller. Requiring a
+  // separately-configured secret means that reopening still isn't enough by itself.
+  async bootstrap(createAdminDto: CreateAdminDto, providedSecret?: string): Promise<AdminRecord> {
+    const expectedSecret = this.configService.get<string>('admin.bootstrapSecret');
+    if (!expectedSecret || !providedSecret || !timingSafeEqual(expectedSecret, providedSecret)) {
+      throw new UnauthorizedException('Invalid or missing bootstrap secret');
+    }
+
     return this.dataSource.transaction(async (manager) => {
       await manager.query('SELECT pg_advisory_xact_lock($1)', [ADMIN_BOOTSTRAP_LOCK_KEY]);
 
@@ -231,4 +243,11 @@ export class AdminService {
     await this.usersRepository.save(user);
     this.logger.log(`Unbanned user ${user.email}`);
   }
+}
+
+function timingSafeEqual(a: string, b: string): boolean {
+  const bufA = Buffer.from(a);
+  const bufB = Buffer.from(b);
+  if (bufA.length !== bufB.length) return false;
+  return crypto.timingSafeEqual(bufA, bufB);
 }

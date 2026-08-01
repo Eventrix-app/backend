@@ -1,6 +1,6 @@
 import { BadRequestException, Injectable, NotFoundException, Logger, UnauthorizedException } from '@nestjs/common';
 import { InjectRepository } from '@nestjs/typeorm';
-import { DataSource, IsNull, Not, Raw, Repository } from 'typeorm';
+import { DataSource, In, IsNull, Not, Raw, Repository } from 'typeorm';
 import { hashPassword, verifyPassword } from '../../auth/password.util';
 import { UpdateOrganizerDto } from './dto/update-organizer.dto';
 import { User } from '../../entities/user.entity';
@@ -13,6 +13,7 @@ import { CacheService } from '../../common/cache/cache.service';
 import { userMeCacheKey } from '../users.service';
 import { NotificationService } from '../../notifications/notification.service';
 import { UploadsService } from '../../uploads/uploads.service';
+import { UploadPurpose } from '../../uploads/dto/create-signed-url.dto';
 import { EmailService } from '../../email/email.service';
 import { passwordChangedEmail } from '../../email/templates';
 import { SubmitVerificationDto } from './dto/submit-verification.dto';
@@ -206,10 +207,25 @@ export class OrganizerService {
       passwordChanged = true;
     }
 
-    if (dto.companyLogoUrl !== undefined) organizer.companyLogoUrl = dto.companyLogoUrl;
+    if (dto.companyLogoUrl !== undefined) {
+      if (dto.companyLogoUrl) {
+        this.uploadsService.assertPublicUrlMatchesPurpose(dto.companyLogoUrl, UploadPurpose.COMPANY_LOGO);
+      }
+      organizer.companyLogoUrl = dto.companyLogoUrl;
+    }
     if (dto.commissionRate !== undefined) organizer.commissionRate = dto.commissionRate;
     if (dto.commissionFlatFee !== undefined) organizer.commissionFlatFee = dto.commissionFlatFee;
-    if (dto.verificationLevel !== undefined) organizer.verificationLevel = dto.verificationLevel;
+    if (dto.verificationLevel !== undefined) {
+      organizer.verificationLevel = dto.verificationLevel;
+      // Mirrors approveVerification()'s role grant — without this, an admin using this
+      // generic endpoint (instead of the dedicated verification/approve route) could set
+      // verificationLevel to DOCUMENT_VERIFIED while leaving the user without the
+      // 'organizer' role, an inconsistent state the dedicated approve/reject flow is
+      // otherwise careful to prevent.
+      if (dto.verificationLevel === VerificationLevel.DOCUMENT_VERIFIED && !user.roles.includes('organizer')) {
+        user.roles = [...user.roles, 'organizer'];
+      }
+    }
     if (dto.autoApproveEvents !== undefined) organizer.autoApproveEvents = dto.autoApproveEvents;
 
     const savedUser = await this.usersRepository.save(user);
@@ -317,19 +333,77 @@ export class OrganizerService {
     await this.cache.del(userMeCacheKey(userId));
   }
 
+  // Batched rather than N calls to getPublicProfile() — that per-organizer path (event
+  // count, follower count, isFollowing, canSeePhone: 4 queries + the organizer lookup
+  // itself) was issuing ~5 queries per followed organizer, so a user following 100
+  // organizers triggered ~500 queries for one screen. Every one of those checks is
+  // groupable across the whole followed set instead.
   async getMyFollowing(userId: string): Promise<OrganizerPublicProfile[]> {
     const follows = await this.followsRepository.find({ where: { userId }, order: { createdAt: 'DESC' } });
     if (follows.length === 0) return [];
 
+    const organizerIds = follows.map((f) => f.organizerId);
+
     // A followed organizer's account can be soft-deleted after the follow was created
     // (Follow rows only cascade-delete on a *hard* delete, which OrganizerService.remove()
-    // never does). getPublicProfile() 404s for a deleted organizer, and Promise.all rejects
-    // on the first rejection — one stale follow would otherwise take down this whole list.
-    // Promise.allSettled + filtering drops just that entry instead.
-    const results = await Promise.allSettled(follows.map((f) => this.getPublicProfile(f.organizerId, userId)));
-    return results
-      .filter((r): r is PromiseFulfilledResult<OrganizerPublicProfile> => r.status === 'fulfilled')
-      .map((r) => r.value);
+    // never does) — filtering those out here is this method's equivalent of the old
+    // per-item Promise.allSettled dropping a 404'd getPublicProfile() call.
+    const organizers = await this.organizersRepository.find({
+      where: { id: In(organizerIds) },
+      relations: ['user'],
+    });
+    const activeOrganizers = organizers.filter((o) => o.user && !o.user.deletedAt);
+    if (activeOrganizers.length === 0) return [];
+    const activeIds = activeOrganizers.map((o) => o.id);
+
+    const [eventCountRows, followerCountRows, confirmedOrganizerIdRows] = await Promise.all([
+      this.eventsRepository
+        .createQueryBuilder('event')
+        .select('event.organizerId', 'organizerId')
+        .addSelect('COUNT(*)', 'count')
+        .where('event.organizerId IN (:...ids)', { ids: activeIds })
+        .andWhere('event.approvalStatus = :approvalStatus', { approvalStatus: EventApprovalStatus.APPROVED })
+        .andWhere('event.status != :cancelled', { cancelled: EventStatus.CANCELLED })
+        .andWhere('event.deletedAt IS NULL')
+        .groupBy('event.organizerId')
+        .getRawMany<{ organizerId: string; count: string }>(),
+      this.followsRepository
+        .createQueryBuilder('follow')
+        .select('follow.organizerId', 'organizerId')
+        .addSelect('COUNT(*)', 'count')
+        .where('follow.organizerId IN (:...ids)', { ids: activeIds })
+        .groupBy('follow.organizerId')
+        .getRawMany<{ organizerId: string; count: string }>(),
+      // Same "does this user have a confirmed booking with this organizer" check
+      // getPublicProfile() does per-organizer, batched across the whole followed set.
+      this.enrollmentsRepository
+        .createQueryBuilder('enrollment')
+        .innerJoin('enrollment.event', 'event')
+        .select('DISTINCT event.organizerId', 'organizerId')
+        .where('enrollment.userId = :userId', { userId })
+        .andWhere('enrollment.status = :status', { status: 'confirmed' })
+        .andWhere('event.organizerId IN (:...ids)', { ids: activeIds })
+        .getRawMany<{ organizerId: string }>(),
+    ]);
+
+    const eventCountByOrganizer = new Map(eventCountRows.map((r) => [r.organizerId, Number(r.count)]));
+    const followerCountByOrganizer = new Map(followerCountRows.map((r) => [r.organizerId, Number(r.count)]));
+    const canSeePhoneOrganizerIds = new Set(confirmedOrganizerIdRows.map((r) => r.organizerId));
+
+    return activeOrganizers.map((organizer) => ({
+      id: organizer.id,
+      companyName: organizer.companyName,
+      companyDescription: organizer.companyDescription || undefined,
+      companyWebsite: organizer.companyWebsite || undefined,
+      companyLogoUrl: organizer.companyLogoUrl || undefined,
+      verified: organizer.verificationLevel !== VerificationLevel.UNVERIFIED,
+      memberSince: organizer.createdAt.toISOString(),
+      eventCount: eventCountByOrganizer.get(organizer.id) ?? 0,
+      followerCount: followerCountByOrganizer.get(organizer.id) ?? 0,
+      // This whole list is, by construction, every organizer `userId` follows.
+      isFollowing: true,
+      phone: canSeePhoneOrganizerIds.has(organizer.id) ? organizer.user.phoneNumber || undefined : undefined,
+    }));
   }
 
   // --- KYC verification (#7) ---
@@ -398,10 +472,16 @@ export class OrganizerService {
     return this.getMyVerificationStatus(userId);
   }
 
+  // Capped rather than fully paginated — this is an unbounded admin review queue with no
+  // page/limit params today; a hard cap on the oldest (first-in-line) submissions avoids
+  // changing the admin dashboard's existing plain-array consumption of this endpoint.
+  private static readonly MAX_PENDING_VERIFICATIONS_RETURNED = 200;
+
   async getPendingVerifications(): Promise<PendingVerificationRecord[]> {
     const organizers = await this.organizersRepository.find({
       where: { verificationLevel: VerificationLevel.UNVERIFIED },
       order: { submittedForReviewAt: 'ASC' },
+      take: OrganizerService.MAX_PENDING_VERIFICATIONS_RETURNED,
     });
     return organizers
       .filter((o) => o.submittedForReviewAt != null)

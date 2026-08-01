@@ -212,6 +212,27 @@ export class UploadsService implements OnModuleInit {
     return { uploadUrl: data.signedUrl, publicUrl };
   }
 
+  // Nothing ties a URL a client submits on a create/update DTO (companyLogoUrl,
+  // coverImageUrl, etc.) back to a signed upload actually issued for that field — a client
+  // could submit any externally-hosted URL, or reuse a URL obtained for a *different*
+  // purpose (e.g. a profile-picture upload as an event cover). This checks the URL is both
+  // hosted on this app's own Supabase project and under the exact bucket+path prefix the
+  // named purpose issues, closing both gaps for whichever field calls it. Only meaningful
+  // for public-bucket purposes — isPrivate purposes never hand back a real URL to validate.
+  assertPublicUrlMatchesPurpose(url: string, purpose: UploadPurpose): void {
+    const config = PURPOSE_CONFIG[purpose];
+    const supabaseUrl = this.configService.get<string>('SUPABASE_URL');
+    if (!supabaseUrl) {
+      // Uploads are already unusable app-wide without this configured (createSignedUrl
+      // throws ServiceUnavailableException) — nothing to validate against.
+      return;
+    }
+    const expectedPrefix = `${supabaseUrl.replace(/\/$/, '')}/storage/v1/object/public/${config.bucket}/${config.pathPrefix}/`;
+    if (!url.startsWith(expectedPrefix)) {
+      throw new BadRequestException(`Invalid URL for this field — it must be an upload obtained for purpose "${purpose}"`);
+    }
+  }
+
   // Mints a short-lived (5 min) signed read URL for a stored KYC document path, so an
   // admin reviewing a verification submission can view the actual image without the
   // document ever being publicly/permanently accessible. Only IDENTITY_PROOF/

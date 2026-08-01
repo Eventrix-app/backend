@@ -4,11 +4,15 @@ import { JwtModule } from '@nestjs/jwt';
 import { ConfigModule, ConfigService } from '@nestjs/config';
 import { WaitlistEntry } from '../entities/waitlist-entry.entity';
 import { Enrollment } from '../entities/enrollment.entity';
+import { Event } from '../entities/event.entity';
+import { Organizer } from '../entities/organizer.entity';
 import { WaitlistService } from './waitlist.service';
+import { FeeCalculationService } from '../payments/fee-calculation.service';
 
 @Module({
   imports: [
-    TypeOrmModule.forFeature([WaitlistEntry, Enrollment]),
+    ConfigModule,
+    TypeOrmModule.forFeature([WaitlistEntry, Enrollment, Event, Organizer]),
     JwtModule.registerAsync({
       imports: [ConfigModule],
       useFactory: (config: ConfigService) => ({
@@ -18,7 +22,7 @@ import { WaitlistService } from './waitlist.service';
       inject: [ConfigService],
     }),
   ],
-  providers: [WaitlistService],
+  providers: [WaitlistService, FeeCalculationService],
   exports: [WaitlistService],
 })
 export class WaitlistModule {}

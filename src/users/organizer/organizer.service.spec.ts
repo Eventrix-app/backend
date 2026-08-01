@@ -54,7 +54,10 @@ describe('OrganizerService', () => {
       notifyOrganizerVerificationApproved: jest.fn().mockResolvedValue(undefined),
       notifyOrganizerVerificationRejected: jest.fn().mockResolvedValue(undefined),
     };
-    mockUploadsService = { createSignedReadUrl: jest.fn().mockResolvedValue('https://signed.example.com') };
+    mockUploadsService = {
+      createSignedReadUrl: jest.fn().mockResolvedValue('https://signed.example.com'),
+      assertPublicUrlMatchesPurpose: jest.fn(),
+    };
     mockSessionsRepo = { update: jest.fn() };
     mockEnrollmentsRepo = { exist: jest.fn().mockResolvedValue(false) };
     mockEmailService = { send: jest.fn() };
@@ -99,6 +102,28 @@ describe('OrganizerService', () => {
     expect(result.companyLogoUrl).toBe('https://x.supabase.co/public/organizer-logos/user-1/abc.png');
   });
 
+  it('rejects a companyLogoUrl that does not pass upload-purpose validation', async () => {
+    const organizer = {
+      id: 'org-1',
+      companyLogoUrl: undefined,
+      commissionRate: 0,
+      commissionFlatFee: 0,
+      verificationLevel: VerificationLevel.UNVERIFIED,
+      createdAt: new Date(),
+      updatedAt: new Date(),
+      user: { id: 'user-1', fullName: 'Org Owner', deletedAt: null },
+    };
+    mockOrganizersRepo.findOne.mockResolvedValue(organizer);
+    mockUploadsService.assertPublicUrlMatchesPurpose.mockImplementation(() => {
+      throw new Error('Invalid URL for this field');
+    });
+
+    await expect(
+      service.update('org-1', { companyLogoUrl: 'https://evil.example.com/fake.png' }),
+    ).rejects.toThrow('Invalid URL for this field');
+    expect(mockOrganizersRepo.save).not.toHaveBeenCalled();
+  });
+
   it('leaves companyLogoUrl untouched when not present in the update payload', async () => {
     const organizer = {
       id: 'org-1',
@@ -115,6 +140,48 @@ describe('OrganizerService', () => {
     const result = await service.update('org-1', { firstName: 'New' });
 
     expect(result.companyLogoUrl).toBe('https://existing.example.com/logo.png');
+  });
+
+  // Regression test: an admin setting verificationLevel via this generic endpoint
+  // (instead of the dedicated verification/approve route) previously left the user
+  // without the 'organizer' role — an inconsistent state approveVerification() otherwise
+  // carefully prevents.
+  it('grants the organizer role when an admin sets verificationLevel to document_verified via the generic update endpoint', async () => {
+    const organizer = {
+      id: 'org-1',
+      commissionRate: 0,
+      commissionFlatFee: 0,
+      verificationLevel: VerificationLevel.UNVERIFIED,
+      createdAt: new Date(),
+      updatedAt: new Date(),
+      user: { id: 'user-1', fullName: 'Org Owner', deletedAt: null, roles: ['participant'] },
+    };
+    mockOrganizersRepo.findOne.mockResolvedValue(organizer);
+
+    await service.update('org-1', { verificationLevel: VerificationLevel.DOCUMENT_VERIFIED });
+
+    expect(mockUsersRepo.save).toHaveBeenCalledWith(
+      expect.objectContaining({ roles: ['participant', 'organizer'] }),
+    );
+  });
+
+  it('does not duplicate the organizer role if it is already present', async () => {
+    const organizer = {
+      id: 'org-1',
+      commissionRate: 0,
+      commissionFlatFee: 0,
+      verificationLevel: VerificationLevel.UNVERIFIED,
+      createdAt: new Date(),
+      updatedAt: new Date(),
+      user: { id: 'user-1', fullName: 'Org Owner', deletedAt: null, roles: ['participant', 'organizer'] },
+    };
+    mockOrganizersRepo.findOne.mockResolvedValue(organizer);
+
+    await service.update('org-1', { verificationLevel: VerificationLevel.DOCUMENT_VERIFIED });
+
+    expect(mockUsersRepo.save).toHaveBeenCalledWith(
+      expect.objectContaining({ roles: ['participant', 'organizer'] }),
+    );
   });
 
   // Regression tests (#3/#5): approve/reject previously acted on any organizer
@@ -212,6 +279,80 @@ describe('OrganizerService', () => {
       await expect(service.rejectVerification('org-1', 'No submission')).rejects.toThrow(
         /no submission is currently pending review/,
       );
+    });
+  });
+
+  // Regression test: getMyFollowing previously called getPublicProfile() once per followed
+  // organizer (~5 queries each) instead of batching. This proves the batched version
+  // issues one grouped query per metric instead of N, and returns the same shape.
+  describe('getMyFollowing — batched, not N+1', () => {
+    function makeQueryBuilder(rows: any[]) {
+      const qb: any = {};
+      qb.innerJoin = jest.fn().mockReturnValue(qb);
+      qb.select = jest.fn().mockReturnValue(qb);
+      qb.addSelect = jest.fn().mockReturnValue(qb);
+      qb.where = jest.fn().mockReturnValue(qb);
+      qb.andWhere = jest.fn().mockReturnValue(qb);
+      qb.groupBy = jest.fn().mockReturnValue(qb);
+      qb.getRawMany = jest.fn().mockResolvedValue(rows);
+      return qb;
+    }
+
+    it('returns profiles for every actively-followed organizer using one query per metric', async () => {
+      mockFollowsRepo.find.mockResolvedValue([
+        { userId: 'user-1', organizerId: 'org-1' },
+        { userId: 'user-1', organizerId: 'org-2' },
+      ]);
+      mockOrganizersRepo.find = jest.fn().mockResolvedValue([
+        {
+          id: 'org-1',
+          companyName: 'Acme',
+          verificationLevel: VerificationLevel.UNVERIFIED,
+          createdAt: new Date('2024-01-01'),
+          user: { phoneNumber: '111', deletedAt: null },
+        },
+        {
+          id: 'org-2',
+          companyName: 'Beta',
+          verificationLevel: VerificationLevel.UNVERIFIED,
+          createdAt: new Date('2024-01-01'),
+          user: { phoneNumber: '222', deletedAt: null },
+        },
+      ]);
+      mockEventsRepo.createQueryBuilder = jest.fn().mockReturnValue(makeQueryBuilder([{ organizerId: 'org-1', count: '3' }]));
+      mockFollowsRepo.createQueryBuilder = jest.fn().mockReturnValue(makeQueryBuilder([{ organizerId: 'org-1', count: '10' }]));
+      mockEnrollmentsRepo.createQueryBuilder = jest.fn().mockReturnValue(makeQueryBuilder([{ organizerId: 'org-1' }]));
+
+      const result = await service.getMyFollowing('user-1');
+
+      expect(mockOrganizersRepo.find).toHaveBeenCalledTimes(1);
+      expect(mockEventsRepo.createQueryBuilder).toHaveBeenCalledTimes(1);
+      expect(mockFollowsRepo.createQueryBuilder).toHaveBeenCalledTimes(1);
+      expect(mockEnrollmentsRepo.createQueryBuilder).toHaveBeenCalledTimes(1);
+      expect(result).toHaveLength(2);
+      expect(result.find((r) => r.id === 'org-1')).toMatchObject({
+        eventCount: 3,
+        followerCount: 10,
+        isFollowing: true,
+        phone: '111',
+      });
+      expect(result.find((r) => r.id === 'org-2')).toMatchObject({
+        eventCount: 0,
+        followerCount: 0,
+        isFollowing: true,
+        phone: undefined,
+      });
+    });
+
+    it('drops a followed organizer whose account was soft-deleted after the follow was created', async () => {
+      mockFollowsRepo.find.mockResolvedValue([{ userId: 'user-1', organizerId: 'org-1' }]);
+      mockOrganizersRepo.find = jest.fn().mockResolvedValue([
+        { id: 'org-1', user: { deletedAt: new Date() } },
+      ]);
+
+      const result = await service.getMyFollowing('user-1');
+
+      expect(result).toEqual([]);
     });
   });
 });

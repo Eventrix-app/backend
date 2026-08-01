@@ -1,4 +1,4 @@
-import { IsOptional, IsUUID, IsInt, Min, Max } from 'class-validator';
+import { IsOptional, IsUUID, IsInt, IsString, Min, Max } from 'class-validator';
 
 // Hard ceiling independent of TicketType.maxPerOrder/Event.capacity, both of which are
 // optional and otherwise leave a single order free to claim an unbounded slice of
@@ -15,4 +15,11 @@ export class EnrollDto {
   @Min(1)
   @Max(MAX_QUANTITY_PER_ORDER)
   quantity?: number;
+
+  // Required when the resolved ticket type has TicketType.accessPassword set — see
+  // EventsService.enroll(). Not present on public ticket type listings, so a caller has
+  // to have actually been given it out-of-band.
+  @IsOptional()
+  @IsString()
+  accessPassword?: string;
 }

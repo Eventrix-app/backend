@@ -1,13 +1,18 @@
-import { BadRequestException, Body, Controller, Get, Headers, HttpCode, HttpStatus, Param, ParseUUIDPipe, Patch, Post, Query, Request, UnauthorizedException } from '@nestjs/common';
+import { BadRequestException, Body, Controller, Get, Headers, HttpCode, HttpStatus, Param, ParseUUIDPipe, Patch, Post, Query, Req, Request, UnauthorizedException } from '@nestjs/common';
+import type { RawBodyRequest } from '@nestjs/common';
+import type { Request as ExpressRequest } from 'express';
+import * as crypto from 'crypto';
 import { ApiTags } from '@nestjs/swagger';
 import { ConfigService } from '@nestjs/config';
 import { Throttle } from '@nestjs/throttler';
 
 import { PaymentsService } from './payments.service';
+import { RazorpayService } from './razorpay.service';
 import { FeeEstimateDto } from './dto/fee-estimate.dto';
 import { RequestRefundDto } from './dto/request-refund.dto';
 import { RejectRefundDto } from './dto/reject-refund.dto';
-import { PaymentWebhookDto } from './dto/payment-webhook.dto';
+import { CreateOrderDto } from './dto/create-order.dto';
+import { VerifyPaymentDto } from './dto/verify-payment.dto';
 import { JwtPayload } from '../auth/jwt.util';
 import { Public } from '../common/decorators/public.decorator';
 import { AuditAction } from '../common/decorators/audit-action.decorator';
@@ -21,7 +26,20 @@ export class PaymentsController {
   constructor(
     private readonly paymentsService: PaymentsService,
     private readonly configService: ConfigService,
+    private readonly razorpayService: RazorpayService,
   ) {}
+
+  @Post('create-order')
+  @HttpCode(HttpStatus.CREATED)
+  async createOrder(@Body() dto: CreateOrderDto, @Request() req: Request & { user: JwtPayload }) {
+    return await this.paymentsService.createOrder(req.user.id, dto);
+  }
+
+  @Post('verify')
+  @HttpCode(HttpStatus.OK)
+  async verifyPayment(@Body() dto: VerifyPaymentDto, @Request() req: Request & { user: JwtPayload }) {
+    return await this.paymentsService.verifyPayment(req.user.id, dto);
+  }
 
   // @Cron(EVERY_HOUR) in PaymentsService never fires on Vercel — serverless functions
   // don't keep a process running between requests. Vercel Cron Jobs (configured in
@@ -35,7 +53,7 @@ export class PaymentsController {
     if (!expected) {
       throw new UnauthorizedException('Payout sweep trigger is not configured (CRON_SECRET missing)');
     }
-    if (authHeader !== `Bearer ${expected}`) {
+    if (!authHeader || !timingSafeEqual(`Bearer ${expected}`, authHeader)) {
       throw new UnauthorizedException('Invalid cron secret');
     }
     return await this.paymentsService.runPayoutSweep();
@@ -116,14 +134,35 @@ export class PaymentsController {
     return await this.paymentsService.rejectRefund(id, dto.reason, req.user.id, req.user.roles);
   }
 
-  // Gateway callback — no user JWT is presented. A production deployment must verify the
-  // gateway's request signature here before trusting the payload; that verification step
-  // is gateway-SDK-specific and stubbed alongside the rest of the gateway integration.
+  // Gateway callback — no user JWT is presented, so the Razorpay request signature (HMAC
+  // over the *raw* body, keyed by RAZORPAY_WEBHOOK_SECRET) is the only thing standing
+  // between this endpoint and an attacker POSTing a fake "payment succeeded" body. Verified
+  // against req.rawBody (captured by Nest's `rawBody: true` option in createApp) rather
+  // than re-serializing req.body, since JSON.stringify is not guaranteed to reproduce the
+  // exact bytes Razorpay signed.
   @Public()
   @Throttle({ default: { limit: 60, ttl: 60000 } })
   @Post('webhook')
   @HttpCode(HttpStatus.OK)
-  async handleWebhook(@Body() dto: PaymentWebhookDto) {
+  async handleWebhook(@Req() req: RawBodyRequest<ExpressRequest>, @Headers('x-razorpay-signature') signature?: string) {
+    if (!signature || !req.rawBody) {
+      throw new UnauthorizedException('Missing webhook signature');
+    }
+    if (!this.razorpayService.verifyWebhookSignature(req.rawBody.toString('utf8'), signature)) {
+      throw new UnauthorizedException('Invalid webhook signature');
+    }
+
+    const dto = this.razorpayService.parseWebhookEvent(req.body);
+    if (!dto) {
+      return { status: 'ignored' };
+    }
     return await this.paymentsService.handleWebhook(dto);
   }
+}
+
+function timingSafeEqual(a: string, b: string): boolean {
+  const bufA = Buffer.from(a);
+  const bufB = Buffer.from(b);
+  if (bufA.length !== bufB.length) return false;
+  return crypto.timingSafeEqual(bufA, bufB);
 }

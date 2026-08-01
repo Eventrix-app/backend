@@ -4,6 +4,7 @@ import {
   Delete,
   DefaultValuePipe,
   Get,
+  Headers,
   Param,
   ParseUUIDPipe,
   Patch,
@@ -28,8 +29,11 @@ export class AdminController {
 
   @Public()
   @Post('bootstrap')
-  async bootstrap(@Body() createAdminDto: CreateAdminDto) {
-    return await this.adminService.bootstrap(createAdminDto);
+  async bootstrap(
+    @Body() createAdminDto: CreateAdminDto,
+    @Headers('x-bootstrap-secret') bootstrapSecret?: string,
+  ) {
+    return await this.adminService.bootstrap(createAdminDto, bootstrapSecret);
   }
 
   @AuditAction('admin.create', 'admin')

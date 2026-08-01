@@ -34,7 +34,16 @@ export const validateEnv = (config: Record<string, unknown>) => {
     // 'true'; anything else (including unset) keeps the bypass off. Never set this in a
     // real deployment.
     ALLOW_DEV_OTP_BYPASS: Joi.string().optional(),
+    // Opt-in only — allows any http(s)://localhost[:port] origin through CORS, for Expo's
+    // web dev server (which bumps ports on restart). Must be explicitly 'true'; unset keeps
+    // it off, same fail-closed posture as ALLOW_DEV_OTP_BYPASS above.
+    ALLOW_LOCALHOST_CORS: Joi.string().optional(),
     FRONTEND_URL: Joi.string().optional(),
+    // Optional — until these are set, RazorpayService fails fast with a 503 rather than
+    // the SDK erroring on the actual gateway calls. keyId is the public half of the pair.
+    RAZORPAY_KEY_ID: Joi.string().optional(),
+    RAZORPAY_KEY_SECRET: Joi.string().optional(),
+    RAZORPAY_WEBHOOK_SECRET: Joi.string().optional(),
     GATEWAY_FEE_PERCENT: Joi.number().optional(),
     GATEWAY_FEE_FLAT: Joi.number().optional(),
     REFUND_WINDOW_HOURS: Joi.number().optional(),
@@ -42,6 +51,10 @@ export const validateEnv = (config: Record<string, unknown>) => {
     SUPABASE_URL: Joi.string().optional(),
     SUPABASE_SERVICE_ROLE_KEY: Joi.string().optional(),
     CRON_SECRET: Joi.string().optional(),
+    // Optional — see configuration.ts's `admin.bootstrapSecret` comment. Unset means the
+    // bootstrap-the-first-admin endpoint always rejects rather than falling back to
+    // "any unauthenticated caller may create an admin whenever the admin count is 0".
+    ADMIN_BOOTSTRAP_SECRET: Joi.string().optional(),
     RESEND_API_KEY: Joi.string().optional(),
     EMAIL_FROM: Joi.string().optional(),
     // SMTP fallback transport (Nodemailer) — used only when Resend is unconfigured or a

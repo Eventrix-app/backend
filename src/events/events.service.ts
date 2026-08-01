@@ -2,7 +2,7 @@ import { Injectable, NotFoundException, ForbiddenException, Logger, ConflictExce
 import { InjectRepository } from '@nestjs/typeorm';
 import { Repository, DataSource, ILike, In, Between, MoreThanOrEqual, LessThanOrEqual, Not } from 'typeorm';
 import { JwtService } from '@nestjs/jwt';
-import { Event, EventApprovalStatus, EventStatus } from '../entities/event.entity';
+import { Event, EventApprovalStatus, EventStatus, FeePayer } from '../entities/event.entity';
 import { Enrollment } from '../entities/enrollment.entity';
 import { Organizer, VerificationLevel } from '../entities/organizer.entity';
 import { User } from '../entities/user.entity';
@@ -23,6 +23,7 @@ import { NotificationService } from '../notifications/notification.service';
 import { getEventEndDateTime, isEventOver, todayIstDateKey } from './utils/event-dates.util';
 import { EVENTS_LIST_VERSION_KEY, eventDetailCacheKey, invalidateEventCaches } from './utils/event-cache.util';
 import { CacheService } from '../common/cache/cache.service';
+import { FeeCalculationService } from '../payments/fee-calculation.service';
 
 // Loading the 'organizer.user' relation pulls the full User entity by default, including
 // passwordHash and other PII — there's no @Exclude()/serializer scoping it out anywhere in
@@ -75,6 +76,7 @@ export class EventsService {
     private readonly waitlistService: WaitlistService,
     private readonly notificationService: NotificationService,
     private readonly cache: CacheService,
+    private readonly feeCalculationService: FeeCalculationService,
   ) {}
 
   // Public listings are read far more often than events are written, so they're cached for
@@ -935,6 +937,13 @@ export class EventsService {
     if (ticketType.quantitySold > 0) {
       throw new ForbiddenException('Cannot remove a ticket tier that already has sales');
     }
+    // quantitySold can still be 0 while people are genuinely queued for this tier — an
+    // event-level aggregate capacity cap (event.capacity) can route a request to the
+    // waitlist even though the tier's own quantitySold has headroom. Deleting the tier
+    // would otherwise cascade-delete those WaitlistEntry rows with no notice to anyone.
+    if (await this.waitlistService.hasWaitingEntries(ticketTypeId)) {
+      throw new ForbiddenException('Cannot remove a ticket tier that people are currently waitlisted for');
+    }
 
     await this.ticketTypesRepository.remove(ticketType);
     this.logger.log(`Removed ticket type ${ticketTypeId} on event ${eventId}`);
@@ -1029,7 +1038,13 @@ export class EventsService {
 
   // Participant enrollment with atomic, race-safe ticket-type decrement. When the tier
   // is sold out, the request creates a WaitlistEntry instead of failing outright.
-  async enroll(eventId: string, userId: string, ticketTypeId?: string, quantity = 1): Promise<Enrollment | WaitlistEntryWithPosition> {
+  async enroll(
+    eventId: string,
+    userId: string,
+    ticketTypeId?: string,
+    quantity = 1,
+    accessPassword?: string,
+  ): Promise<Enrollment | WaitlistEntryWithPosition> {
     const result = await this.dataSource.transaction(async (manager) => {
       const user = await manager.findOne(User, { where: { id: userId } });
       if (!user?.isEmailVerified) {
@@ -1071,6 +1086,10 @@ export class EventsService {
       const resolvedTicketType = event.ticketTypes?.find((t) => t.id === resolvedTicketTypeId);
       if (!resolvedTicketType) {
         throw new NotFoundException(`Ticket type ${resolvedTicketTypeId} not found on this event`);
+      }
+
+      if (resolvedTicketType.accessPassword && resolvedTicketType.accessPassword !== accessPassword) {
+        throw new ForbiddenException('Incorrect access password for this ticket type');
       }
 
       if (quantity < resolvedTicketType.minPerOrder) {
@@ -1122,7 +1141,25 @@ export class EventsService {
       const ticketType = updateResult[0][0] as { price: string };
 
       const bookingReference = `BK-${Date.now()}-${Math.random().toString(36).slice(2, 7).toUpperCase()}`;
-      const totalAmount = Number(ticketType.price) * quantity;
+      const baseAmount = Number(ticketType.price) * quantity;
+
+      // When the organizer has passed gateway/commission fees to the participant, the
+      // amount actually charged (and later confirmed by handleWebhook) must include that
+      // markup — otherwise the platform collects it on paper (Commission rows) without
+      // ever actually billing the buyer for it. See fee-calculation.service.ts.
+      let totalAmount = baseAmount;
+      if (baseAmount > 0 && event.feePayer === FeePayer.PARTICIPANT) {
+        const organizer = await manager.findOne(Organizer, { where: { id: event.organizerId } });
+        const breakdown = this.feeCalculationService.calculate(
+          baseAmount,
+          {
+            commissionRate: Number(organizer?.commissionRate ?? 0),
+            commissionFlatFee: Number(organizer?.commissionFlatFee ?? 0),
+          },
+          event.feePayer,
+        );
+        totalAmount = breakdown.buyerPrice;
+      }
 
       const enrollment = manager.create(Enrollment, {
         userId,

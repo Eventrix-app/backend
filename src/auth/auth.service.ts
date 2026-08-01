@@ -485,7 +485,13 @@ export class AuthService {
 
     // Local-dev convenience only, and only when no real send was attempted — once email is
     // configured, the code must never also land in a log, or "send it privately" is moot.
-    if (!this.emailService.isConfigured) {
+    // Also requires the same explicit ALLOW_DEV_OTP_BYPASS opt-in as the bypass below —
+    // email being unconfigured is not, by itself, proof this is a local dev environment;
+    // env.validation.ts makes RESEND_API_KEY/SMTP_* all optional, so a production
+    // deployment that simply forgot to set them would otherwise silently leak
+    // account-takeover-capable OTPs to its logs.
+    const allowDevOtpLogging = this.configService.get<string>('ALLOW_DEV_OTP_BYPASS') === 'true';
+    if (!this.emailService.isConfigured && allowDevOtpLogging) {
       this.logger.log(`*************************************************`);
       this.logger.log(`PASSWORD RESET OTP FOR ${email}: ${otp}`);
       this.logger.log(`*************************************************`);
@@ -562,7 +568,9 @@ export class AuthService {
     const otpEmail = emailVerificationOtpEmail(otp, OTP_TTL_MINUTES);
     await this.emailService.send(user.email, otpEmail.subject, otpEmail.html);
 
-    if (!this.emailService.isConfigured) {
+    // Same explicit ALLOW_DEV_OTP_BYPASS gate as forgotPassword() — see that comment.
+    const allowDevOtpLogging = this.configService.get<string>('ALLOW_DEV_OTP_BYPASS') === 'true';
+    if (!this.emailService.isConfigured && allowDevOtpLogging) {
       this.logger.log(`*************************************************`);
       this.logger.log(`EMAIL VERIFICATION OTP FOR ${user.email}: ${otp}`);
       this.logger.log(`*************************************************`);

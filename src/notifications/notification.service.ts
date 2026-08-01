@@ -268,10 +268,17 @@ export class NotificationService {
   // Read-side for NotificationsScreen — lists the same jobs enqueue() persists,
   // rendered with a human-readable title/body derived from type + payload.
   // ---------------------------------------------------------------------
+  // Capped rather than fully paginated — every booking, event change, follow, like, and
+  // comment enqueues a row per user forever, so this list grows unboundedly. A hard cap on
+  // the most recent entries (rather than real page/limit params) avoids changing this
+  // endpoint's response shape for the app's existing notification feed screen.
+  private static readonly MAX_NOTIFICATIONS_RETURNED = 200;
+
   async findMyNotifications(userId: string): Promise<NotificationRecord[]> {
     const jobs = await this.notificationJobsRepository.find({
       where: { userId },
       order: { createdAt: 'DESC' },
+      take: NotificationService.MAX_NOTIFICATIONS_RETURNED,
     });
     return jobs.map((job) => this.toRecord(job));
   }

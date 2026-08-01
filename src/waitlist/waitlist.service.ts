@@ -4,9 +4,13 @@ import { DataSource, LessThan, Repository } from 'typeorm';
 import { JwtService } from '@nestjs/jwt';
 import { WaitlistEntry, WaitlistStatus } from '../entities/waitlist-entry.entity';
 import { Enrollment } from '../entities/enrollment.entity';
+import { Event, FeePayer } from '../entities/event.entity';
+import { Organizer } from '../entities/organizer.entity';
+import { FeeCalculationService } from '../payments/fee-calculation.service';
 import { NotificationService } from '../notifications/notification.service';
 import { CacheService } from '../common/cache/cache.service';
 import { invalidateEventCaches } from '../events/utils/event-cache.util';
+import { isEventOver } from '../events/utils/event-dates.util';
 
 export type WaitlistEntryWithPosition = WaitlistEntry & { position: number };
 
@@ -17,10 +21,15 @@ export class WaitlistService {
   constructor(
     @InjectRepository(WaitlistEntry)
     private readonly waitlistRepository: Repository<WaitlistEntry>,
+    @InjectRepository(Event)
+    private readonly eventsRepository: Repository<Event>,
+    @InjectRepository(Organizer)
+    private readonly organizersRepository: Repository<Organizer>,
     private readonly dataSource: DataSource,
     private readonly jwtService: JwtService,
     private readonly notificationService: NotificationService,
     private readonly cache: CacheService,
+    private readonly feeCalculationService: FeeCalculationService,
   ) {}
 
   async join(eventId: string, ticketTypeId: string, userId: string, quantity: number): Promise<WaitlistEntryWithPosition> {
@@ -49,6 +58,17 @@ export class WaitlistService {
       }
       throw err;
     }
+  }
+
+  // Used by EventsService.removeTicketType() to block deleting a tier out from under
+  // people still queued for it — a tier can have active WAITING entries while its own
+  // quantitySold is still 0 (see the aggregate event.capacity path in enroll()), so
+  // "quantitySold > 0" alone isn't a sufficient guard against silently losing queue data.
+  async hasWaitingEntries(ticketTypeId: string): Promise<boolean> {
+    const count = await this.waitlistRepository.count({
+      where: { ticketTypeId, status: WaitlistStatus.WAITING },
+    });
+    return count > 0;
   }
 
   async findMyEntries(userId: string): Promise<WaitlistEntryWithPosition[]> {
@@ -105,6 +125,32 @@ export class WaitlistService {
       });
       if (!fresh || fresh.status !== WaitlistStatus.WAITING) return null;
 
+      let event = await manager.findOne(Event, { where: { id: fresh.eventId } });
+      if (!event) return null;
+
+      // A cancellation/refund for an event that has already happened must not hand the
+      // freed seat to someone still queued — there's no event left to attend. Left WAITING
+      // rather than force-expired here; that's a separate cleanup concern.
+      if (isEventOver(event)) return null;
+
+      // Mirrors EventsService.enroll()'s aggregate-capacity check: `event.capacity` is a
+      // cap across all ticket tiers combined, separate from each tier's own
+      // quantity_total. Without this, a cancellation could free a seat on a tier that
+      // still has its own headroom, and this promotion would push the event's true total
+      // sold back above the organizer's aggregate cap — enroll() and promotion must lock
+      // and check the same invariant, or the two paths aren't actually serialized.
+      if (event.capacity != null) {
+        event = (await manager.findOne(Event, {
+          where: { id: fresh.eventId },
+          lock: { mode: 'pessimistic_write' },
+          relations: ['ticketTypes'],
+        })) as Event;
+      }
+      if (event.capacity != null) {
+        const currentSold = event.ticketTypes.reduce((sum, t) => sum + t.quantitySold, 0);
+        if (currentSold + fresh.quantity > event.capacity) return null;
+      }
+
       // Same atomic, race-safe capacity claim as the primary enrollment path.
       const updateResult = await manager.query(
         `UPDATE ticket_types
@@ -118,7 +164,25 @@ export class WaitlistService {
 
       const ticketType = updateResult[0][0] as { price: string };
       const bookingReference = `BK-${Date.now()}-${Math.random().toString(36).slice(2, 7).toUpperCase()}`;
-      const totalAmount = Number(ticketType.price) * fresh.quantity;
+      const baseAmount = Number(ticketType.price) * fresh.quantity;
+
+      // Mirrors EventsService.enroll(): when the organizer has passed gateway/commission
+      // fees to the participant, the amount actually charged (and later confirmed by
+      // handleWebhook) must include that markup — otherwise a promoted waitlist booking
+      // would silently undercharge relative to a direct enroll() for the same event.
+      let totalAmount = baseAmount;
+      if (baseAmount > 0 && event?.feePayer === FeePayer.PARTICIPANT) {
+        const organizer = await manager.findOne(Organizer, { where: { id: event.organizerId } });
+        const breakdown = this.feeCalculationService.calculate(
+          baseAmount,
+          {
+            commissionRate: Number(organizer?.commissionRate ?? 0),
+            commissionFlatFee: Number(organizer?.commissionFlatFee ?? 0),
+          },
+          event.feePayer,
+        );
+        totalAmount = breakdown.buyerPrice;
+      }
 
       const enrollment = manager.create(Enrollment, {
         userId: fresh.userId,

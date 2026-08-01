@@ -38,18 +38,25 @@ export class JwtAuthGuard implements CanActivate {
       return true;
     }
 
-    // Routes marked @Public() skip authentication entirely
+    // Routes marked @Public() don't require authentication — but several of them
+    // (EventsController.findOne/findTicketTypes/findMedia) branch on `req.user?.id` to give
+    // a logged-in caller a richer response (e.g. an organizer viewing their own not-yet-
+    // approved event) while still allowing anonymous access. That only works if this guard
+    // still verifies a token when one is present; returning early here left `req.user`
+    // permanently undefined on every @Public() route regardless of whether a valid Bearer
+    // token was sent, so those owner/admin checks silently always failed — an organizer
+    // could never see their own pending/draft/rejected event's detail page. `isPublic` below
+    // therefore only controls whether a MISSING or INVALID token is tolerated, not whether
+    // a present one gets parsed.
     const isPublic = this.reflector.getAllAndOverride<boolean>(IS_PUBLIC_KEY, [
       context.getHandler(),
       context.getClass(),
     ]);
-    if (isPublic) {
-      return true;
-    }
 
     const request = context.switchToHttp().getRequest<Request>();
     const authHeader = request.headers.authorization;
     if (!authHeader || !authHeader.startsWith('Bearer ')) {
+      if (isPublic) return true;
       throw new UnauthorizedException(
         'Missing or malformed Authorization header',
       );
@@ -57,16 +64,20 @@ export class JwtAuthGuard implements CanActivate {
 
     const token = authHeader.slice('Bearer '.length).trim();
     if (!token) {
+      if (isPublic) return true;
       throw new UnauthorizedException('Empty bearer token');
     }
 
     const secret = this.configService.get<string>('JWT_SECRET');
     if (!secret) {
       // We deliberately refuse to verify against any fallback. This is a server-misconfiguration,
-      // not a user error — fail closed.
+      // not a user error — fail closed for a route that actually requires auth. A public
+      // route degrades to anonymous instead of taking down browsing entirely on this
+      // misconfiguration.
       this.logger.error(
         'JWT_SECRET is not configured; refusing to authenticate request',
       );
+      if (isPublic) return true;
       throw new UnauthorizedException('Authentication is not configured');
     }
 
@@ -123,6 +134,10 @@ export class JwtAuthGuard implements CanActivate {
     } catch (err) {
       const message = err instanceof Error ? err.message : 'Invalid token';
       this.logger.warn(`JWT verification failed: ${message}`);
+      // A public route must stay reachable even when the caller happens to send a stale/
+      // invalid/banned-account token alongside it (e.g. a logged-out-elsewhere session
+      // still cached on device) — fall back to anonymous rather than blocking the request.
+      if (isPublic) return true;
       throw new UnauthorizedException('Invalid or expired token');
     }
   }

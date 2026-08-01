@@ -401,7 +401,7 @@ export class EventsController {
     @Body() enrollDto: EnrollDto,
     @Request() req: Request & { user: JwtPayload },
   ) {
-    return await this.eventsService.enroll(id, req.user.id, enrollDto?.ticketTypeId, enrollDto?.quantity);
+    return await this.eventsService.enroll(id, req.user.id, enrollDto?.ticketTypeId, enrollDto?.quantity, enrollDto?.accessPassword);
   }
 
   @Post(':id/favorite')

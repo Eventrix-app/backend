@@ -4,6 +4,7 @@ import { TypeOrmModule } from '@nestjs/typeorm';
 import { PaymentsController } from './payments.controller';
 import { PaymentsService } from './payments.service';
 import { FeeCalculationService } from './fee-calculation.service';
+import { RazorpayService } from './razorpay.service';
 import { Payment } from '../entities/payment.entity';
 import { Commission } from '../entities/commission.entity';
 import { Refund } from '../entities/refund.entity';
@@ -19,7 +20,7 @@ import { WaitlistModule } from '../waitlist/waitlist.module';
     WaitlistModule,
   ],
   controllers: [PaymentsController],
-  providers: [PaymentsService, FeeCalculationService],
-  exports: [PaymentsService, FeeCalculationService],
+  providers: [PaymentsService, FeeCalculationService, RazorpayService],
+  exports: [PaymentsService, FeeCalculationService, RazorpayService],
 })
 export class PaymentsModule {}

@@ -25,6 +25,15 @@ export default () => ({
     // should be restricted by API (Geocoding API only) and, where possible, server IP.
     apiKey: process.env.GOOGLE_MAPS_API_KEY,
   },
+  razorpay: {
+    // Unset in any environment that hasn't onboarded a real Razorpay account yet —
+    // RazorpayService fails fast with a clear 503 rather than the SDK throwing an opaque
+    // 401 mid-request. keyId is safe to hand back to the client (it's the public half of
+    // the pair); keySecret/webhookSecret never leave the server.
+    keyId: process.env.RAZORPAY_KEY_ID,
+    keySecret: process.env.RAZORPAY_KEY_SECRET,
+    webhookSecret: process.env.RAZORPAY_WEBHOOK_SECRET,
+  },
   gatewayFee: {
     // Blended default approximating Razorpay/PayU's published rates (2% + flat ₹3/txn).
     // Organizer-facing "live payout estimate" and actual payment settlement both read
@@ -37,6 +46,14 @@ export default () => ({
   },
   payout: {
     delayDaysAfterEventEnd: Number(process.env.PAYOUT_DELAY_DAYS) || 3,
+  },
+  admin: {
+    // Defense in depth on top of AdminService.bootstrap()'s "only when zero admins exist"
+    // check: that check alone means the permanently-@Public() bootstrap endpoint would
+    // silently reopen to anyone if every admin account were ever removed post-launch.
+    // Unset means bootstrap() always rejects — must be explicitly configured before the
+    // very first admin can be created, same fail-closed posture as JWT_SECRET/PASSWORD_PEPPER.
+    bootstrapSecret: process.env.ADMIN_BOOTSTRAP_SECRET,
   },
   cron: {
     // Verifies Vercel Cron Jobs' `Authorization: Bearer <CRON_SECRET>` header (see

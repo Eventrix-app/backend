@@ -1,4 +1,4 @@
-import { ForbiddenException, InternalServerErrorException, ServiceUnavailableException } from '@nestjs/common';
+import { BadRequestException, ForbiddenException, InternalServerErrorException, ServiceUnavailableException } from '@nestjs/common';
 import { UploadsService } from './uploads.service';
 import { UploadPurpose } from './dto/create-signed-url.dto';
 
@@ -110,6 +110,32 @@ describe('UploadsService', () => {
       await expect(
         service.createSignedUrl({ purpose: UploadPurpose.EVENT_IMAGE, contentType: 'image/jpeg' }, 'user-1', ['user']),
       ).rejects.toThrow(ForbiddenException);
+    });
+  });
+
+  // Nothing previously tied a client-submitted URL (companyLogoUrl, coverImageUrl, etc.)
+  // back to a signed upload actually issued for that field — this closes both the
+  // "arbitrary external URL" and "reused URL from a different purpose" gaps.
+  describe('assertPublicUrlMatchesPurpose', () => {
+    it('accepts a URL under the exact bucket+path prefix the purpose issues', () => {
+      const url = 'https://x.supabase.co/storage/v1/object/public/organizer-logos/organizers/user-1/abc123.png';
+      expect(() => service.assertPublicUrlMatchesPurpose(url, UploadPurpose.COMPANY_LOGO)).not.toThrow();
+    });
+
+    it('rejects an arbitrary externally-hosted URL', () => {
+      const url = 'https://evil.example.com/fake-logo.png';
+      expect(() => service.assertPublicUrlMatchesPurpose(url, UploadPurpose.COMPANY_LOGO)).toThrow(BadRequestException);
+    });
+
+    it('rejects a URL obtained for a different purpose', () => {
+      // A real profile-picture URL, submitted for the company-logo field.
+      const url = 'https://x.supabase.co/storage/v1/object/public/profile-pictures/users/user-1/abc123.png';
+      expect(() => service.assertPublicUrlMatchesPurpose(url, UploadPurpose.COMPANY_LOGO)).toThrow(BadRequestException);
+    });
+
+    it('skips validation when SUPABASE_URL is unconfigured (uploads are already unusable app-wide)', () => {
+      mockConfigService.get.mockReturnValue(undefined);
+      expect(() => service.assertPublicUrlMatchesPurpose('https://anything.example.com/x.png', UploadPurpose.COMPANY_LOGO)).not.toThrow();
     });
   });
 });

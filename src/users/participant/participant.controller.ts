@@ -22,6 +22,7 @@ import { Public } from '../../common/decorators/public.decorator';
 import { ApiTags } from '@nestjs/swagger';
 import { JwtPayload } from '../../auth/jwt.util';
 import { ParseLimitIntPipe, ParsePageIntPipe } from '../../common/pipes/pagination.pipe';
+import { Throttle } from '@nestjs/throttler';
 
 @Roles('admin')
 @ApiTags('participants')
@@ -29,7 +30,11 @@ import { ParseLimitIntPipe, ParsePageIntPipe } from '../../common/pipes/paginati
 export class ParticipantController {
   constructor(private readonly participantService: ParticipantService) {}
 
+  // Functionally identical to /auth/register — same anti-abuse limit as AuthController's
+  // own registration endpoint (@Throttle) instead of just the app-wide default, which was
+  // never actually tightened for this second registration path.
   @Public()
+  @Throttle({ default: { limit: 10, ttl: 60000 } })
   @Post()
   async create(@Body() createParticipantDto: CreateParticipantDto) {
     return await this.participantService.create(createParticipantDto);

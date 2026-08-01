@@ -248,6 +248,67 @@ describe('AuthService — password change/reset security emails', () => {
   });
 });
 
+// Regression tests: an unconfigured EmailService alone must not be enough to leak a
+// password-reset OTP into the server logs — that also requires the explicit
+// ALLOW_DEV_OTP_BYPASS opt-in, the same gate the "123456" dev bypass code already
+// requires, since env.validation.ts leaves RESEND_API_KEY/SMTP_* fully optional and a
+// production deploy could otherwise "accidentally" leave email unconfigured.
+describe('AuthService — OTP cleartext logging gate', () => {
+  let service: AuthService;
+  let mockUserRepo: jest.Mocked<any>;
+  let mockOtpRepo: jest.Mocked<any>;
+  let mockConfigService: jest.Mocked<any>;
+  let logSpy: jest.SpyInstance;
+
+  beforeEach(async () => {
+    mockUserRepo = { findOne: jest.fn().mockResolvedValue({ id: 'user-1', email: 'user@example.com' }) };
+    mockOtpRepo = {
+      delete: jest.fn().mockResolvedValue(undefined),
+      save: jest.fn().mockResolvedValue(undefined),
+      create: jest.fn((d: any) => d),
+    };
+    mockConfigService = { get: jest.fn() };
+
+    const module: TestingModule = await Test.createTestingModule({
+      providers: [
+        AuthService,
+        { provide: getRepositoryToken(User), useValue: mockUserRepo },
+        { provide: getRepositoryToken(PasswordResetOtp), useValue: mockOtpRepo },
+        { provide: getRepositoryToken(EmailVerificationOtp), useValue: {} },
+        { provide: getRepositoryToken(AuthIdentity), useValue: {} },
+        { provide: getRepositoryToken(UserSession), useValue: makeMockSessionRepo() },
+        { provide: JwtService, useValue: { sign: jest.fn(() => 'signed-token') } },
+        { provide: EmailService, useValue: { send: jest.fn().mockResolvedValue(undefined), isConfigured: false } },
+        { provide: ConfigService, useValue: mockConfigService },
+        { provide: CacheService, useValue: { get: jest.fn(), set: jest.fn(), del: jest.fn() } },
+      ],
+    }).compile();
+
+    service = module.get<AuthService>(AuthService);
+    logSpy = jest.spyOn((service as any).logger, 'log');
+  });
+
+  afterEach(() => {
+    logSpy.mockRestore();
+  });
+
+  it('does not log the OTP when ALLOW_DEV_OTP_BYPASS is unset, even with email unconfigured', async () => {
+    mockConfigService.get.mockReturnValue(undefined);
+
+    await service.forgotPassword('user@example.com');
+
+    expect(logSpy.mock.calls.some((call) => String(call[0]).includes('PASSWORD RESET OTP'))).toBe(false);
+  });
+
+  it('logs the OTP only when ALLOW_DEV_OTP_BYPASS is explicitly set to "true"', async () => {
+    mockConfigService.get.mockReturnValue('true');
+
+    await service.forgotPassword('user@example.com');
+
+    expect(logSpy.mock.calls.some((call) => String(call[0]).includes('PASSWORD RESET OTP'))).toBe(true);
+  });
+});
+
 // Regression tests for Settings → Active Sessions: each login/register/social-login
 // creates one UserSession row (id used as the JWT's `jti`), refresh() renews the SAME
 // row instead of spawning a new one, and a password change revokes every session so the
