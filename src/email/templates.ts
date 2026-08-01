@@ -130,6 +130,7 @@ export function welcomeEmail(firstName: string): RenderedEmail {
         <li>Create your own event and start selling tickets</li>
       </ul>
       <p>Open the ${COMPANY_NAME} app to get started.</p>
+      <p>Have a question? Visit the <a href="${appLink('help-center')}" style="color:${BRAND_COLOR};">Help Center</a> in the app, or reach us directly at <a href="mailto:${SUPPORT_EMAIL}" style="color:${BRAND_COLOR};">${SUPPORT_EMAIL}</a>.</p>
       `,
       `Your ${COMPANY_NAME} account is ready — here's how to get started.`,
     ),
@@ -313,11 +314,27 @@ export function bookingConfirmedEmail(
   bookingReference: string,
   quantity: number,
   enrollmentId?: string,
+  eventDate?: string,
+  startTime?: string,
+  venueName?: string,
+  // True once a ticket-QR attachment has actually been embedded alongside this email
+  // (see NotificationService.buildEmailAttachments) — controls whether the QR <img> tag
+  // is rendered here, since referencing a cid: that isn't actually attached would just
+  // show a broken image.
+  hasQrAttachment?: boolean,
 ): RenderedEmail {
   const safeTitle = escapeHtml(eventTitle);
   const safeReference = escapeHtml(bookingReference);
   const ticketWord = quantity === 1 ? 'ticket' : 'tickets';
   const link = enrollmentId ? appLink(`booking/${encodeURIComponent(enrollmentId)}`) : undefined;
+  const detailsHtml = [
+    eventDate ? calloutBox('Date', escapeHtml(eventDate)) : '',
+    startTime ? calloutBox('Time', escapeHtml(startTime)) : '',
+    venueName ? calloutBox('Location', escapeHtml(venueName)) : '',
+  ].join('');
+  const qrHtml = hasQrAttachment
+    ? `<div style="margin:20px 0;text-align:center;"><img src="cid:ticket-qr" alt="Ticket QR code" width="180" height="180" style="border-radius:12px;" /></div>`
+    : '';
   return {
     subject: `Booking confirmed: ${subjectSafe(eventTitle)}`,
     html: wrapEmail(
@@ -325,6 +342,8 @@ export function bookingConfirmedEmail(
       `
       <p>You're confirmed for <strong>${safeTitle}</strong> (${quantity} ${ticketWord}).</p>
       ${calloutBox('Booking reference', safeReference)}
+      ${detailsHtml}
+      ${qrHtml}
       ${link ? ctaButton('View Your Ticket', link) : `<p>Open the ${COMPANY_NAME} app and go to My Bookings to view your ticket and QR code anytime.</p>`}
       `,
       `You're confirmed for ${eventTitle} — ${quantity} ${ticketWord}.`,
@@ -393,6 +412,36 @@ export function organizerVerificationRejectedEmail(reason: string): RenderedEmai
       <p>Open the ${COMPANY_NAME} app, update your details from your profile, and resubmit for review.</p>
       `,
       'Your organizer verification needs another look before you can publish events.',
+    ),
+  };
+}
+
+export function organizerVerificationSubmittedEmail(): RenderedEmail {
+  return {
+    subject: 'Your organizer verification was submitted',
+    html: wrapEmail(
+      'Documents submitted for review',
+      `
+      <p>We've received your organizer verification documents. An admin will review them — this usually takes 1-2 business days.</p>
+      <p>You'll get another email as soon as a decision is made, and you can check the status anytime from your profile.</p>
+      `,
+      "We've received your organizer verification documents — here's what happens next.",
+    ),
+  };
+}
+
+export function organizerVerificationNewSubmissionEmail(applicantName: string, companyName: string): RenderedEmail {
+  const safeName = escapeHtml(applicantName || 'An applicant');
+  const safeCompany = escapeHtml(companyName || 'their business');
+  return {
+    subject: 'New organizer verification submitted',
+    html: wrapEmail(
+      'New verification to review',
+      `
+      <p>${safeName} submitted organizer verification documents for <strong>${safeCompany}</strong>.</p>
+      <p>Open the admin dashboard to review their documents and approve or reject the submission.</p>
+      `,
+      `${safeName} submitted organizer verification documents for review.`,
     ),
   };
 }

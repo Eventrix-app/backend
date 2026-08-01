@@ -1,4 +1,5 @@
 import {
+  BadRequestException,
   ForbiddenException,
   Injectable,
   InternalServerErrorException,
@@ -55,7 +56,18 @@ interface PurposeConfig {
   // returns the raw storage path instead; viewing one later requires a fresh short-lived
   // signed read URL (see createSignedReadUrl()), not a permanent public link.
   isPrivate?: boolean;
+  // true rejects video/* content types even though the underlying bucket allows them —
+  // `event-images` allows video because EVENT_IMAGE/REEL_VIDEO need it, but that bucket-
+  // level allow-list is shared by every purpose stored there, so EVENT_COVER and
+  // CATEGORY_ICON (image-only in practice) need their own, narrower check here.
+  imageOnly?: boolean;
+  // Purpose-specific ceiling, tighter than the bucket's own fileSizeLimit — only enforced
+  // when the client sends CreateSignedUrlDto.fileSize (a UX-level guard, since the bucket's
+  // own limit is what Storage actually enforces on the upload itself).
+  maxBytes?: number;
 }
+
+const CATEGORY_ICON_MAX_BYTES = 2 * 1024 * 1024; // 2MB — matches the admin dashboard's own check
 
 // Every purpose except the KYC ones below is a public bucket — low-sensitivity,
 // routinely-displayed assets, so public buckets get the best CDN cache hit rate with no
@@ -64,7 +76,7 @@ interface PurposeConfig {
 const PURPOSE_CONFIG: Record<UploadPurpose, PurposeConfig> = {
   [UploadPurpose.PROFILE_PICTURE]: { bucket: 'profile-pictures', pathPrefix: 'users', allowedRoles: null },
   [UploadPurpose.EVENT_IMAGE]: { bucket: 'event-images', pathPrefix: 'events', allowedRoles: ['organizer', 'admin'] },
-  [UploadPurpose.EVENT_COVER]: { bucket: 'event-images', pathPrefix: 'event-covers', allowedRoles: ['organizer', 'admin'] },
+  [UploadPurpose.EVENT_COVER]: { bucket: 'event-images', pathPrefix: 'event-covers', allowedRoles: ['organizer', 'admin'], imageOnly: true },
   [UploadPurpose.COMPANY_LOGO]: { bucket: 'organizer-logos', pathPrefix: 'organizers', allowedRoles: ['organizer', 'admin'] },
   // allowedRoles: null — applicants aren't organizers yet at the point they submit these.
   [UploadPurpose.IDENTITY_PROOF]: { bucket: 'organizer-kyc-docs', pathPrefix: 'identity-proof', allowedRoles: null, isPrivate: true },
@@ -76,7 +88,7 @@ const PURPOSE_CONFIG: Record<UploadPurpose, PurposeConfig> = {
   [UploadPurpose.REEL_VIDEO]: { bucket: 'event-images', pathPrefix: 'reels', allowedRoles: null },
   // Reuses event-images too — a category icon is just another admin-managed image, not
   // worth its own bucket.
-  [UploadPurpose.CATEGORY_ICON]: { bucket: 'event-images', pathPrefix: 'category-icons', allowedRoles: ['admin'] },
+  [UploadPurpose.CATEGORY_ICON]: { bucket: 'event-images', pathPrefix: 'category-icons', allowedRoles: ['admin'], imageOnly: true, maxBytes: CATEGORY_ICON_MAX_BYTES },
 };
 
 // Kept in exact 1:1 correspondence with ALLOWED_UPLOAD_CONTENT_TYPES in the DTO.
@@ -150,6 +162,14 @@ export class UploadsService implements OnModuleInit {
 
     if (config.allowedRoles && !config.allowedRoles.some((role) => userRoles.includes(role))) {
       throw new ForbiddenException(`Your role cannot request an upload URL for purpose "${dto.purpose}"`);
+    }
+
+    if (config.imageOnly && dto.contentType.startsWith('video/')) {
+      throw new BadRequestException(`Purpose "${dto.purpose}" does not accept video uploads`);
+    }
+
+    if (config.maxBytes && dto.fileSize && dto.fileSize > config.maxBytes) {
+      throw new BadRequestException(`File exceeds the ${Math.round(config.maxBytes / (1024 * 1024))}MB limit for purpose "${dto.purpose}"`);
     }
 
     // Path-per-upload (UUID, never overwrite-in-place) so replacing an image sidesteps

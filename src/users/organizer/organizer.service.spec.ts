@@ -8,6 +8,7 @@ describe('OrganizerService', () => {
   let mockEventsRepo: any;
   let mockFollowsRepo: any;
   let mockSessionsRepo: any;
+  let mockEnrollmentsRepo: any;
   let mockDataSource: any;
   let mockCacheService: any;
   let mockNotificationService: any;
@@ -55,6 +56,7 @@ describe('OrganizerService', () => {
     };
     mockUploadsService = { createSignedReadUrl: jest.fn().mockResolvedValue('https://signed.example.com') };
     mockSessionsRepo = { update: jest.fn() };
+    mockEnrollmentsRepo = { exist: jest.fn().mockResolvedValue(false) };
     mockEmailService = { send: jest.fn() };
     service = new OrganizerService(
       mockUsersRepo,
@@ -62,6 +64,7 @@ describe('OrganizerService', () => {
       mockEventsRepo,
       mockFollowsRepo,
       mockSessionsRepo,
+      mockEnrollmentsRepo,
       mockDataSource,
       mockCacheService,
       mockNotificationService,

@@ -184,6 +184,7 @@ describe('EventsService - Fixed Issues', () => {
       mockDataSource.transaction.mockImplementation(async (callback) => {
         const mockManager = {
           findOne: jest.fn()
+            .mockResolvedValueOnce({ isEmailVerified: true }) // user email-verification check
             .mockResolvedValueOnce(mockEvent) // initial event fetch (with ticketTypes)
             .mockResolvedValueOnce(null), // enrollment duplicate check
           query: jest.fn().mockResolvedValue([[], 0]), // no rows updated => sold out
@@ -213,6 +214,7 @@ describe('EventsService - Fixed Issues', () => {
       mockDataSource.transaction.mockImplementation(async (callback) => {
         const mockManager = {
           findOne: jest.fn()
+            .mockResolvedValueOnce({ isEmailVerified: true }) // user email-verification check
             .mockResolvedValueOnce(mockEvent) // initial event fetch (with ticketTypes)
             .mockResolvedValueOnce(null), // enrollment duplicate check
           query: jest.fn().mockResolvedValue([[{ id: 'tt-1', price: '100.00' }], 1]),
@@ -245,7 +247,10 @@ describe('EventsService - Fixed Issues', () => {
       };
 
       mockDataSource.transaction.mockImplementation(async (callback) => {
-        const mockManager = { findOne: jest.fn().mockResolvedValue(mockEvent) };
+        const mockManager = {
+          findOne: jest.fn().mockImplementation((entity: any) =>
+            entity === User ? Promise.resolve({ isEmailVerified: true }) : Promise.resolve(mockEvent)),
+        };
         return callback(mockManager);
       });
 
@@ -264,7 +269,10 @@ describe('EventsService - Fixed Issues', () => {
       };
 
       mockDataSource.transaction.mockImplementation(async (callback) => {
-        const mockManager = { findOne: jest.fn().mockResolvedValue(mockEvent) };
+        const mockManager = {
+          findOne: jest.fn().mockImplementation((entity: any) =>
+            entity === User ? Promise.resolve({ isEmailVerified: true }) : Promise.resolve(mockEvent)),
+        };
         return callback(mockManager);
       });
 
@@ -374,7 +382,8 @@ describe('EventsService - Fixed Issues', () => {
 
       mockDataSource.transaction.mockImplementation(async (callback) => {
         const mockManager = {
-          findOne: jest.fn().mockResolvedValue(mockEvent),
+          findOne: jest.fn().mockImplementation((entity: any) =>
+            entity === User ? Promise.resolve({ isEmailVerified: true }) : Promise.resolve(mockEvent)),
         };
         return callback(mockManager);
       });
@@ -828,7 +837,10 @@ describe('EventsService - Fixed Issues', () => {
 
       mockDataSource.transaction.mockImplementation(async (callback: any) => {
         const mockManager = {
-          findOne: jest.fn().mockResolvedValueOnce(mockEvent).mockResolvedValueOnce(null),
+          findOne: jest.fn()
+            .mockResolvedValueOnce({ isEmailVerified: true }) // user email-verification check
+            .mockResolvedValueOnce(mockEvent)
+            .mockResolvedValueOnce(null),
           query: jest.fn().mockResolvedValue([[{ id: 'tt-1', price: '0.00' }], 1]),
           create: jest.fn().mockImplementation((entity: any, data: any) => data),
           save: jest.fn().mockImplementation((entity: any, data: any) => {
@@ -851,6 +863,10 @@ describe('EventsService - Fixed Issues', () => {
         'Free Meetup',
         expect.stringMatching(/^BK-/),
         1,
+        undefined,
+        undefined,
+        undefined,
+        undefined,
       );
     });
 
@@ -866,7 +882,10 @@ describe('EventsService - Fixed Issues', () => {
 
       mockDataSource.transaction.mockImplementation(async (callback: any) => {
         const mockManager = {
-          findOne: jest.fn().mockResolvedValueOnce(mockEvent).mockResolvedValueOnce(null),
+          findOne: jest.fn()
+            .mockResolvedValueOnce({ isEmailVerified: true }) // user email-verification check
+            .mockResolvedValueOnce(mockEvent)
+            .mockResolvedValueOnce(null),
           query: jest.fn().mockResolvedValue([[{ id: 'tt-1', price: '99.99' }], 1]),
           create: jest.fn().mockImplementation((entity: any, data: any) => data),
           save: jest.fn().mockImplementation((entity: any, data: any) => {
@@ -901,6 +920,7 @@ describe('EventsService - Fixed Issues', () => {
       mockDataSource.transaction.mockImplementation(async (callback: any) => {
         const mockManager = {
           findOne: jest.fn()
+            .mockResolvedValueOnce({ isEmailVerified: true }) // user email-verification check
             .mockResolvedValueOnce(mockEvent)
             .mockImplementationOnce((entity: any, opts: any) => {
               existingEnrollmentQuery = opts;
@@ -1127,7 +1147,7 @@ describe('EventsService - Fixed Issues', () => {
         const mockManager = {
           findOne: jest.fn()
             .mockImplementation((entity: any) => (entity === User
-              ? Promise.resolve({ id: 'user-1', roles: ['user', 'organizer'] })
+              ? Promise.resolve({ id: 'user-1', roles: ['user', 'organizer'], isEmailVerified: true })
               : Promise.resolve({ id: 'org-1', userId: 'user-1', verificationLevel: 'document_verified', autoApproveEvents: false }))),
           create: jest.fn((_entity: any, data: any) => data),
           save: jest.fn((_entity: any, data: any) => Promise.resolve({ ...data, id: 'event-1' })),
@@ -1144,7 +1164,7 @@ describe('EventsService - Fixed Issues', () => {
         const mockManager = {
           findOne: jest.fn()
             .mockImplementation((entity: any) => (entity === User
-              ? Promise.resolve({ id: 'admin-1', roles: ['admin'] })
+              ? Promise.resolve({ id: 'admin-1', roles: ['admin'], isEmailVerified: true })
               : Promise.resolve(null))), // admin has no organizer profile of their own
           create: jest.fn((_entity: any, data: any) => data),
           save: jest.fn((_entity: any, data: any) => Promise.resolve({ ...data, id: 'event-2' })),

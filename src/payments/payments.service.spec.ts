@@ -181,6 +181,10 @@ describe('PaymentsService — paymentStatus enforcement', () => {
         'Future Concert',
         'BK-2',
         2,
+        undefined,
+        '2099-01-01',
+        '10:00:00',
+        undefined,
       );
     });
 

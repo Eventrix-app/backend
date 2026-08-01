@@ -3,6 +3,16 @@ import { ConfigService } from '@nestjs/config';
 import { Resend } from 'resend';
 import * as nodemailer from 'nodemailer';
 
+// Provider-agnostic shape — mapped to each SDK's own field names in sendViaResend/
+// sendViaSmtp below. `cid` lets the caller's HTML reference it inline via
+// `<img src="cid:...">` instead of it showing as a separate download.
+export interface EmailAttachment {
+  filename: string;
+  content: Buffer;
+  cid: string;
+  contentType?: string;
+}
+
 // Thin transport wrapper — composing subject/body per notification type stays in the
 // calling service (AuthService for OTPs, NotificationService for event/waitlist/refund
 // updates), same split as UploadsService (transport) vs. the entities that use it.
@@ -48,16 +58,16 @@ export class EmailService {
     return this.resend !== null || this.smtpTransport !== null;
   }
 
-  async send(to: string, subject: string, html: string): Promise<void> {
+  async send(to: string, subject: string, html: string, attachments?: EmailAttachment[]): Promise<void> {
     if (this.resend) {
-      const sentViaResend = await this.sendViaResend(to, subject, html);
+      const sentViaResend = await this.sendViaResend(to, subject, html, attachments);
       if (sentViaResend) return;
       // Resend is configured but failed (rejected send or threw) — fall through to SMTP
       // if available, rather than treating this delivery as done.
     }
 
     if (this.smtpTransport) {
-      await this.sendViaSmtp(to, subject, html);
+      await this.sendViaSmtp(to, subject, html, attachments);
       return;
     }
 
@@ -66,9 +76,20 @@ export class EmailService {
     }
   }
 
-  private async sendViaResend(to: string, subject: string, html: string): Promise<boolean> {
+  private async sendViaResend(to: string, subject: string, html: string, attachments?: EmailAttachment[]): Promise<boolean> {
     try {
-      const { error } = await this.resend!.emails.send({ from: this.resendFrom, to, subject, html });
+      const { error } = await this.resend!.emails.send({
+        from: this.resendFrom,
+        to,
+        subject,
+        html,
+        attachments: attachments?.map((a) => ({
+          filename: a.filename,
+          content: a.content,
+          contentId: a.cid,
+          contentType: a.contentType,
+        })),
+      });
       if (error) {
         this.logger.error(`Resend rejected email "${subject}" to ${to}: ${error.message}`);
         return false;
@@ -81,9 +102,20 @@ export class EmailService {
     }
   }
 
-  private async sendViaSmtp(to: string, subject: string, html: string): Promise<void> {
+  private async sendViaSmtp(to: string, subject: string, html: string, attachments?: EmailAttachment[]): Promise<void> {
     try {
-      await this.smtpTransport!.sendMail({ from: this.smtpFrom, to, subject, html });
+      await this.smtpTransport!.sendMail({
+        from: this.smtpFrom,
+        to,
+        subject,
+        html,
+        attachments: attachments?.map((a) => ({
+          filename: a.filename,
+          content: a.content,
+          cid: a.cid,
+          contentType: a.contentType,
+        })),
+      });
       this.logger.log(`Email sent via SMTP fallback: "${subject}" to ${to}`);
     } catch (err) {
       this.logger.error(`SMTP fallback failed for email "${subject}" to ${to}: ${err instanceof Error ? err.message : String(err)}`);

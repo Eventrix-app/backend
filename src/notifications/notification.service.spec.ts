@@ -34,6 +34,7 @@ describe('NotificationService — event approval/rejection', () => {
       'org@example.com',
       expect.stringContaining('Summer Fest'),
       expect.stringContaining('eventrix://event/event-1'),
+      undefined,
     );
   });
 
@@ -47,6 +48,7 @@ describe('NotificationService — event approval/rejection', () => {
       'org@example.com',
       expect.any(String),
       expect.stringContaining('Missing venue details'),
+      undefined,
     );
   });
 

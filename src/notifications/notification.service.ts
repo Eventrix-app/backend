@@ -1,10 +1,11 @@
 import { Injectable, Logger, NotFoundException } from '@nestjs/common';
 import { InjectRepository } from '@nestjs/typeorm';
 import { IsNull, Repository } from 'typeorm';
+import * as QRCode from 'qrcode';
 import { NotificationJob, NotificationJobStatus, NotificationType } from '../entities/notification-job.entity';
 import { User } from '../entities/user.entity';
 import { DeviceToken } from '../entities/device-token.entity';
-import { EmailService } from '../email/email.service';
+import { EmailAttachment, EmailService } from '../email/email.service';
 import { PushService } from '../push/push.service';
 import {
   announcementEmail,
@@ -15,7 +16,9 @@ import {
   eventRejectedEmail,
   organizerFollowedEmail,
   organizerVerificationApprovedEmail,
+  organizerVerificationNewSubmissionEmail,
   organizerVerificationRejectedEmail,
+  organizerVerificationSubmittedEmail,
   refundStatusEmail,
   RenderedEmail,
   waitlistPromotedEmail,
@@ -96,9 +99,26 @@ export class NotificationService {
       // domain marked as such. Those reach the user in-app and by push instead.
       if (PUSH_ONLY_TYPES.has(type)) return;
       const { subject, html } = this.describeEmail(type, payload);
-      await this.emailService.send(user.email, subject, html);
+      const attachments = await this.buildEmailAttachments(type, payload);
+      await this.emailService.send(user.email, subject, html, attachments);
     } catch (err) {
       this.logger.warn(`Failed to email notification [${type}] to user ${user?.id}: ${err instanceof Error ? err.message : String(err)}`);
+    }
+  }
+
+  // Only BOOKING_CONFIRMED carries a ticket to render — every other type returns
+  // undefined, which EmailService.send() treats as "no attachments" as normal.
+  private async buildEmailAttachments(type: NotificationType, payload: Record<string, unknown>): Promise<EmailAttachment[] | undefined> {
+    if (type !== NotificationType.BOOKING_CONFIRMED) return undefined;
+    const ticketCode = payload['ticketCode'] ? String(payload['ticketCode']) : undefined;
+    if (!ticketCode) return undefined;
+    try {
+      const content = await QRCode.toBuffer(ticketCode, { type: 'png', margin: 1, width: 300 });
+      // cid must match the `cid:ticket-qr` reference in bookingConfirmedEmail()'s <img> tag.
+      return [{ filename: 'ticket-qr.png', content, cid: 'ticket-qr', contentType: 'image/png' }];
+    } catch (err) {
+      this.logger.warn(`Failed to generate ticket QR code: ${err instanceof Error ? err.message : String(err)}`);
+      return undefined;
     }
   }
 
@@ -189,6 +209,22 @@ export class NotificationService {
     await this.enqueue(userId, NotificationType.ORGANIZER_VERIFICATION_REJECTED, { reason });
   }
 
+  async notifyOrganizerVerificationSubmitted(userId: string): Promise<void> {
+    await this.enqueue(userId, NotificationType.ORGANIZER_VERIFICATION_SUBMITTED, {});
+  }
+
+  async notifyOrganizerVerificationNewSubmission(
+    adminUserIds: string[],
+    applicantName: string,
+    companyName: string,
+  ): Promise<void> {
+    await Promise.all(
+      adminUserIds.map((userId) =>
+        this.enqueue(userId, NotificationType.ORGANIZER_VERIFICATION_NEW_SUBMISSION, { applicantName, companyName }),
+      ),
+    );
+  }
+
   // Fired once a booking is actually paid-and-confirmed — immediately for free events
   // (EventsService.enroll(), paymentStatus is 'paid' right away), or from the payment
   // webhook for paid events (PaymentsService.handleWebhook(), on gateway success). Never
@@ -210,6 +246,10 @@ export class NotificationService {
     eventTitle: string,
     bookingReference: string,
     quantity: number,
+    ticketCode?: string,
+    eventDate?: string,
+    startTime?: string,
+    venueName?: string,
   ): Promise<void> {
     await this.enqueue(userId, NotificationType.BOOKING_CONFIRMED, {
       eventId,
@@ -217,6 +257,10 @@ export class NotificationService {
       eventTitle,
       bookingReference,
       quantity,
+      ticketCode,
+      eventDate,
+      startTime,
+      venueName,
     });
   }
 
@@ -320,6 +364,19 @@ export class NotificationService {
           body: `Your organizer verification wasn't approved. ${reason} You can update your details and resubmit.`,
         };
       }
+      case NotificationType.ORGANIZER_VERIFICATION_SUBMITTED:
+        return {
+          title: 'Documents submitted',
+          body: "We've received your organizer verification documents — an admin will review them soon.",
+        };
+      case NotificationType.ORGANIZER_VERIFICATION_NEW_SUBMISSION: {
+        const applicantName = String(payload['applicantName'] ?? 'An applicant');
+        const companyName = String(payload['companyName'] ?? 'their business');
+        return {
+          title: 'New verification to review',
+          body: `${applicantName} submitted organizer verification documents for ${companyName}.`,
+        };
+      }
       case NotificationType.BOOKING_CONFIRMED: {
         const eventTitle = String(payload['eventTitle'] ?? 'your event');
         const bookingReference = String(payload['bookingReference'] ?? '');
@@ -375,12 +432,23 @@ export class NotificationService {
         return organizerVerificationApprovedEmail();
       case NotificationType.ORGANIZER_VERIFICATION_REJECTED:
         return organizerVerificationRejectedEmail(String(payload['reason'] ?? ''));
+      case NotificationType.ORGANIZER_VERIFICATION_SUBMITTED:
+        return organizerVerificationSubmittedEmail();
+      case NotificationType.ORGANIZER_VERIFICATION_NEW_SUBMISSION:
+        return organizerVerificationNewSubmissionEmail(
+          String(payload['applicantName'] ?? 'An applicant'),
+          String(payload['companyName'] ?? 'their business'),
+        );
       case NotificationType.BOOKING_CONFIRMED:
         return bookingConfirmedEmail(
           String(payload['eventTitle'] ?? 'your event'),
           String(payload['bookingReference'] ?? ''),
           Number(payload['quantity'] ?? 1),
           payload['enrollmentId'] ? String(payload['enrollmentId']) : undefined,
+          payload['eventDate'] ? String(payload['eventDate']) : undefined,
+          payload['startTime'] ? String(payload['startTime']) : undefined,
+          payload['venueName'] ? String(payload['venueName']) : undefined,
+          !!payload['ticketCode'],
         );
       default: {
         const { title, body } = this.describe(type, payload);

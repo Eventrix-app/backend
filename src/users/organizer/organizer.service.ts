@@ -1,6 +1,6 @@
 import { BadRequestException, Injectable, NotFoundException, Logger, UnauthorizedException } from '@nestjs/common';
 import { InjectRepository } from '@nestjs/typeorm';
-import { DataSource, IsNull, Not, Repository } from 'typeorm';
+import { DataSource, IsNull, Not, Raw, Repository } from 'typeorm';
 import { hashPassword, verifyPassword } from '../../auth/password.util';
 import { UpdateOrganizerDto } from './dto/update-organizer.dto';
 import { User } from '../../entities/user.entity';
@@ -8,6 +8,7 @@ import { Organizer, VerificationLevel } from '../../entities/organizer.entity';
 import { Event, EventApprovalStatus, EventStatus } from '../../entities/event.entity';
 import { Follow } from '../../entities/follow.entity';
 import { UserSession } from '../../entities/user-session.entity';
+import { Enrollment } from '../../entities/enrollment.entity';
 import { CacheService } from '../../common/cache/cache.service';
 import { userMeCacheKey } from '../users.service';
 import { NotificationService } from '../../notifications/notification.service';
@@ -18,8 +19,9 @@ import { SubmitVerificationDto } from './dto/submit-verification.dto';
 
 
 // Deliberately excludes everything OrganizerRecord carries that a stranger browsing the
-// app has no business seeing: email, phone (PII), commissionRate/commissionFlatFee/
-// autoApproveEvents (internal business terms). Only what a follow/profile UI needs.
+// app has no business seeing: email, commissionRate/commissionFlatFee/autoApproveEvents
+// (internal business terms). phone is included only for requesters with a confirmed
+// enrollment in one of this organizer's events — see getPublicProfile below.
 export interface OrganizerPublicProfile {
   id: string;
   companyName: string;
@@ -94,6 +96,8 @@ export class OrganizerService {
     private readonly followsRepository: Repository<Follow>,
     @InjectRepository(UserSession)
     private readonly sessionsRepository: Repository<UserSession>,
+    @InjectRepository(Enrollment)
+    private readonly enrollmentsRepository: Repository<Enrollment>,
     private readonly dataSource: DataSource,
     private readonly cache: CacheService,
     private readonly notificationService: NotificationService,
@@ -249,7 +253,7 @@ export class OrganizerService {
   async getPublicProfile(id: string, requestingUserId?: string): Promise<OrganizerPublicProfile> {
     const organizer = await this.loadActiveOrganizer(id);
 
-    const [eventCount, followerCount, isFollowing] = await Promise.all([
+    const [eventCount, followerCount, isFollowing, canSeePhone] = await Promise.all([
       this.eventsRepository.count({
         where: {
           organizerId: id,
@@ -262,6 +266,11 @@ export class OrganizerService {
       requestingUserId
         ? this.followsRepository.exist({ where: { organizerId: id, userId: requestingUserId } })
         : Promise.resolve(undefined),
+      requestingUserId
+        ? this.enrollmentsRepository.exist({
+            where: { userId: requestingUserId, status: 'confirmed', event: { organizerId: id } },
+          })
+        : Promise.resolve(false),
     ]);
 
     return {
@@ -275,7 +284,7 @@ export class OrganizerService {
       eventCount,
       followerCount,
       isFollowing,
-      phone: organizer.user.phoneNumber || undefined,
+      phone: canSeePhone ? organizer.user.phoneNumber || undefined : undefined,
     };
   }
 
@@ -374,6 +383,18 @@ export class OrganizerService {
 
     await this.organizersRepository.save(organizer);
     this.logger.log(`Organizer verification submitted for review: user ${userId}`);
+
+    void this.notificationService.notifyOrganizerVerificationSubmitted(userId);
+    void this.usersRepository
+      .find({ where: { roles: Raw((alias) => `${alias} @> '["admin"]'::jsonb`) } })
+      .then((admins) =>
+        this.notificationService.notifyOrganizerVerificationNewSubmission(
+          admins.map((a) => a.id),
+          organizer.fullName,
+          organizer.companyName,
+        ),
+      );
+
     return this.getMyVerificationStatus(userId);
   }
 

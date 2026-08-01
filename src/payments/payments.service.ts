@@ -389,7 +389,18 @@ export class PaymentsService {
       // A late or duplicate-gateway-retry webhook can arrive after the enrollment has
       // already been refunded/cancelled through a separate flow. Record the payment for
       // the audit trail either way, but never let it resurrect a terminal enrollment.
-      let confirmedBooking: { userId: string; eventId: string; enrollmentId: string; eventTitle: string; bookingReference: string; quantity: number } | null = null;
+      let confirmedBooking: {
+        userId: string;
+        eventId: string;
+        enrollmentId: string;
+        eventTitle: string;
+        bookingReference: string;
+        quantity: number;
+        ticketCode?: string;
+        eventDate: string;
+        startTime: string;
+        venueName: string;
+      } | null = null;
       if (enrollment.status === 'refunded' || enrollment.status === 'cancelled') {
         this.logger.warn(
           `Webhook ${dto.gatewayEventId} (${dto.status}) received for enrollment ${dto.enrollmentId} which is already "${enrollment.status}"; payment recorded but enrollment left untouched`,
@@ -425,6 +436,10 @@ export class PaymentsService {
           eventTitle: enrollment.event.title,
           bookingReference: enrollment.bookingReference,
           quantity: enrollment.quantity,
+          ticketCode: enrollment.ticketCode,
+          eventDate: enrollment.event.eventDate,
+          startTime: enrollment.event.startTime,
+          venueName: enrollment.event.venueName,
         };
       } else {
         enrollment.paymentStatus = 'failed';
@@ -440,7 +455,18 @@ export class PaymentsService {
     // fires the same notification immediately for free bookings instead).
     if (result.confirmedBooking) {
       const b = result.confirmedBooking;
-      void this.notificationService.notifyBookingConfirmed(b.userId, b.eventId, b.enrollmentId, b.eventTitle, b.bookingReference, b.quantity);
+      void this.notificationService.notifyBookingConfirmed(
+        b.userId,
+        b.eventId,
+        b.enrollmentId,
+        b.eventTitle,
+        b.bookingReference,
+        b.quantity,
+        b.ticketCode,
+        b.eventDate,
+        b.startTime,
+        b.venueName,
+      );
     }
 
     return result.payment;

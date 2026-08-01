@@ -7,10 +7,11 @@ import { Organizer } from '../../entities/organizer.entity';
 import { Event } from '../../entities/event.entity';
 import { Follow } from '../../entities/follow.entity';
 import { UserSession } from '../../entities/user-session.entity';
+import { Enrollment } from '../../entities/enrollment.entity';
 import { UploadsModule } from '../../uploads/uploads.module';
 
 @Module({
-  imports: [TypeOrmModule.forFeature([User, Organizer, Event, Follow, UserSession]), UploadsModule],
+  imports: [TypeOrmModule.forFeature([User, Organizer, Event, Follow, UserSession, Enrollment]), UploadsModule],
   controllers: [OrganizerController],
   providers: [OrganizerService],
   exports: [OrganizerService],

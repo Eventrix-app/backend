@@ -28,6 +28,12 @@ export async function createApp(): Promise<NestExpressApplication> {
 
   const app = await NestFactory.create<NestExpressApplication>(AppModule);
 
+  // Deployed serverless behind Vercel's edge proxy — without this, Express's req.ip
+  // reflects the proxy's own socket rather than the real client, collapsing every user
+  // onto one apparent IP and defeating per-IP throttling (login, OTP, enroll, etc.).
+  // Trusting exactly one hop matches Vercel's single-proxy topology.
+  app.set('trust proxy', 1);
+
   // Sets the standard hardening headers (X-Content-Type-Options, X-Frame-Options, HSTS,
   // etc.) that were previously entirely absent. CSP is left off: this app is primarily a
   // JSON API but does serve Swagger UI (/api/docs), which relies on inline scripts/styles

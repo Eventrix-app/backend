@@ -1,4 +1,4 @@
-import { IsEnum, IsIn } from 'class-validator';
+import { IsEnum, IsIn, IsInt, IsOptional, Min } from 'class-validator';
 
 // One generalized upload intent per client-facing image field. Adding a new image
 // field elsewhere in the app means adding one entry here, not a new endpoint —
@@ -37,4 +37,12 @@ export class CreateSignedUrlDto {
     message: `contentType must be one of: ${ALLOWED_UPLOAD_CONTENT_TYPES.join(', ')}`,
   })
   contentType!: AllowedUploadContentType;
+
+  // Client-declared byte size, checked against a purpose-specific cap when the purpose
+  // has one (see UploadsService.PURPOSE_CONFIG's maxBytes) — a UX-level guard against an
+  // obviously-too-large file, not the sole enforcement (the bucket's own fileSizeLimit is).
+  @IsOptional()
+  @IsInt()
+  @Min(1)
+  fileSize?: number;
 }

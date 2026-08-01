@@ -130,6 +130,9 @@ export class EventsService {
     return await this.dataSource.transaction(async (manager) => {
       const user = await manager.findOne(User, { where: { id: userId } });
       if (!user) throw new NotFoundException('User not found');
+      if (!user.isEmailVerified) {
+        throw new ForbiddenException('Please verify your email before creating events');
+      }
 
       const organizer = await manager.findOne(Organizer, { where: { userId } });
       const isAdmin = userRoles.includes('admin');
@@ -1028,6 +1031,11 @@ export class EventsService {
   // is sold out, the request creates a WaitlistEntry instead of failing outright.
   async enroll(eventId: string, userId: string, ticketTypeId?: string, quantity = 1): Promise<Enrollment | WaitlistEntryWithPosition> {
     const result = await this.dataSource.transaction(async (manager) => {
+      const user = await manager.findOne(User, { where: { id: userId } });
+      if (!user?.isEmailVerified) {
+        throw new ForbiddenException('Please verify your email before enrolling in events');
+      }
+
       let event = await manager.findOne(Event, {
         where: { id: eventId, deletedAt: null as any },
         relations: ['ticketTypes'],
@@ -1156,7 +1164,14 @@ export class EventsService {
       }
 
       this.logger.log(`User ${userId} enrolled in event ${eventId}`);
-      return { soldOut: false as const, enrollment: saved, eventTitle: event.title };
+      return {
+        soldOut: false as const,
+        enrollment: saved,
+        eventTitle: event.title,
+        eventDate: event.eventDate,
+        startTime: event.startTime,
+        venueName: event.venueName,
+      };
     });
 
     if (result.soldOut) {
@@ -1180,6 +1195,10 @@ export class EventsService {
         result.eventTitle,
         result.enrollment.bookingReference,
         result.enrollment.quantity,
+        result.enrollment.ticketCode,
+        result.eventDate,
+        result.startTime,
+        result.venueName,
       );
     }
 

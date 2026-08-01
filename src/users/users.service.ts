@@ -364,13 +364,14 @@ export class UsersService {
       'linked social sign-in identities',
       'pending email/password OTPs',
       'profile PII (name, email, phone, photo, bio, location, date of birth, gender, notification preferences, password)',
+      'organizer display PII (name, company name/description/website/logo, UPI ID), where applicable',
     ];
     const retainedCategories = [
       'bookings/enrollments',
       'payments',
       'refunds',
       'payouts',
-      'organizer KYC documents (where applicable)',
+      'organizer KYC documents (identity/address proof, PAN/Aadhaar — where applicable)',
       'audit logs',
     ];
 
@@ -387,6 +388,17 @@ export class UsersService {
       await manager.delete(AuthIdentity, { userId });
       await manager.delete(EmailVerificationOtp, { email: originalEmail });
       await manager.delete(PasswordResetOtp, { email: originalEmail });
+
+      // KYC documents (identityProofUrl/addressProofUrl/panOrAadhaarUrl) are a statutorily
+      // retained record, same as bookings/payments — only the display/contact PII is erased.
+      await manager.update(Organizer, { userId }, {
+        fullName: null,
+        companyName: 'Deleted Organizer',
+        companyDescription: null,
+        companyWebsite: null,
+        companyLogoUrl: null,
+        upiId: null,
+      } as any);
 
       // Several of these columns are nullable in the DB but typed as plain (non-nullable)
       // strings on the entity — a pre-existing looseness elsewhere in this codebase too
