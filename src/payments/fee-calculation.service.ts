@@ -12,6 +12,8 @@ export interface FeeBreakdown {
   feePayer: FeePayer;
   platformCommissionAmount: number;
   gatewayFeeAmount: number;
+  gstAmount: number;
+  subtotalBeforeTax: number;
   // What the participant pays at checkout.
   buyerPrice: number;
   // What the organizer receives per ticket, net of commission + gateway fee.
@@ -40,6 +42,8 @@ export class FeeCalculationService {
         feePayer,
         platformCommissionAmount: 0,
         gatewayFeeAmount: 0,
+        gstAmount: 0,
+        subtotalBeforeTax: 0,
         buyerPrice: 0,
         organizerPayout: 0,
       };
@@ -47,25 +51,31 @@ export class FeeCalculationService {
 
     const gatewayFeePercent = this.configService.get<number>('gatewayFee.percent', 2);
     const gatewayFeeFlat = this.configService.get<number>('gatewayFee.flat', 3);
+    const gstRate = this.configService.get<number>('tax.gstRate', 0);
 
     const platformCommissionAmount = this.round(
       price * (Number(organizer.commissionRate ?? 0) / 100) + Number(organizer.commissionFlatFee ?? 0),
     );
     const gatewayFeeAmount = this.round(price * (gatewayFeePercent / 100) + gatewayFeeFlat);
+    const gstAmount = this.round(platformCommissionAmount * (gstRate / 100));
 
-    const totalFees = platformCommissionAmount + gatewayFeeAmount;
+    const totalFees = platformCommissionAmount + gatewayFeeAmount + gstAmount;
 
     const buyerPrice = feePayer === FeePayer.PARTICIPANT ? this.round(price + totalFees) : price;
+    const subtotalBeforeTax =
+      feePayer === FeePayer.PARTICIPANT ? this.round(price + platformCommissionAmount + gatewayFeeAmount) : price;
     // Organizer payout is clamped at 0 — a misconfigured commission rate should never
     // produce a negative payout; it should read as "organizer receives nothing" instead.
     const organizerPayout =
-      feePayer === FeePayer.PARTICIPANT ? price : Math.max(this.round(price - totalFees), 0);
+      feePayer === FeePayer.PARTICIPANT ? price : Math.max(this.round(price - (platformCommissionAmount + gatewayFeeAmount)), 0);
 
     return {
       ticketPrice: price,
       feePayer,
       platformCommissionAmount,
       gatewayFeeAmount,
+      gstAmount,
+      subtotalBeforeTax,
       buyerPrice,
       organizerPayout,
     };

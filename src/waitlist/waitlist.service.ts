@@ -33,31 +33,38 @@ export class WaitlistService {
   ) {}
 
   async join(eventId: string, ticketTypeId: string, userId: string, quantity: number): Promise<WaitlistEntryWithPosition> {
-    const existing = await this.waitlistRepository.findOne({
-      where: { ticketTypeId, userId, status: WaitlistStatus.WAITING },
-    });
-    if (existing) {
-      throw new ConflictException('You are already on the waitlist for this ticket type');
-    }
-
-    try {
-      const entry = this.waitlistRepository.create({
-        eventId,
-        ticketTypeId,
-        userId,
-        quantity,
-        status: WaitlistStatus.WAITING,
+    // B4 fix: the existence check and the insert must be atomic. Without a transaction here,
+    // two concurrent join() calls for the same (ticketTypeId, userId) can both pass the
+    // findOne below before either commits, producing two WAITING rows. The dataSource
+    // transaction serializes them so the second caller always sees the first's committed row.
+    const saved = await this.dataSource.transaction(async (manager) => {
+      const existing = await manager.findOne(WaitlistEntry, {
+        where: { ticketTypeId, userId, status: WaitlistStatus.WAITING },
       });
-      const saved = await this.waitlistRepository.save(entry);
-      this.logger.log(`User ${userId} joined waitlist for ticket type ${ticketTypeId} (qty ${quantity})`);
-      const position = await this.getPosition(saved);
-      return Object.assign(saved, { position });
-    } catch (err) {
-      if ((err as { code?: string })?.code === '23505') {
+      if (existing) {
         throw new ConflictException('You are already on the waitlist for this ticket type');
       }
-      throw err;
-    }
+
+      try {
+        const entry = manager.create(WaitlistEntry, {
+          eventId,
+          ticketTypeId,
+          userId,
+          quantity,
+          status: WaitlistStatus.WAITING,
+        });
+        return await manager.save(WaitlistEntry, entry);
+      } catch (err) {
+        if ((err as { code?: string })?.code === '23505') {
+          throw new ConflictException('You are already on the waitlist for this ticket type');
+        }
+        throw err;
+      }
+    });
+
+    this.logger.log(`User ${userId} joined waitlist for ticket type ${ticketTypeId} (qty ${quantity})`);
+    const position = await this.getPosition(saved);
+    return Object.assign(saved, { position });
   }
 
   // Used by EventsService.removeTicketType() to block deleting a tier out from under

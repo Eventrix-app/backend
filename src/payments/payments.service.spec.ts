@@ -14,6 +14,7 @@ describe('PaymentsService — paymentStatus enforcement', () => {
   let mockEnrollmentsRepo: any;
   let mockEventsRepo: any;
   let mockOrganizersRepo: any;
+  let mockUsersRepo: any;
   let mockPayoutsRepo: any;
   let mockDataSource: any;
   let mockConfigService: any;
@@ -22,6 +23,8 @@ describe('PaymentsService — paymentStatus enforcement', () => {
   let mockNotificationService: any;
   let mockCacheService: any;
   let mockRazorpayService: any;
+  let mockPayUService: any;
+  let mockLedgerService: any;
 
   const futureEvent = {
     id: 'event-1',
@@ -34,12 +37,13 @@ describe('PaymentsService — paymentStatus enforcement', () => {
   };
 
   beforeEach(() => {
-    mockPaymentsRepo = { query: jest.fn() };
+    mockPaymentsRepo = { query: jest.fn(), findOne: jest.fn() };
     mockCommissionsRepo = {};
     mockRefundsRepo = { findOne: jest.fn(), create: jest.fn((d: any) => d), save: jest.fn((d: any) => Promise.resolve({ id: 'refund-1', ...d })) };
     mockEnrollmentsRepo = { findOne: jest.fn(), update: jest.fn(), createQueryBuilder: jest.fn() };
     mockEventsRepo = { findOne: jest.fn() };
     mockOrganizersRepo = { findOne: jest.fn() };
+    mockUsersRepo = { findOne: jest.fn() };
     mockPayoutsRepo = {};
     mockDataSource = { transaction: jest.fn() };
     mockConfigService = { get: jest.fn((key: string, def: any) => def) };
@@ -53,6 +57,20 @@ describe('PaymentsService — paymentStatus enforcement', () => {
       fetchOrder: jest.fn(),
       keyId: 'rzp_test_key',
     };
+    mockPayUService = {
+      generateRequestHash: jest.fn(),
+      verifyReverseHash: jest.fn(),
+      refundTransaction: jest.fn(),
+      signHash: jest.fn(),
+      merchantKey: 'payu_test_key',
+      actionUrl: 'https://test.payu.in/_payment',
+      isTestMode: true,
+    };
+    mockLedgerService = {
+      recordPaymentLedger: jest.fn(),
+      recordPayoutLedger: jest.fn(),
+      recordRefundLedger: jest.fn(),
+    };
 
     service = new PaymentsService(
       mockPaymentsRepo,
@@ -61,6 +79,7 @@ describe('PaymentsService — paymentStatus enforcement', () => {
       mockEnrollmentsRepo,
       mockEventsRepo,
       mockOrganizersRepo,
+      mockUsersRepo,
       mockPayoutsRepo,
       mockDataSource,
       mockConfigService,
@@ -69,6 +88,8 @@ describe('PaymentsService — paymentStatus enforcement', () => {
       mockNotificationService,
       mockCacheService,
       mockRazorpayService,
+      mockPayUService,
+      mockLedgerService,
     );
   });
 
@@ -213,6 +234,197 @@ describe('PaymentsService — paymentStatus enforcement', () => {
         userId: 'user-1',
       });
       expect(result).toEqual({ orderId: 'order_abc', amount: 19950, currency: 'INR', keyId: 'rzp_test_key' });
+    });
+  });
+
+  describe('initiatePayUOrder', () => {
+    it('rejects initiating an order for another user\'s enrollment', async () => {
+      mockEnrollmentsRepo.findOne.mockResolvedValue({
+        id: 'enr-1',
+        userId: 'someone-else',
+        paymentStatus: 'pending',
+        totalAmount: '99.99',
+        event: futureEvent,
+      });
+
+      await expect(service.initiatePayUOrder('user-1', { enrollmentId: 'enr-1' } as any)).rejects.toThrow();
+      expect(mockPayUService.generateRequestHash).not.toHaveBeenCalled();
+    });
+
+    it('rejects initiating an order for a free (zero-amount) booking', async () => {
+      mockEnrollmentsRepo.findOne.mockResolvedValue({
+        id: 'enr-1',
+        userId: 'user-1',
+        paymentStatus: 'paid',
+        totalAmount: '0',
+        event: futureEvent,
+      });
+
+      await expect(service.initiatePayUOrder('user-1', { enrollmentId: 'enr-1' } as any)).rejects.toThrow(BadRequestException);
+      expect(mockPayUService.generateRequestHash).not.toHaveBeenCalled();
+    });
+
+    it('mints a fresh txnid, persists it on the enrollment, and returns the fields PayUCheckoutModal needs', async () => {
+      mockEnrollmentsRepo.findOne.mockResolvedValue({
+        id: 'enr-1',
+        userId: 'user-1',
+        paymentStatus: 'pending',
+        totalAmount: '199.50',
+        event: futureEvent,
+      });
+      mockUsersRepo.findOne.mockResolvedValue({ id: 'user-1', fullName: 'Aarish Sheikh', email: 'a@example.com', phoneNumber: '9999999999' });
+      mockPayUService.generateRequestHash.mockReturnValue('computed-hash');
+
+      const result = await service.initiatePayUOrder('user-1', { enrollmentId: 'enr-1' } as any);
+
+      expect(mockEnrollmentsRepo.update).toHaveBeenCalledWith('enr-1', { payuTxnId: expect.any(String) });
+      expect(mockPayUService.generateRequestHash).toHaveBeenCalledWith(
+        expect.objectContaining({ amount: 199.5, firstname: 'Aarish', email: 'a@example.com' }),
+      );
+      expect(result).toEqual(
+        expect.objectContaining({
+          amount: 199.5,
+          firstname: 'Aarish',
+          email: 'a@example.com',
+          phone: '9999999999',
+          key: 'payu_test_key',
+          hash: 'computed-hash',
+          actionUrl: 'https://test.payu.in/_payment',
+        }),
+      );
+    });
+
+    it('strips pipe characters from productinfo/firstname before hashing — PayU\'s hash is pipe-delimited, so a literal "|" in an event title or name would shift every field after it', async () => {
+      mockEnrollmentsRepo.findOne.mockResolvedValue({
+        id: 'enr-1',
+        userId: 'user-1',
+        paymentStatus: 'pending',
+        totalAmount: '199.50',
+        event: { ...futureEvent, title: 'VIP | Backstage Pass' },
+      });
+      mockUsersRepo.findOne.mockResolvedValue({ id: 'user-1', fullName: 'A|arish', email: 'a@example.com', phoneNumber: '9999999999' });
+
+      const result = await service.initiatePayUOrder('user-1', { enrollmentId: 'enr-1' } as any);
+
+      expect(mockPayUService.generateRequestHash).toHaveBeenCalledWith(
+        expect.objectContaining({ productinfo: 'VIP - Backstage Pass', firstname: 'A-arish' }),
+      );
+      expect(result.productinfo).toBe('VIP - Backstage Pass');
+      expect(result.firstname).toBe('A-arish');
+    });
+  });
+
+  describe('initiatePayUNativeOrder', () => {
+    it('returns the native SDK\'s camelCase field shape with no pre-computed hash', async () => {
+      mockEnrollmentsRepo.findOne.mockResolvedValue({
+        id: 'enr-1',
+        userId: 'user-1',
+        paymentStatus: 'pending',
+        totalAmount: '199.50',
+        event: futureEvent,
+      });
+      mockUsersRepo.findOne.mockResolvedValue({ id: 'user-1', fullName: 'Aarish Sheikh', email: 'a@example.com', phoneNumber: '9999999999' });
+
+      const result = await service.initiatePayUNativeOrder('user-1', { enrollmentId: 'enr-1' } as any);
+
+      expect(mockPayUService.generateRequestHash).not.toHaveBeenCalled();
+      expect(result).toEqual({
+        key: 'payu_test_key',
+        transactionId: expect.any(String),
+        amount: 199.5,
+        productInfo: 'Future Concert',
+        firstName: 'Aarish',
+        email: 'a@example.com',
+        phone: '9999999999',
+        environment: '1',
+      });
+    });
+
+    it('rejects initiating a native order for another user\'s enrollment (same guard as the WebView path)', async () => {
+      mockEnrollmentsRepo.findOne.mockResolvedValue({
+        id: 'enr-1',
+        userId: 'someone-else',
+        paymentStatus: 'pending',
+        totalAmount: '99.99',
+        event: futureEvent,
+      });
+
+      await expect(service.initiatePayUNativeOrder('user-1', { enrollmentId: 'enr-1' } as any)).rejects.toThrow();
+    });
+  });
+
+  describe('signPayUHash', () => {
+    it('delegates directly to PayUService.signHash', () => {
+      mockPayUService.signHash.mockReturnValue('signed-hash');
+      expect(service.signPayUHash('raw-string')).toBe('signed-hash');
+      expect(mockPayUService.signHash).toHaveBeenCalledWith('raw-string');
+    });
+  });
+
+  describe('handlePayUReturn', () => {
+    const dto = {
+      txnid: 'txn-1',
+      mihpayid: 'mihpay_1',
+      status: 'success' as const,
+      amount: '199.50',
+      productinfo: 'Future Concert',
+      firstname: 'Aarish',
+      email: 'a@example.com',
+      hash: 'valid-hash',
+    };
+
+    it('returns null for a return callback whose txnid does not match any enrollment', async () => {
+      mockEnrollmentsRepo.findOne.mockResolvedValue(null);
+
+      const result = await service.handlePayUReturn(dto);
+
+      expect(result).toBeNull();
+      expect(mockPayUService.verifyReverseHash).not.toHaveBeenCalled();
+    });
+
+    it('returns null when the reverse hash fails verification (forged callback)', async () => {
+      mockEnrollmentsRepo.findOne.mockResolvedValue({ id: 'enr-1', totalAmount: '199.50', event: futureEvent });
+      mockPayUService.verifyReverseHash.mockReturnValue(false);
+
+      const result = await service.handlePayUReturn(dto);
+
+      expect(result).toBeNull();
+    });
+
+    it('returns null when the callback amount does not match the enrollment (tampering)', async () => {
+      mockEnrollmentsRepo.findOne.mockResolvedValue({ id: 'enr-1', totalAmount: '999.00', event: futureEvent });
+      mockPayUService.verifyReverseHash.mockReturnValue(true);
+
+      const result = await service.handlePayUReturn(dto);
+
+      expect(result).toBeNull();
+    });
+
+    it('delegates to handleWebhook with gateway PAYU once the hash and amount both check out', async () => {
+      mockEnrollmentsRepo.findOne.mockResolvedValue({ id: 'enr-1', totalAmount: '199.50', event: futureEvent });
+      mockPayUService.verifyReverseHash.mockReturnValue(true);
+      const handleWebhookSpy = jest.spyOn(service, 'handleWebhook').mockResolvedValue({ id: 'payment-1' } as any);
+
+      await service.handlePayUReturn(dto);
+
+      expect(handleWebhookSpy).toHaveBeenCalledWith({
+        gateway: 'payu',
+        gatewayEventId: 'mihpay_1',
+        gatewayPaymentId: 'mihpay_1',
+        enrollmentId: 'enr-1',
+        amount: 199.5,
+        status: 'success',
+      });
+    });
+
+    it('maps a "failure" callback status to a failed webhook status', async () => {
+      mockEnrollmentsRepo.findOne.mockResolvedValue({ id: 'enr-1', totalAmount: '199.50', event: futureEvent });
+      mockPayUService.verifyReverseHash.mockReturnValue(true);
+      const handleWebhookSpy = jest.spyOn(service, 'handleWebhook').mockResolvedValue({ id: 'payment-1' } as any);
+
+      await service.handlePayUReturn({ ...dto, status: 'failure' });
+
+      expect(handleWebhookSpy).toHaveBeenCalledWith(expect.objectContaining({ status: 'failed' }));
     });
   });
 

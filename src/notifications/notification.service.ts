@@ -307,6 +307,23 @@ export class NotificationService {
   }
 
   private describe(type: NotificationType, payload: Record<string, unknown>): { title: string; body: string } {
+    const sanitize = (input: string) =>
+      input.replace(/[&<>"']/g, (c) => {
+        switch (c) {
+          case '&':
+            return '&amp;';
+          case '<':
+            return '&lt;';
+          case '>':
+            return '&gt;';
+          case '"':
+            return '&quot;';
+          case "'":
+            return '&#39;';
+          default:
+            return c;
+        }
+      });
     switch (type) {
       case NotificationType.EVENT_CHANGED:
         return { title: 'Event updated', body: 'An event you booked has changed — check the details.' };
@@ -327,15 +344,15 @@ export class NotificationService {
         return { title: 'Event announcement', body: title };
       }
       case NotificationType.ORGANIZER_FOLLOWED: {
-        const followerName = String(payload['followerName'] ?? 'Someone');
+        const followerName = sanitize(String(payload['followerName'] ?? 'Someone'));
         return { title: 'New follower', body: `${followerName} started following you.` };
       }
       case NotificationType.SHORT_LIKED: {
-        const likerName = String(payload['likerName'] ?? 'Someone');
+        const likerName = sanitize(String(payload['likerName'] ?? 'Someone'));
         return { title: 'New like', body: `${likerName} liked your reel.` };
       }
       case NotificationType.SHORT_COMMENTED: {
-        const commenterName = String(payload['commenterName'] ?? 'Someone');
+        const commenterName = sanitize(String(payload['commenterName'] ?? 'Someone'));
         const text = String(payload['body'] ?? '');
         // Truncated: a push body is clipped by the OS anyway, and an ellipsis reads better
         // than an arbitrary cut mid-word at the system's own limit.
@@ -343,20 +360,20 @@ export class NotificationService {
         return { title: `${commenterName} commented`, body: preview || 'commented on your reel.' };
       }
       case NotificationType.EVENT_CANCELLED: {
-        const eventTitle = String(payload['eventTitle'] ?? 'An event you booked');
-        const reason = payload['reason'] ? ` Reason: ${String(payload['reason'])}.` : '';
+        const eventTitle = sanitize(String(payload['eventTitle'] ?? 'An event you booked'));
+        const reason = payload['reason'] ? ` Reason: ${sanitize(String(payload['reason']))}.` : '';
         return {
           title: 'Event cancelled',
           body: `${eventTitle} has been cancelled.${reason} If you paid for this booking, request a refund from My Bookings in the app.`,
         };
       }
       case NotificationType.EVENT_APPROVED: {
-        const eventTitle = String(payload['eventTitle'] ?? 'Your event');
+        const eventTitle = sanitize(String(payload['eventTitle'] ?? 'Your event'));
         return { title: "You're live!", body: `${eventTitle} has been approved and is now visible to everyone.` };
       }
       case NotificationType.EVENT_REJECTED: {
-        const eventTitle = String(payload['eventTitle'] ?? 'Your event');
-        const reason = payload['reason'] ? ` ${String(payload['reason'])}` : '';
+        const eventTitle = sanitize(String(payload['eventTitle'] ?? 'Your event'));
+        const reason = payload['reason'] ? ` ${sanitize(String(payload['reason']))}` : '';
         return { title: 'Your event needs another look', body: `${eventTitle} wasn't approved this time.${reason}` };
       }
       case NotificationType.ORGANIZER_VERIFICATION_APPROVED:
@@ -365,7 +382,7 @@ export class NotificationService {
           body: 'Your organizer verification was approved — you can now create and publish events.',
         };
       case NotificationType.ORGANIZER_VERIFICATION_REJECTED: {
-        const reason = String(payload['reason'] ?? '');
+        const reason = sanitize(String(payload['reason'] ?? ''));
         return {
           title: 'Verification needs another look',
           body: `Your organizer verification wasn't approved. ${reason} You can update your details and resubmit.`,
@@ -377,15 +394,15 @@ export class NotificationService {
           body: "We've received your organizer verification documents — an admin will review them soon.",
         };
       case NotificationType.ORGANIZER_VERIFICATION_NEW_SUBMISSION: {
-        const applicantName = String(payload['applicantName'] ?? 'An applicant');
-        const companyName = String(payload['companyName'] ?? 'their business');
+        const applicantName = sanitize(String(payload['applicantName'] ?? 'An applicant'));
+        const companyName = sanitize(String(payload['companyName'] ?? 'their business'));
         return {
           title: 'New verification to review',
           body: `${applicantName} submitted organizer verification documents for ${companyName}.`,
         };
       }
       case NotificationType.BOOKING_CONFIRMED: {
-        const eventTitle = String(payload['eventTitle'] ?? 'your event');
+        const eventTitle = sanitize(String(payload['eventTitle'] ?? 'your event'));
         const bookingReference = String(payload['bookingReference'] ?? '');
         const quantity = Number(payload['quantity'] ?? 1);
         return {

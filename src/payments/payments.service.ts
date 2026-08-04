@@ -7,12 +7,15 @@ import { Cron, CronExpression } from '@nestjs/schedule';
 import { Event, FeePayer } from '../entities/event.entity';
 import { Enrollment } from '../entities/enrollment.entity';
 import { Organizer } from '../entities/organizer.entity';
+import { User } from '../entities/user.entity';
 import { Payment, PaymentGateway, PaymentStatus } from '../entities/payment.entity';
 import { Commission } from '../entities/commission.entity';
 import { Refund, RefundStatus } from '../entities/refund.entity';
 import { Payout, PayoutStatus } from '../entities/payout.entity';
 import { FeeCalculationService, FeeBreakdown, OrganizerCommissionConfig } from './fee-calculation.service';
 import { RazorpayService } from './razorpay.service';
+import { PayUService } from './payu.service';
+import { LedgerService } from './ledger.service';
 import { WaitlistService } from '../waitlist/waitlist.service';
 import { NotificationService } from '../notifications/notification.service';
 import { FeeEstimateDto } from './dto/fee-estimate.dto';
@@ -20,6 +23,8 @@ import { RequestRefundDto } from './dto/request-refund.dto';
 import { CreateOrderDto } from './dto/create-order.dto';
 import { VerifyPaymentDto } from './dto/verify-payment.dto';
 import { PaymentWebhookDto } from './dto/payment-webhook.dto';
+import { InitiatePayUOrderDto } from './dto/initiate-payu-order.dto';
+import { PayUReturnDto } from './dto/payu-return.dto';
 import { getEventStartDateTime, getEventEndDateTime } from '../events/utils/event-dates.util';
 import { invalidateEventCaches } from '../events/utils/event-cache.util';
 import { CacheService } from '../common/cache/cache.service';
@@ -54,6 +59,8 @@ export class PaymentsService {
     private readonly eventsRepository: Repository<Event>,
     @InjectRepository(Organizer)
     private readonly organizersRepository: Repository<Organizer>,
+    @InjectRepository(User)
+    private readonly usersRepository: Repository<User>,
     @InjectRepository(Payout)
     private readonly payoutsRepository: Repository<Payout>,
     private readonly dataSource: DataSource,
@@ -63,6 +70,8 @@ export class PaymentsService {
     private readonly notificationService: NotificationService,
     private readonly cache: CacheService,
     private readonly razorpayService: RazorpayService,
+    private readonly payuService: PayUService,
+    private readonly ledgerService: LedgerService,
   ) {}
 
   // ---------------------------------------------------------------------
@@ -147,16 +156,185 @@ export class PaymentsService {
   }
 
   // ---------------------------------------------------------------------
+  // PayU checkout — the active gateway (Razorpay above is kept working but
+  // dormant). Structurally different from Razorpay's API-order + client-SDK
+  // flow: our server mints a txnid + hash, the client POSTs a hidden form
+  // straight to PayU's hosted page, and PayU redirects that same
+  // browser/WebView session to whichever of surl/furl matches the outcome —
+  // handled by handlePayUReturn below, which funnels into the same
+  // gateway-agnostic handleWebhook() Razorpay's path already uses.
+  // ---------------------------------------------------------------------
+  async initiatePayUOrder(userId: string, dto: InitiatePayUOrderDto) {
+    const { txnid, amount, productinfo, firstname, email, user } = await this.resolvePendingPayUAttempt(
+      userId,
+      dto.enrollmentId,
+    );
+
+    const hash = this.payuService.generateRequestHash({ txnid, amount, productinfo, firstname, email });
+
+    return {
+      txnid,
+      amount,
+      productinfo,
+      firstname,
+      email,
+      phone: user.phoneNumber || '',
+      key: this.payuService.merchantKey,
+      hash,
+      actionUrl: this.payuService.actionUrl,
+    };
+  }
+
+  // Native SDK (payu-non-seam-less-react) checkout — same enrollment/txnid setup as the
+  // WebView flow above, but no pre-computed hash is returned: the SDK requests hashes on
+  // demand via its own generateHash callback (see PayUService.signHash), so the app only
+  // needs the raw fields to build payUPaymentParams. Field names here match the SDK's own
+  // camelCase convention (productInfo/firstName), not the classic flow's lowercase one —
+  // confirmed by reading payu-non-seam-less-react's native source directly.
+  async initiatePayUNativeOrder(userId: string, dto: InitiatePayUOrderDto) {
+    const { txnid, amount, productinfo, firstname, email, user } = await this.resolvePendingPayUAttempt(
+      userId,
+      dto.enrollmentId,
+    );
+
+    return {
+      key: this.payuService.merchantKey,
+      transactionId: txnid,
+      amount,
+      productInfo: productinfo,
+      firstName: firstname,
+      email,
+      phone: user.phoneNumber || '',
+      // "1" = test mode, "0" = production, per PayUBizConstants.ENVIRONMENT — a string, not a
+      // boolean, matching the SDK's own native constant type.
+      environment: this.payuService.isTestMode ? '1' : '0',
+    };
+  }
+
+  // Shared by both the WebView and native PayU initiation paths: ownership/pending-status/
+  // amount validation, minting a fresh unique txnid, persisting it on the enrollment (so
+  // handlePayUReturn/verify-native can look the attempt back up), and sanitizing the
+  // free-text fields PayU's pipe-delimited hash formula is sensitive to.
+  private async resolvePendingPayUAttempt(userId: string, enrollmentId: string) {
+    const enrollment = await this.enrollmentsRepository.findOne({
+      where: { id: enrollmentId },
+      relations: ['event'],
+    });
+    if (!enrollment) throw new NotFoundException('Enrollment not found');
+    if (enrollment.userId !== userId) {
+      throw new ForbiddenException('You can only pay for your own booking');
+    }
+    if (enrollment.paymentStatus !== 'pending') {
+      throw new BadRequestException('This booking does not have a pending payment');
+    }
+    if (!(Number(enrollment.totalAmount) > 0)) {
+      throw new BadRequestException('Free bookings do not require a payment order');
+    }
+
+    const user = await this.usersRepository.findOne({ where: { id: userId } });
+    if (!user) throw new NotFoundException('User not found');
+
+    // PayU requires a fresh, unique txnid per attempt (a user retrying a failed/abandoned
+    // payment must not reuse one PayU has already seen) — enrollment id + a base36 timestamp
+    // keeps it short and alphanumeric-only. The mapping back to this enrollment is stored on
+    // the enrollment itself (payuTxnId) rather than encoded into the txnid string, since
+    // PayU's classic flow has no "fetch order by id" API to round-trip through the way
+    // Razorpay's fetchOrder() does.
+    const txnid = `${enrollment.id.replace(/-/g, '').slice(0, 20)}${Date.now().toString(36)}`;
+    await this.enrollmentsRepository.update(enrollment.id, { payuTxnId: txnid });
+
+    // PayU's hash uses `|` as the field delimiter — a literal pipe inside a free-text field
+    // (an event titled "VIP | Backstage Pass", or a user's name) would silently shift every
+    // field after it, making the hash structurally diverge from what PayU computes on their
+    // end. Stripped here rather than escaped, since whatever we send is echoed back verbatim
+    // in the reverse-hash callback and must match byte-for-byte either way.
+    const amount = Number(enrollment.totalAmount);
+    const productinfo = sanitizePayUField(enrollment.event.title).slice(0, 100);
+    const firstname = sanitizePayUField((user.fullName || 'Guest').split(' ')[0]).slice(0, 60);
+    const email = user.email;
+
+    return { enrollment, user, txnid, amount, productinfo, firstname, email };
+  }
+
+  // Called by PaymentsController's /payu/sign-hash route — the native SDK's generateHash
+  // callback hands the app a raw string it needs signed; the salt must never leave the
+  // server, so this is the one seam that crosses that boundary. Generic on purpose: it works
+  // for whatever hash type the SDK ever asks for (see PayUService.signHash's own comment).
+  signPayUHash(hashString: string): string {
+    return this.payuService.signHash(hashString);
+  }
+
+  // Called by PaymentsController's /payu/return route for both surl and furl — dto.status
+  // distinguishes success from failure. Never allowed to throw past the controller (which
+  // wraps this in its own try/catch): a WebView stuck on a bare JSON error page has no way
+  // to close itself, unlike a normal API error an app can retry.
+  //
+  // callerUserId: when provided (native SDK's /payu/verify-native path, which is JWT-
+  // authenticated), the enrollment's owner must match this id — prevents a user who knows
+  // another user's txnid from confirming a booking they never paid for. Absent for the
+  // unauthenticated browser-redirect path (/payu/return), where the reverse-hash is the
+  // only authentication layer.
+  async handlePayUReturn(dto: PayUReturnDto, callerUserId?: string): Promise<Payment | null> {
+    const enrollment = await this.enrollmentsRepository.findOne({
+      where: { payuTxnId: dto.txnid },
+      relations: ['event'],
+    });
+    if (!enrollment) {
+      this.logger.warn(`PayU return for unknown txnid ${dto.txnid}`);
+      return null;
+    }
+
+    // Ownership check for the JWT-authenticated native SDK path.
+    if (callerUserId && enrollment.userId !== callerUserId) {
+      this.logger.warn(`PayU native verify: txnid ${dto.txnid} belongs to user ${enrollment.userId}, but caller is ${callerUserId}`);
+      return null;
+    }
+
+    if (!this.payuService.verifyReverseHash(dto)) {
+      this.logger.warn(`PayU return for txnid ${dto.txnid} failed reverse-hash verification`);
+      return null;
+    }
+
+    // Amount is compared in integer paise, not raw floats, mirroring how verifyPayment()
+    // avoids float-comparison bugs for Razorpay's own amount cross-check.
+    const expectedPaise = Math.round(Number(enrollment.totalAmount) * 100);
+    const actualPaise = Math.round(Number(dto.amount) * 100);
+    if (expectedPaise !== actualPaise) {
+      this.logger.warn(`PayU return for txnid ${dto.txnid}: amount mismatch (expected ${expectedPaise}, got ${actualPaise})`);
+      return null;
+    }
+
+    return this.handleWebhook({
+      gateway: PaymentGateway.PAYU,
+      gatewayEventId: dto.mihpayid,
+      gatewayPaymentId: dto.mihpayid,
+      enrollmentId: enrollment.id,
+      amount: Number(dto.amount),
+      status: dto.status === 'success' ? 'success' : 'failed',
+    });
+  }
+
+  // ---------------------------------------------------------------------
   // Fee calculation — standalone endpoint, callable from the Create Event
   // flow before the event is ever submitted for admin approval.
   // ---------------------------------------------------------------------
-  async getFeeEstimate(dto: FeeEstimateDto, requestingUserId: string): Promise<FeeBreakdown> {
+  async getFeeEstimate(dto: FeeEstimateDto, requestingUserId: string, requestingUserRoles: string[]): Promise<FeeBreakdown> {
     const organizer = dto.organizerId
       ? await this.organizersRepository.findOne({ where: { id: dto.organizerId } })
       : await this.organizersRepository.findOne({ where: { userId: requestingUserId } });
 
     if (dto.organizerId && !organizer) {
       throw new NotFoundException(`Organizer ${dto.organizerId} not found`);
+    }
+
+    // B2 fix: a non-admin caller may only query their own organizer profile. Admins may
+    // look up any organizer's rates (e.g. from the admin dashboard fee preview tool).
+    if (
+      dto.organizerId &&
+      !requestingUserRoles.includes('admin') &&
+      organizer?.userId !== requestingUserId
+    ) {
+      throw new ForbiddenException('You can only view fee estimates for your own organizer profile');
     }
 
     // No organizer profile yet (e.g. previewing fees before ever creating an event):
@@ -364,22 +542,34 @@ export class PaymentsService {
     return { payouts, total, page, totalPages: Math.ceil(total / limit) };
   }
 
-  // No live PayU/Razorpay integration exists yet — this is the single seam a future
-  // gateway SDK call slots into. The forward-only state machine and status bookkeeping
-  // around it are real.
   private async processGatewayRefund(refund: Refund): Promise<Refund> {
     try {
+      // The real gateway call happens before the transaction opens — a slow/hung external
+      // request shouldn't hold a DB transaction open, and if PayU's API fails/throws, the
+      // outer catch below marks the refund FAILED without ever touching the DB state below.
+      const payment = await this.paymentsRepository.findOne({
+        where: { enrollmentId: refund.enrollmentId, status: PaymentStatus.SUCCESS },
+        order: { createdAt: 'DESC' },
+      });
+      if (!payment?.gatewayPaymentId) {
+        throw new Error(`No successful payment found for enrollment ${refund.enrollmentId} to refund`);
+      }
+      const gatewayRefundId =
+        payment.gateway === PaymentGateway.PAYU
+          ? (await this.payuService.refundTransaction({ mihpayid: payment.gatewayPaymentId, amount: Number(refund.amount) })).refundId
+          : `mock_refund_${refund.id}`; // Razorpay path is dormant — no real refund call wired for it yet.
+
       // Refund status, enrollment status, and the ticket-type capacity decrement must
       // land together — a partial failure here previously could leave an enrollment
       // marked "refunded" while ticket_types.quantity_sold never freed up (permanently
       // blocking a slot and starving the waitlist), or the reverse.
       const { savedRefund, ticketTypeId, eventId } = await this.dataSource.transaction(async (manager) => {
         refund.status = RefundStatus.PROCESSED;
-        refund.gatewayRefundId = `mock_refund_${refund.id}`;
+        refund.gatewayRefundId = gatewayRefundId;
         refund.processedAt = new Date();
         const savedRefund = await manager.save(Refund, refund);
 
-        const enrollment = await manager.findOne(Enrollment, { where: { id: refund.enrollmentId } });
+        const enrollment = await manager.findOne(Enrollment, { where: { id: refund.enrollmentId }, relations: ['event'] });
         await manager.update(Enrollment, refund.enrollmentId, {
           status: 'refunded',
           paymentStatus: 'refunded',
@@ -391,6 +581,14 @@ export class PaymentsService {
             [enrollment.quantity, enrollment.ticketTypeId],
           );
         }
+
+        await this.ledgerService.recordRefundLedger(
+          manager,
+          refund.id,
+          Number(enrollment?.totalAmount || 0),
+          refund.enrollmentId,
+          enrollment?.event?.currency || 'INR',
+        );
 
         return { savedRefund, ticketTypeId: enrollment?.ticketTypeId, eventId: enrollment?.eventId };
       });
@@ -524,6 +722,14 @@ export class PaymentsService {
             platformCommissionAmount: breakdown.platformCommissionAmount,
             gatewayFeeAmount: breakdown.gatewayFeeAmount,
           }),
+        );
+
+        await this.ledgerService.recordPaymentLedger(
+          manager,
+          savedPayment.id,
+          breakdown,
+          enrollment.id,
+          enrollment.event.currency || 'INR',
         );
 
         enrollment.status = 'confirmed';
@@ -679,6 +885,14 @@ export class PaymentsService {
         { payoutId: savedPayout.id },
       );
 
+      await this.ledgerService.recordPayoutLedger(
+        manager,
+        savedPayout.id,
+        savedPayout.amount,
+        savedPayout.id,
+        event.currency || 'INR',
+      );
+
       this.logger.log(
         `Payout ${savedPayout.id} created for event ${event.id} (organizer ${event.organizerId}): ` +
           `${payableEnrollments.length} ticket(s), ${savedPayout.currency} ${savedPayout.amount}`,
@@ -686,4 +900,59 @@ export class PaymentsService {
       return true;
     });
   }
+
+  async getInvoiceData(userId: string, enrollmentId: string) {
+    const enrollment = await this.enrollmentsRepository.findOne({
+      where: { id: enrollmentId },
+      relations: ['event', 'event.organizer', 'ticketType', 'user'],
+    });
+    if (!enrollment) throw new NotFoundException('Enrollment not found');
+    if (enrollment.userId !== userId) {
+      throw new ForbiddenException('You can only view tax invoices for your own bookings');
+    }
+    if (enrollment.paymentStatus !== 'paid') {
+      throw new BadRequestException('Invoice is only available for paid bookings');
+    }
+
+    const payment = await this.paymentsRepository.findOne({
+      where: { enrollmentId: enrollment.id, status: PaymentStatus.SUCCESS },
+    });
+
+    const breakdown = this.feeCalculationService.calculate(
+      Number(enrollment.totalAmount),
+      {
+        commissionRate: Number(enrollment.event.organizer?.commissionRate ?? 0),
+        commissionFlatFee: Number(enrollment.event.organizer?.commissionFlatFee ?? 0),
+      },
+      enrollment.event.feePayer,
+    );
+
+    return {
+      invoiceNumber: `INV-${enrollment.bookingReference}`,
+      issueDate: payment?.createdAt || enrollment.createdAt,
+      bookingReference: enrollment.bookingReference,
+      event: {
+        id: enrollment.event.id,
+        title: enrollment.event.title,
+        eventDate: enrollment.event.eventDate,
+        venueName: enrollment.event.venueName,
+      },
+      organizer: {
+        companyName: enrollment.event.organizer?.companyName || 'Eventrix Host',
+      },
+      participant: {
+        fullName: enrollment.user.fullName,
+        email: enrollment.user.email,
+      },
+      ticketType: enrollment.ticketType?.name || 'Standard Entry',
+      quantity: enrollment.quantity,
+      currency: enrollment.event.currency || 'INR',
+      breakdown,
+    };
+  }
+}
+
+// PayU's hash format is pipe-delimited — see the comment at initiatePayUOrder's call site.
+function sanitizePayUField(value: string): string {
+  return value.replace(/\|/g, '-');
 }

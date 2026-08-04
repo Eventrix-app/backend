@@ -30,6 +30,8 @@ describe('FeeCalculationService', () => {
       feePayer: FeePayer.ORGANIZER,
       platformCommissionAmount: 0,
       gatewayFeeAmount: 0,
+      gstAmount: 0,
+      subtotalBeforeTax: 0,
       buyerPrice: 0,
       organizerPayout: 0,
     });

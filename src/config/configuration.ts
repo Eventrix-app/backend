@@ -34,6 +34,15 @@ export default () => ({
     keySecret: process.env.RAZORPAY_KEY_SECRET,
     webhookSecret: process.env.RAZORPAY_WEBHOOK_SECRET,
   },
+  payu: {
+    // Same fail-fast philosophy as `razorpay` above — PayUService throws a clear 503 if
+    // these are unset rather than letting a hash come out wrong silently. merchantKey is
+    // safe to hand back to the client (it's the public half of the pair, required in the
+    // form PayU's hosted page expects); merchantSalt never leaves the server.
+    merchantKey: process.env.PAYU_MERCHANT_KEY,
+    merchantSalt: process.env.PAYU_MERCHANT_SALT,
+    baseUrl: process.env.PAYU_BASE_URL || 'https://test.payu.in',
+  },
   gatewayFee: {
     // Blended default approximating Razorpay/PayU's published rates (2% + flat ₹3/txn).
     // Organizer-facing "live payout estimate" and actual payment settlement both read

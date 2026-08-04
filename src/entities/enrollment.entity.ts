@@ -64,6 +64,15 @@ export class Enrollment {
   @Column({ name: 'payment_method', type: 'varchar', nullable: true })
   paymentMethod?: string;
 
+  // PayU's classic checkout has no "fetch order by id" API to round-trip through the way
+  // Razorpay's fetchOrder() lets verifyPayment() recover which enrollment an order belongs
+  // to — so we mint our own txnid at initiatePayUOrder() time and remember the mapping here
+  // ourselves, looked up again when PayU's surl/furl callback arrives. Indexed since every
+  // PayU return callback looks an enrollment up by this column.
+  @Index()
+  @Column({ name: 'payu_txn_id', type: 'varchar', nullable: true })
+  payuTxnId?: string;
+
   @Column({ name: 'booking_reference', type: 'varchar' })
   bookingReference!: string;
 
