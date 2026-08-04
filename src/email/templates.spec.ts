@@ -5,6 +5,8 @@ import {
   eventCancelledEmail,
   eventChangedEmail,
   eventRejectedEmail,
+  invoiceEmail,
+  payoutProcessedEmail,
   organizerFollowedEmail,
   organizerVerificationRejectedEmail,
   refundStatusEmail,
@@ -130,5 +132,63 @@ describe('email templates — deep links', () => {
   it('eventRejectedEmail falls back to plain text when eventId is omitted', () => {
     const { html } = eventRejectedEmail('Music Fest', 'Missing venue details');
     expect(html).not.toContain('eventrix://');
+  });
+
+  const XSS_PAYLOAD = '<img src=x onerror=alert(1)>';
+
+  it('escapes a malicious event title in invoiceEmail', () => {
+    const { html } = invoiceEmail('INV-1', XSS_PAYLOAD, [{ label: 'Ticket price', amount: 100 }], 100, true);
+    expect(html).not.toContain(XSS_PAYLOAD);
+    expect(html).toContain('&lt;img src=x onerror=alert(1)&gt;');
+  });
+
+  it('escapes a malicious event title in payoutProcessedEmail', () => {
+    const { html } = payoutProcessedEmail(XSS_PAYLOAD, 2, 200, 20, 7, 173);
+    expect(html).not.toContain(XSS_PAYLOAD);
+  });
+
+  it('escapes a caller-supplied invoice line label', () => {
+    const { html } = invoiceEmail('INV-1', 'Concert', [{ label: XSS_PAYLOAD, amount: 1 }], 1, true);
+    expect(html).not.toContain(XSS_PAYLOAD);
+  });
+
+  it('invoiceEmail renders every line plus the total, and a booking deep link', () => {
+    const { html, subject } = invoiceEmail(
+      'INV-BK-9',
+      'Concert',
+      [
+        { label: 'Ticket price', amount: 1000 },
+        { label: 'GST (18% on platform fee)', amount: 18 },
+      ],
+      1141,
+      true,
+      'enr-9',
+      'mihpay-9',
+    );
+    expect(subject).toContain('INV-BK-9');
+    expect(html).toContain('Ticket price');
+    expect(html).toContain('GST (18% on platform fee)');
+    expect(html).toContain('1141.00');
+    expect(html).toContain('mihpay-9');
+    expect(html).toContain('eventrix://booking/enr-9');
+  });
+
+  it('invoiceEmail omits the rupee table for a non-INR booking rather than mislabelling the currency', () => {
+    const { html } = invoiceEmail('INV-1', 'Concert', [{ label: 'Ticket price', amount: 100 }], 100, false);
+    expect(html).not.toContain('₹100.00');
+  });
+
+  it('payoutProcessedEmail shows the fee deductions and the net payout', () => {
+    const { html } = payoutProcessedEmail('Concert', 3, 3000, 300, 69, 2631);
+    expect(html).toContain('Gross from 3 tickets');
+    expect(html).toContain('2631.00');
+    // Deductions render with a minus sign so they cannot read as additions.
+    expect(html).toContain('−₹300.00');
+  });
+
+  it('payoutProcessedEmail hides fee rows entirely when there were none', () => {
+    const { html } = payoutProcessedEmail('Concert', 1, 1000, 0, 0, 1000);
+    expect(html).not.toContain('Platform fee');
+    expect(html).not.toContain('Payment processing fee');
   });
 });

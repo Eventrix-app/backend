@@ -351,6 +351,104 @@ export function bookingConfirmedEmail(
   };
 }
 
+// A money row for the invoice/payout tables below. `emphasis` renders the final total;
+// `negative` renders a deduction with a minus sign, used on the organizer's payout summary.
+function amountRow(label: string, amount: number, opts: { emphasis?: boolean; negative?: boolean } = {}): string {
+  const weight = opts.emphasis ? '700' : '400';
+  const color = opts.emphasis ? TEXT_PRIMARY : TEXT_SECONDARY;
+  const size = opts.emphasis ? '16px' : '14px';
+  const border = opts.emphasis ? `border-top:2px solid ${BORDER_LIGHT};` : `border-top:1px solid ${BORDER_LIGHT};`;
+  const value = `${opts.negative ? '−' : ''}₹${Math.abs(amount).toFixed(2)}`;
+  return `
+    <tr>
+      <td style="${border}padding:10px 0;font-size:${size};font-weight:${weight};color:${color};">${label}</td>
+      <td style="${border}padding:10px 0;font-size:${size};font-weight:${weight};color:${color};text-align:right;white-space:nowrap;">${value}</td>
+    </tr>
+  `;
+}
+
+function amountTable(rows: string): string {
+  return `<table role="presentation" width="100%" cellpadding="0" cellspacing="0" style="margin:16px 0;border-collapse:collapse;">${rows}</table>`;
+}
+
+export interface InvoiceEmailLine {
+  label: string;
+  amount: number;
+}
+
+// Tax receipt for a settled booking. Deliberately separate from bookingConfirmedEmail (which
+// carries the ticket + QR): this one is the financial document a buyer forwards to an
+// employer or accountant, and it should stand alone without the ticket attached.
+//
+// `lines` is built by the caller rather than assembled here, because WHICH fee lines a buyer
+// may be shown depends on who actually paid them — under feePayer=ORGANIZER the buyer was
+// charged only the ticket price, and itemising platform fees would claim charges they never
+// incurred. See PaymentsService/InvoiceDetailScreen for the same rule on the app side.
+export function invoiceEmail(
+  invoiceNumber: string,
+  eventTitle: string,
+  lines: InvoiceEmailLine[],
+  total: number,
+  currencySymbolIsRupee: boolean,
+  enrollmentId?: string,
+  transactionId?: string,
+): RenderedEmail {
+  const safeTitle = escapeHtml(eventTitle);
+  const safeInvoice = escapeHtml(invoiceNumber);
+  const link = enrollmentId ? appLink(`booking/${encodeURIComponent(enrollmentId)}`) : undefined;
+  // Every template here renders ₹ directly; a non-INR event would misstate the currency, so
+  // fall back to naming the amount without a symbol rather than printing the wrong one.
+  const rows =
+    lines.map((line) => amountRow(escapeHtml(line.label), line.amount)).join('') +
+    amountRow('Total paid', total, { emphasis: true });
+  return {
+    subject: `Invoice ${subjectSafe(invoiceNumber, 40)} — ${subjectSafe(eventTitle, 40)}`,
+    html: wrapEmail(
+      'Your invoice 🧾',
+      `
+      <p>Here's the receipt for your booking of <strong>${safeTitle}</strong>.</p>
+      ${calloutBox('Invoice number', safeInvoice)}
+      ${currencySymbolIsRupee ? amountTable(rows) : `<p>Total paid: ${total.toFixed(2)}</p>`}
+      ${transactionId ? calloutBox('Transaction reference', escapeHtml(transactionId)) : ''}
+      ${link ? ctaButton('View Invoice', link) : ''}
+      <p style="font-size:12px;color:${TEXT_FAINT};">This is a computer-generated invoice and does not require a signature.</p>
+      `,
+      `Invoice ${invoiceNumber} for ${eventTitle}.`,
+    ),
+  };
+}
+
+// Sent to the organizer once the T+3 sweep has settled an event's payout. States plainly
+// that this records the payout, since the actual bank transfer is handled out of band.
+export function payoutProcessedEmail(
+  eventTitle: string,
+  ticketCount: number,
+  grossRevenue: number,
+  platformFee: number,
+  gatewayFee: number,
+  payoutAmount: number,
+): RenderedEmail {
+  const safeTitle = escapeHtml(eventTitle);
+  const ticketWord = ticketCount === 1 ? 'ticket' : 'tickets';
+  const rows =
+    amountRow(`Gross from ${ticketCount} ${ticketWord}`, grossRevenue) +
+    (platformFee > 0 ? amountRow('Platform fee', platformFee, { negative: true }) : '') +
+    (gatewayFee > 0 ? amountRow('Payment processing fee', gatewayFee, { negative: true }) : '') +
+    amountRow('Your payout', payoutAmount, { emphasis: true });
+  return {
+    subject: `Payout processed: ${subjectSafe(eventTitle)}`,
+    html: wrapEmail(
+      'Payout processed 💸',
+      `
+      <p>Your payout for <strong>${safeTitle}</strong> has been settled.</p>
+      ${amountTable(rows)}
+      <p>Funds are transferred to your registered bank account separately — if anything looks wrong, reply to this email before the transfer is made.</p>
+      `,
+      `Payout of ₹${payoutAmount.toFixed(2)} settled for ${eventTitle}.`,
+    ),
+  };
+}
+
 export function eventApprovedEmail(eventTitle: string, eventId?: string): RenderedEmail {
   const safeTitle = escapeHtml(eventTitle);
   const link = eventId ? appLink(`event/${encodeURIComponent(eventId)}`) : undefined;
@@ -442,6 +540,61 @@ export function organizerVerificationNewSubmissionEmail(applicantName: string, c
       <p>Open the admin dashboard to review their documents and approve or reject the submission.</p>
       `,
       `${safeName} submitted organizer verification documents for review.`,
+    ),
+  };
+}
+
+// --- Admin review queue (NotificationService.enqueueForAdmins) ---
+// All three go to admins, not to the user who triggered them, and deliberately carry no
+// deep link: the review screens they point at live in the web dashboard, not the app.
+
+export function eventPendingApprovalEmail(eventTitle: string, organizerName: string): RenderedEmail {
+  const safeTitle = escapeHtml(eventTitle || 'An event');
+  const safeOrganizer = escapeHtml(organizerName || 'An organizer');
+  return {
+    subject: subjectSafe(`Event awaiting approval: ${eventTitle || 'An event'}`),
+    html: wrapEmail(
+      'Event awaiting approval',
+      `
+      <p>${safeOrganizer} submitted <strong>${safeTitle}</strong> for review.</p>
+      <p>Open the admin dashboard to review the event and approve or reject it.</p>
+      `,
+      `${safeOrganizer} submitted an event for review.`,
+    ),
+  };
+}
+
+export function refundRequestedEmail(requesterName: string, eventTitle: string, amount: number): RenderedEmail {
+  const safeName = escapeHtml(requesterName || 'A participant');
+  const safeTitle = escapeHtml(eventTitle || 'an event');
+  return {
+    subject: 'New refund request to review',
+    html: wrapEmail(
+      'Refund request to review',
+      `
+      <p>${safeName} requested a refund for <strong>${safeTitle}</strong>.</p>
+      ${calloutBox('Amount', `&#8377;${amount.toFixed(2)}`)}
+      <p>Open the admin dashboard to approve or reject the request.</p>
+      `,
+      `${safeName} requested a refund.`,
+    ),
+  };
+}
+
+export function userReportedEmail(reporterName: string, targetType: string, reason: string): RenderedEmail {
+  const safeName = escapeHtml(reporterName || 'Someone');
+  const safeTarget = escapeHtml((targetType || 'user').replace(/_/g, ' '));
+  const safeReason = escapeHtml(reason || '');
+  return {
+    subject: subjectSafe(`New ${targetType || 'user'} report filed`),
+    html: wrapEmail(
+      'New report to review',
+      `
+      <p>${safeName} reported a ${safeTarget}.</p>
+      ${safeReason ? calloutBox('Reason', safeReason) : ''}
+      <p>Open the admin dashboard to review the report and take action or dismiss it.</p>
+      `,
+      `${safeName} reported a ${safeTarget}.`,
     ),
   };
 }

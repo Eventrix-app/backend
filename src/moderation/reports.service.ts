@@ -6,6 +6,7 @@ import { User } from '../entities/user.entity';
 import { ChatMessage } from '../entities/chat-message.entity';
 import { EventReview } from '../entities/event-review.entity';
 import { CreateReportDto } from './dto/create-report.dto';
+import { NotificationService } from '../notifications/notification.service';
 
 export interface ReportRecord {
   id: string;
@@ -33,6 +34,7 @@ export class ReportsService {
     private readonly chatMessagesRepository: Repository<ChatMessage>,
     @InjectRepository(EventReview)
     private readonly reviewsRepository: Repository<EventReview>,
+    private readonly notificationService: NotificationService,
   ) {}
 
   private mapToRecord(report: Report): ReportRecord {
@@ -70,7 +72,28 @@ export class ReportsService {
     });
     const saved = await this.reportsRepository.save(report);
     this.logger.log(`Report ${saved.id} created: ${dto.targetType} ${dto.targetId} by user ${reporterId}`);
+    // A report is only useful if someone sees it: findAllForAdmin() is a pull queue nobody
+    // is obliged to open, so push it to the dashboard bell too. Fire-and-forget — the report
+    // is already saved and the reporter's request must not fail over a notification.
+    void this.notifyAdminsOfReport(saved.id, reporterId, dto);
     return this.mapToRecord(saved);
+  }
+
+  private async notifyAdminsOfReport(reportId: string, reporterId: string, dto: CreateReportDto): Promise<void> {
+    try {
+      const reporter = await this.usersRepository.findOne({ where: { id: reporterId }, select: ['fullName'] });
+      await this.notificationService.notifyAdminsUserReported(
+        reportId,
+        dto.targetType,
+        dto.targetId,
+        reporter?.fullName ?? 'Someone',
+        dto.reason,
+      );
+    } catch (err) {
+      this.logger.warn(
+        `Failed to notify admins of report ${reportId}: ${err instanceof Error ? err.message : String(err)}`,
+      );
+    }
   }
 
   private async targetExists(targetType: ReportTargetType, targetId: string): Promise<boolean> {

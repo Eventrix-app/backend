@@ -53,14 +53,19 @@ export class PayUService {
     return this.configService.get<string>('payu.baseUrl') || 'https://test.payu.in';
   }
 
+  // PAYU_CHECKOUT_URL / PAYU_API_URL pin a host explicitly; unset keeps the derived defaults
+  // above, so an existing deployment with only PAYU_BASE_URL set behaves exactly as before.
+  // Only the origin is configurable — the paths are PayU protocol, not deployment config.
   get actionUrl(): string {
-    return this.isTestMode ? 'https://test.payu.in/_payment' : 'https://secure.payu.in/_payment';
+    const configured = this.configService.get<string>('payu.checkoutUrl');
+    const origin = configured || (this.isTestMode ? 'https://test.payu.in' : 'https://secure.payu.in');
+    return `${trimTrailingSlash(origin)}/_payment`;
   }
 
   private get refundApiUrl(): string {
-    return this.isTestMode
-      ? 'https://test.payu.in/merchant/postservice.php?form=2'
-      : 'https://info.payu.in/merchant/postservice.php?form=2';
+    const configured = this.configService.get<string>('payu.apiUrl');
+    const origin = configured || (this.isTestMode ? 'https://test.payu.in' : 'https://info.payu.in');
+    return `${trimTrailingSlash(origin)}/merchant/postservice.php?form=2`;
   }
 
   // Request hash — sent to PayU as the `hash` field in the checkout form. Documented format:
@@ -183,6 +188,12 @@ export class PayUService {
 // mismatched representation (e.g. "1000" vs "1000.00") would produce a different hash.
 function formatAmount(amount: number): string {
   return amount.toFixed(2);
+}
+
+// A configured origin with a trailing slash would otherwise produce a double slash in the
+// path, which some gateways 404 on rather than normalise.
+function trimTrailingSlash(value: string): string {
+  return value.replace(/\/+$/, '');
 }
 
 function timingSafeEqualHex(a: string, b: string): boolean {

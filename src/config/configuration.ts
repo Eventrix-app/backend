@@ -41,7 +41,37 @@ export default () => ({
     // form PayU's hosted page expects); merchantSalt never leaves the server.
     merchantKey: process.env.PAYU_MERCHANT_KEY,
     merchantSalt: process.env.PAYU_MERCHANT_SALT,
+    // Retained as the single test/production switch (PayUService.isTestMode derives from it,
+    // which also sets the native SDK's environment flag). Everything still works with only
+    // this set — the two overrides below exist so an operator never has to infer which host
+    // a deployment will actually talk to.
     baseUrl: process.env.PAYU_BASE_URL || 'https://test.payu.in',
+    // Checkout and the refund/postservice API live on DIFFERENT production hosts
+    // (secure.payu.in vs info.payu.in) and only coincide in test mode (test.payu.in serves
+    // both), so one value cannot express both. Unset means "derive from baseUrl", which is
+    // the documented default; set them to pin a host explicitly.
+    //
+    // Origins only — the paths (/_payment, /merchant/postservice.php?form=2) stay in
+    // PayUService, since they are protocol details rather than deployment configuration.
+    checkoutUrl: process.env.PAYU_CHECKOUT_URL,
+    apiUrl: process.env.PAYU_API_URL,
+  },
+  tax: {
+    // GST charged on the PLATFORM'S COMMISSION, not on the ticket price — the platform is
+    // supplying an intermediary service and owes output tax on its own fee; the organizer
+    // remains responsible for any GST on the ticket itself. 18% is the standard Indian rate
+    // for this service category.
+    //
+    // Defaults to 0 (inert) rather than 18 on purpose: a deployment that has not yet
+    // registered for GST must not start collecting it, and FeeCalculationService's
+    // `gstRate / 100` term collapses the whole GST path to zero when unset. Set
+    // TAX_GST_RATE=18 explicitly once the GSTIN is live — see docs/PAYMENT_CONFIG.md.
+    //
+    // Who actually funds this depends on event.feePayer, and LedgerService.
+    // recordPaymentLedger() books it from a different account for each case (see its
+    // GST comment): PARTICIPANT means the buyer paid it on top and it is remitted out of
+    // the buyer's money; ORGANIZER means the platform absorbs it out of its own commission.
+    gstRate: Number(process.env.TAX_GST_RATE) || 0,
   },
   gatewayFee: {
     // Blended default approximating Razorpay/PayU's published rates (2% + flat ₹3/txn).

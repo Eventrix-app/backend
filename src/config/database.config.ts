@@ -31,6 +31,7 @@ import { UserSession } from '../entities/user-session.entity';
 import { DeviceToken } from '../entities/device-token.entity';
 import { Report } from '../entities/report.entity';
 import { Block } from '../entities/block.entity';
+import { LedgerEntry } from '../entities/ledger-entry.entity';
 
 const entities = [
   User,
@@ -64,6 +65,7 @@ const entities = [
   DeviceToken,
   Report,
   Block,
+  LedgerEntry,
 ];
 
 export const getDatabaseConfig = (

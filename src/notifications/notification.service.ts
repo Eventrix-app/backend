@@ -1,6 +1,6 @@
 import { Injectable, Logger, NotFoundException } from '@nestjs/common';
 import { InjectRepository } from '@nestjs/typeorm';
-import { IsNull, Repository } from 'typeorm';
+import { IsNull, Raw, Repository } from 'typeorm';
 import * as QRCode from 'qrcode';
 import { NotificationJob, NotificationJobStatus, NotificationType } from '../entities/notification-job.entity';
 import { User } from '../entities/user.entity';
@@ -10,10 +10,15 @@ import { PushService } from '../push/push.service';
 import {
   announcementEmail,
   bookingConfirmedEmail,
+  eventPendingApprovalEmail,
+  refundRequestedEmail,
+  userReportedEmail,
   eventApprovedEmail,
   eventCancelledEmail,
   eventChangedEmail,
   eventRejectedEmail,
+  invoiceEmail,
+  payoutProcessedEmail,
   organizerFollowedEmail,
   organizerVerificationApprovedEmail,
   organizerVerificationNewSubmissionEmail,
@@ -23,6 +28,7 @@ import {
   RenderedEmail,
   waitlistPromotedEmail,
 } from '../email/templates';
+import type { InvoiceEmailLine } from '../email/templates';
 
 export interface NotificationRecord {
   id: string;
@@ -37,6 +43,10 @@ export interface NotificationRecord {
 const PUSH_ONLY_TYPES: ReadonlySet<NotificationType> = new Set([
   NotificationType.SHORT_LIKED,
   NotificationType.SHORT_COMMENTED,
+  // A block is a routine, private user action (mute someone in chat), not a moderation
+  // decision an admin has to make — it belongs in the dashboard's notification list as
+  // context, but an email per block would bury the reports and refunds that do need action.
+  NotificationType.USER_BLOCKED,
 ]);
 
 @Injectable()
@@ -213,16 +223,95 @@ export class NotificationService {
     await this.enqueue(userId, NotificationType.ORGANIZER_VERIFICATION_SUBMITTED, {});
   }
 
-  async notifyOrganizerVerificationNewSubmission(
-    adminUserIds: string[],
-    applicantName: string,
-    companyName: string,
+  // ---------------------------------------------------------------------
+  // Admin queue alerts — everything below fans out to every admin account rather than to
+  // one owner, so the dashboard bell (TopBar.tsx polls GET /notifications) shows the work
+  // waiting on review. Resolving the recipients here rather than at each call site keeps
+  // callers (OrganizerService, EventsService, PaymentsService, ReportsService,
+  // BlocksService) from each re-deriving "who is an admin".
+  // ---------------------------------------------------------------------
+
+  // roles is a jsonb array column on users; @> is the containment operator, which uses the
+  // GIN index on it rather than scanning every row.
+  private async findAdminUserIds(): Promise<string[]> {
+    const admins = await this.usersRepository.find({
+      where: { roles: Raw((alias) => `${alias} @> '["admin"]'::jsonb`) },
+      select: ['id'],
+    });
+    return admins.map((a) => a.id);
+  }
+
+  // Never rethrows: every caller is a user-facing action that has already committed (an
+  // event created, a refund requested, a report filed) — failing to alert admins must not
+  // fail it, exactly as enqueue() itself is non-throwing.
+  private async enqueueForAdmins(type: NotificationType, payload: Record<string, unknown>): Promise<void> {
+    try {
+      const adminUserIds = await this.findAdminUserIds();
+      if (adminUserIds.length === 0) {
+        this.logger.warn(`No admin users found to notify for [${type}]`);
+        return;
+      }
+      await Promise.all(adminUserIds.map((userId) => this.enqueue(userId, type, payload)));
+    } catch (err) {
+      this.logger.error(
+        `Failed to fan out admin notification [${type}]: ${err instanceof Error ? err.message : String(err)}`,
+      );
+    }
+  }
+
+  async notifyOrganizerVerificationNewSubmission(applicantName: string, companyName: string): Promise<void> {
+    await this.enqueueForAdmins(NotificationType.ORGANIZER_VERIFICATION_NEW_SUBMISSION, { applicantName, companyName });
+  }
+
+  // Fired whenever an event lands in the admin review queue — on creation of a paid event
+  // by a non-auto-approve organizer, and again when an already-approved event is edited
+  // back into review (content change or free→paid switch).
+  async notifyAdminsEventPendingApproval(eventId: string, eventTitle: string, organizerName: string): Promise<void> {
+    await this.enqueueForAdmins(NotificationType.EVENT_PENDING_APPROVAL, { eventId, eventTitle, organizerName });
+  }
+
+  // Distinct from notifyRefundStatus(REQUESTED), which acknowledges the request to the
+  // participant who made it — this is the other half: the review item for whoever has to
+  // approve or reject it.
+  async notifyAdminsRefundRequested(
+    refundId: string,
+    enrollmentId: string,
+    amount: number,
+    requesterName: string,
+    eventTitle: string,
   ): Promise<void> {
-    await Promise.all(
-      adminUserIds.map((userId) =>
-        this.enqueue(userId, NotificationType.ORGANIZER_VERIFICATION_NEW_SUBMISSION, { applicantName, companyName }),
-      ),
-    );
+    await this.enqueueForAdmins(NotificationType.REFUND_REQUESTED, {
+      refundId,
+      enrollmentId,
+      amount,
+      requesterName,
+      eventTitle,
+    });
+  }
+
+  async notifyAdminsUserReported(
+    reportId: string,
+    targetType: string,
+    targetId: string,
+    reporterName: string,
+    reason: string,
+  ): Promise<void> {
+    await this.enqueueForAdmins(NotificationType.USER_REPORTED, {
+      reportId,
+      targetType,
+      targetId,
+      reporterName,
+      reason,
+    });
+  }
+
+  async notifyAdminsUserBlocked(
+    blockerId: string,
+    blockerName: string,
+    blockedId: string,
+    blockedName: string,
+  ): Promise<void> {
+    await this.enqueueForAdmins(NotificationType.USER_BLOCKED, { blockerId, blockerName, blockedId, blockedName });
   }
 
   // Fired once a booking is actually paid-and-confirmed — immediately for free events
@@ -262,6 +351,45 @@ export class NotificationService {
       startTime,
       venueName,
     });
+  }
+
+  // Tax receipt for a settled booking. Sent alongside notifyBookingConfirmed rather than
+  // folded into it: that one carries the ticket and QR code, this one is the financial
+  // document, and a buyer forwarding a receipt to an accountant should not be forwarding
+  // their entry QR with it.
+  //
+  // `lines` is assembled by the caller because which fee lines a buyer may be shown depends
+  // on who actually paid them (see PaymentsService.buildInvoiceEmailLines).
+  async notifyInvoiceIssued(
+    userId: string,
+    payload: {
+      invoiceNumber: string;
+      enrollmentId: string;
+      eventTitle: string;
+      lines: InvoiceEmailLine[];
+      total: number;
+      currency: string;
+      transactionId?: string;
+    },
+  ): Promise<void> {
+    await this.enqueue(userId, NotificationType.INVOICE_ISSUED, { ...payload });
+  }
+
+  // Goes to the organizer's own user account (Organizer.userId), not the buyer.
+  async notifyPayoutProcessed(
+    organizerUserId: string,
+    payload: {
+      payoutId: string;
+      eventId: string;
+      eventTitle: string;
+      ticketCount: number;
+      grossRevenue: number;
+      platformFee: number;
+      gatewayFee: number;
+      payoutAmount: number;
+    },
+  ): Promise<void> {
+    await this.enqueue(organizerUserId, NotificationType.PAYOUT_PROCESSED, { ...payload });
   }
 
   // ---------------------------------------------------------------------
@@ -401,6 +529,38 @@ export class NotificationService {
           body: `${applicantName} submitted organizer verification documents for ${companyName}.`,
         };
       }
+      case NotificationType.EVENT_PENDING_APPROVAL: {
+        const eventTitle = sanitize(String(payload['eventTitle'] ?? 'An event'));
+        const organizerName = sanitize(String(payload['organizerName'] ?? 'An organizer'));
+        return {
+          title: 'Event awaiting approval',
+          body: `${organizerName} submitted "${eventTitle}" for review.`,
+        };
+      }
+      case NotificationType.REFUND_REQUESTED: {
+        const requesterName = sanitize(String(payload['requesterName'] ?? 'A participant'));
+        const eventTitle = sanitize(String(payload['eventTitle'] ?? 'an event'));
+        const amount = Number(payload['amount'] ?? 0);
+        return {
+          title: 'Refund request to review',
+          body: `${requesterName} requested a ₹${amount.toFixed(2)} refund for ${eventTitle}.`,
+        };
+      }
+      case NotificationType.USER_REPORTED: {
+        const reporterName = sanitize(String(payload['reporterName'] ?? 'Someone'));
+        const targetType = String(payload['targetType'] ?? 'user').replace(/_/g, ' ');
+        const reason = sanitize(String(payload['reason'] ?? ''));
+        const preview = reason.length > 80 ? `${reason.slice(0, 80).trimEnd()}…` : reason;
+        return {
+          title: `New ${targetType} report`,
+          body: `${reporterName} reported a ${targetType}.${preview ? ` Reason: ${preview}` : ''}`,
+        };
+      }
+      case NotificationType.USER_BLOCKED: {
+        const blockerName = sanitize(String(payload['blockerName'] ?? 'A user'));
+        const blockedName = sanitize(String(payload['blockedName'] ?? 'another user'));
+        return { title: 'User blocked', body: `${blockerName} blocked ${blockedName}.` };
+      }
       case NotificationType.BOOKING_CONFIRMED: {
         const eventTitle = sanitize(String(payload['eventTitle'] ?? 'your event'));
         const bookingReference = String(payload['bookingReference'] ?? '');
@@ -409,6 +569,15 @@ export class NotificationService {
           title: 'Booking confirmed!',
           body: `You're confirmed for ${eventTitle} (${quantity} ticket${quantity === 1 ? '' : 's'}). Booking reference: ${bookingReference}. View your ticket in the app.`,
         };
+      }
+      case NotificationType.INVOICE_ISSUED: {
+        const eventTitle = sanitize(String(payload['eventTitle'] ?? 'your booking'));
+        return { title: 'Invoice ready', body: `Your invoice for ${eventTitle} is available in the app.` };
+      }
+      case NotificationType.PAYOUT_PROCESSED: {
+        const eventTitle = sanitize(String(payload['eventTitle'] ?? 'your event'));
+        const amount = Number(payload['payoutAmount'] ?? 0);
+        return { title: 'Payout processed', body: `₹${amount.toFixed(2)} settled for ${eventTitle}.` };
       }
       default:
         return { title: 'Notification', body: '' };
@@ -463,6 +632,23 @@ export class NotificationService {
           String(payload['applicantName'] ?? 'An applicant'),
           String(payload['companyName'] ?? 'their business'),
         );
+      case NotificationType.EVENT_PENDING_APPROVAL:
+        return eventPendingApprovalEmail(
+          String(payload['eventTitle'] ?? 'An event'),
+          String(payload['organizerName'] ?? 'An organizer'),
+        );
+      case NotificationType.REFUND_REQUESTED:
+        return refundRequestedEmail(
+          String(payload['requesterName'] ?? 'A participant'),
+          String(payload['eventTitle'] ?? 'an event'),
+          Number(payload['amount'] ?? 0),
+        );
+      case NotificationType.USER_REPORTED:
+        return userReportedEmail(
+          String(payload['reporterName'] ?? 'Someone'),
+          String(payload['targetType'] ?? 'user'),
+          String(payload['reason'] ?? ''),
+        );
       case NotificationType.BOOKING_CONFIRMED:
         return bookingConfirmedEmail(
           String(payload['eventTitle'] ?? 'your event'),
@@ -473,6 +659,25 @@ export class NotificationService {
           payload['startTime'] ? String(payload['startTime']) : undefined,
           payload['venueName'] ? String(payload['venueName']) : undefined,
           !!payload['ticketCode'],
+        );
+      case NotificationType.INVOICE_ISSUED:
+        return invoiceEmail(
+          String(payload['invoiceNumber'] ?? ''),
+          String(payload['eventTitle'] ?? 'your booking'),
+          (payload['lines'] as InvoiceEmailLine[] | undefined) ?? [],
+          Number(payload['total'] ?? 0),
+          String(payload['currency'] ?? 'INR') === 'INR',
+          payload['enrollmentId'] ? String(payload['enrollmentId']) : undefined,
+          payload['transactionId'] ? String(payload['transactionId']) : undefined,
+        );
+      case NotificationType.PAYOUT_PROCESSED:
+        return payoutProcessedEmail(
+          String(payload['eventTitle'] ?? 'your event'),
+          Number(payload['ticketCount'] ?? 0),
+          Number(payload['grossRevenue'] ?? 0),
+          Number(payload['platformFee'] ?? 0),
+          Number(payload['gatewayFee'] ?? 0),
+          Number(payload['payoutAmount'] ?? 0),
         );
       default: {
         const { title, body } = this.describe(type, payload);

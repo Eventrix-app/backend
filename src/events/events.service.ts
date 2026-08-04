@@ -222,8 +222,8 @@ export class EventsService {
       }
 
       this.logger.log(`Created event: ${savedEvent.title} (id=${savedEvent.id}) by user ${userId}, approvalStatus=${approvalStatus}`);
-      return { savedEvent, autoApprovedByOrganizer };
-    }).then(async ({ savedEvent, autoApprovedByOrganizer }) => {
+      return { savedEvent, autoApprovedByOrganizer, organizerName: organizer?.companyName ?? user.fullName };
+    }).then(async ({ savedEvent, autoApprovedByOrganizer, organizerName }) => {
       // Audit write happens after commit so a rolled-back transaction never leaves a
       // dangling log entry for an event that doesn't exist.
       if (autoApprovedByOrganizer) {
@@ -234,6 +234,15 @@ export class EventsService {
           targetId: savedEvent.id,
           metadata: { reason: 'organizer.auto_approve_events', organizerId: savedEvent.organizerId },
         });
+      }
+      // Only events that actually landed in the queue — an auto-approved one has nothing
+      // for an admin to do. Fire-and-forget after commit, like the audit write above.
+      if (savedEvent.approvalStatus === EventApprovalStatus.PENDING_APPROVAL) {
+        void this.notificationService.notifyAdminsEventPendingApproval(
+          savedEvent.id,
+          savedEvent.title,
+          organizerName,
+        );
       }
       return savedEvent;
     });
@@ -612,8 +621,35 @@ export class EventsService {
       await this.notifyActiveEnrollees(updatedEvent.id, changes);
     }
 
+    // `wasApproved && (switchingToPaid || contentChanged)` above is the only branch that
+    // pushes a live event back into the queue — an edit to an already-pending event doesn't
+    // re-alert, since it's still sitting in the same review list.
+    if (wasApproved && updatedEvent.approvalStatus === EventApprovalStatus.PENDING_APPROVAL) {
+      void this.notifyAdminsOfPendingApproval(updatedEvent);
+    }
+
     await invalidateEventCaches(this.cache, updatedEvent.id);
     return updatedEvent;
+  }
+
+  // Resolves the organizer's display name for the admin alert; the event itself only
+  // carries organizerId. Never throws — it's called fire-and-forget from paths whose
+  // primary write has already committed.
+  private async notifyAdminsOfPendingApproval(event: Event): Promise<void> {
+    try {
+      const organizer = event.organizerId
+        ? await this.organizersRepository.findOne({ where: { id: event.organizerId } })
+        : null;
+      await this.notificationService.notifyAdminsEventPendingApproval(
+        event.id,
+        event.title,
+        organizer?.companyName ?? 'An organizer',
+      );
+    } catch (err) {
+      this.logger.warn(
+        `Failed to notify admins that event ${event.id} is pending approval: ${err instanceof Error ? err.message : String(err)}`,
+      );
+    }
   }
 
   // Fires a notification job to every active (pending/confirmed) enrollment when an
@@ -1027,13 +1063,17 @@ export class EventsService {
     if (!(Number(tierPrice) > 0) || event.isPaid) return;
 
     event.isPaid = true;
-    if (event.approvalStatus === EventApprovalStatus.APPROVED) {
+    const sentBackForReview = event.approvalStatus === EventApprovalStatus.APPROVED;
+    if (sentBackForReview) {
       event.approvalStatus = EventApprovalStatus.PENDING_APPROVAL;
       event.approvalMethod = undefined;
       event.approvedAt = undefined;
       event.approvedBy = undefined;
     }
     await this.eventsRepository.save(event);
+    if (sentBackForReview) {
+      void this.notifyAdminsOfPendingApproval(event);
+    }
   }
 
   // Participant enrollment with atomic, race-safe ticket-type decrement. When the tier

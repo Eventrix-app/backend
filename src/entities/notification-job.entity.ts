@@ -14,8 +14,21 @@ export enum NotificationType {
   ORGANIZER_VERIFICATION_REJECTED = 'organizer_verification_rejected',
   ORGANIZER_VERIFICATION_SUBMITTED = 'organizer_verification_submitted',
   ORGANIZER_VERIFICATION_NEW_SUBMISSION = 'organizer_verification_new_submission',
+  // Admin-queue alerts: fanned out to every user holding the 'admin' role rather than to a
+  // single owner, so the dashboard's notification bell surfaces work waiting on review
+  // (NotificationService.enqueueForAdmins). All four stay inside the varchar(40) `type`
+  // column below.
+  EVENT_PENDING_APPROVAL = 'event_pending_approval',
+  REFUND_REQUESTED = 'refund_requested',
+  USER_REPORTED = 'user_reported',
+  USER_BLOCKED = 'user_blocked',
   SHORT_LIKED = 'short_liked',
   SHORT_COMMENTED = 'short_commented',
+  // Tax receipt to the buyer once a payment settles, and the settlement summary to the
+  // organizer once the T+3 sweep releases their payout. `type` is a varchar column, so
+  // adding values needs no migration.
+  INVOICE_ISSUED = 'invoice_issued',
+  PAYOUT_PROCESSED = 'payout_processed',
 }
 
 export enum NotificationJobStatus {

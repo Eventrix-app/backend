@@ -21,6 +21,14 @@ export enum LedgerEntryType {
   GST_TAX = 'gst_tax',
   PAYOUT = 'payout',
   REFUND = 'refund',
+  // Reversal counterparts, written together with REFUND so a refunded booking unwinds every
+  // leg its payment created rather than only the gross amount. Without these the fees stayed
+  // booked against a booking that no longer exists: ORGANIZER_PAYABLE went negative by the
+  // fee total and GST_OUTPUT_TAX kept claiming tax that had been handed back to the buyer.
+  // `entry_type` is a plain varchar column, so adding values here needs no migration.
+  COMMISSION_REVERSAL = 'commission_reversal',
+  GATEWAY_FEE_REVERSAL = 'gateway_fee_reversal',
+  GST_REVERSAL = 'gst_reversal',
 }
 
 @Entity('ledger_entries')

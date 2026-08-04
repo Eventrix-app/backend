@@ -8,6 +8,7 @@ describe('ReportsService', () => {
   let mockUsersRepo: jest.Mocked<any>;
   let mockChatMessagesRepo: jest.Mocked<any>;
   let mockReviewsRepo: jest.Mocked<any>;
+  let mockNotificationService: jest.Mocked<any>;
 
   beforeEach(() => {
     mockReportsRepo = {
@@ -16,11 +17,20 @@ describe('ReportsService', () => {
       findAndCount: jest.fn(),
       findOne: jest.fn(),
     };
-    mockUsersRepo = { exists: jest.fn() };
+    // exists() backs targetExists(); findOne() resolves the reporter's name for the admin alert.
+    mockUsersRepo = { exists: jest.fn(), findOne: jest.fn().mockResolvedValue({ fullName: 'Reporter Person' }) };
     mockChatMessagesRepo = { exists: jest.fn(), delete: jest.fn() };
     mockReviewsRepo = { exists: jest.fn(), delete: jest.fn() };
 
-    service = new ReportsService(mockReportsRepo, mockUsersRepo, mockChatMessagesRepo, mockReviewsRepo);
+    mockNotificationService = { notifyAdminsUserReported: jest.fn().mockResolvedValue(undefined) };
+
+    service = new ReportsService(
+      mockReportsRepo,
+      mockUsersRepo,
+      mockChatMessagesRepo,
+      mockReviewsRepo,
+      mockNotificationService,
+    );
   });
 
   describe('create', () => {
@@ -61,6 +71,25 @@ describe('ReportsService', () => {
         expect.objectContaining({ reporterId: 'user-1', targetId: 'user-2', reason: 'harassment' }),
       );
       expect(result.status).toBeUndefined(); // not set explicitly by create() — DB default applies
+    });
+
+    it('alerts admins with the reporter name, target and reason', async () => {
+      mockUsersRepo.exists.mockResolvedValue(true);
+      await service.create('user-1', {
+        targetType: ReportTargetType.USER,
+        targetId: 'user-2',
+        reason: 'harassment',
+      });
+      // notifyAdminsOfReport is fire-and-forget inside create(); let its chain settle.
+      await new Promise((r) => setImmediate(r));
+
+      expect(mockNotificationService.notifyAdminsUserReported).toHaveBeenCalledWith(
+        'report-1',
+        ReportTargetType.USER,
+        'user-2',
+        'Reporter Person',
+        'harassment',
+      );
     });
   });
 

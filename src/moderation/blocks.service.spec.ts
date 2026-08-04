@@ -5,6 +5,7 @@ describe('BlocksService', () => {
   let service: BlocksService;
   let mockBlocksRepo: jest.Mocked<any>;
   let mockUsersRepo: jest.Mocked<any>;
+  let mockNotificationService: jest.Mocked<any>;
 
   beforeEach(() => {
     mockBlocksRepo = {
@@ -14,9 +15,11 @@ describe('BlocksService', () => {
       find: jest.fn(),
       delete: jest.fn(),
     };
-    mockUsersRepo = { exists: jest.fn() };
+    // findOne (not exists) — block() needs the target's name for the admin notification.
+    mockUsersRepo = { findOne: jest.fn() };
+    mockNotificationService = { notifyAdminsUserBlocked: jest.fn().mockResolvedValue(undefined) };
 
-    service = new BlocksService(mockBlocksRepo, mockUsersRepo);
+    service = new BlocksService(mockBlocksRepo, mockUsersRepo, mockNotificationService);
   });
 
   describe('block', () => {
@@ -25,12 +28,12 @@ describe('BlocksService', () => {
     });
 
     it('throws NotFoundException when the target user does not exist', async () => {
-      mockUsersRepo.exists.mockResolvedValue(false);
+      mockUsersRepo.findOne.mockResolvedValue(null);
       await expect(service.block('user-1', 'user-2')).rejects.toThrow(NotFoundException);
     });
 
     it('creates a block row when none exists yet', async () => {
-      mockUsersRepo.exists.mockResolvedValue(true);
+      mockUsersRepo.findOne.mockResolvedValue({ id: 'user-2', fullName: 'Blocked Person' });
       mockBlocksRepo.findOne.mockResolvedValue(null);
       await service.block('user-1', 'user-2');
       expect(mockBlocksRepo.save).toHaveBeenCalledWith(
@@ -38,8 +41,36 @@ describe('BlocksService', () => {
       );
     });
 
+    it('notifies admins with both display names once the block is saved', async () => {
+      mockUsersRepo.findOne
+        .mockResolvedValueOnce({ id: 'user-2', fullName: 'Blocked Person' })
+        .mockResolvedValueOnce({ fullName: 'Blocker Person' });
+      mockBlocksRepo.findOne.mockResolvedValue(null);
+
+      await service.block('user-1', 'user-2');
+      // The notify call is fire-and-forget inside block(); let its promise chain settle.
+      await new Promise((r) => setImmediate(r));
+
+      expect(mockNotificationService.notifyAdminsUserBlocked).toHaveBeenCalledWith(
+        'user-1',
+        'Blocker Person',
+        'user-2',
+        'Blocked Person',
+      );
+    });
+
+    it('does not notify admins for a duplicate block', async () => {
+      mockUsersRepo.findOne.mockResolvedValue({ id: 'user-2', fullName: 'Blocked Person' });
+      mockBlocksRepo.findOne.mockResolvedValue({ id: 'existing-block' });
+
+      await service.block('user-1', 'user-2');
+      await new Promise((r) => setImmediate(r));
+
+      expect(mockNotificationService.notifyAdminsUserBlocked).not.toHaveBeenCalled();
+    });
+
     it('is idempotent — does not create a duplicate row if already blocked', async () => {
-      mockUsersRepo.exists.mockResolvedValue(true);
+      mockUsersRepo.findOne.mockResolvedValue({ id: 'user-2', fullName: 'Blocked Person' });
       mockBlocksRepo.findOne.mockResolvedValue({ id: 'existing-block' });
       await service.block('user-1', 'user-2');
       expect(mockBlocksRepo.save).not.toHaveBeenCalled();

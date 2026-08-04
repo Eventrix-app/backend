@@ -1,6 +1,6 @@
 import { BadRequestException, Injectable, NotFoundException, Logger, UnauthorizedException } from '@nestjs/common';
 import { InjectRepository } from '@nestjs/typeorm';
-import { DataSource, In, IsNull, Not, Raw, Repository } from 'typeorm';
+import { DataSource, In, IsNull, Not, Repository } from 'typeorm';
 import { hashPassword, verifyPassword } from '../../auth/password.util';
 import { UpdateOrganizerDto } from './dto/update-organizer.dto';
 import { User } from '../../entities/user.entity';
@@ -459,15 +459,12 @@ export class OrganizerService {
     this.logger.log(`Organizer verification submitted for review: user ${userId}`);
 
     void this.notificationService.notifyOrganizerVerificationSubmitted(userId);
-    void this.usersRepository
-      .find({ where: { roles: Raw((alias) => `${alias} @> '["admin"]'::jsonb`) } })
-      .then((admins) =>
-        this.notificationService.notifyOrganizerVerificationNewSubmission(
-          admins.map((a) => a.id),
-          organizer.fullName,
-          organizer.companyName,
-        ),
-      );
+    // Admin recipients are resolved inside NotificationService.enqueueForAdmins, shared with
+    // the other admin-queue alerts (event approval, refunds, reports).
+    void this.notificationService.notifyOrganizerVerificationNewSubmission(
+      organizer.fullName,
+      organizer.companyName,
+    );
 
     return this.getMyVerificationStatus(userId);
   }

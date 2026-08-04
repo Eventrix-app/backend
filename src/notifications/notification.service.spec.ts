@@ -67,3 +67,84 @@ describe('NotificationService — event approval/rejection', () => {
     );
   });
 });
+
+describe('NotificationService — admin queue fan-out', () => {
+  let service: NotificationService;
+  let mockJobsRepo: jest.Mocked<any>;
+  let mockUsersRepo: jest.Mocked<any>;
+  let mockDeviceTokenRepo: jest.Mocked<any>;
+  let mockEmailService: jest.Mocked<any>;
+  let mockPushService: jest.Mocked<any>;
+
+  beforeEach(() => {
+    mockJobsRepo = {
+      create: jest.fn((data) => data),
+      save: jest.fn((data) => Promise.resolve({ id: 'job-1', ...data })),
+    };
+    mockUsersRepo = {
+      // find() resolves the admin recipients; findOne() is the per-job lookup inside enqueue().
+      find: jest.fn().mockResolvedValue([{ id: 'admin-1' }, { id: 'admin-2' }]),
+      findOne: jest.fn().mockResolvedValue({ id: 'admin-1', email: 'admin@example.com', emailEnabled: true }),
+    };
+    mockDeviceTokenRepo = { find: jest.fn().mockResolvedValue([]) };
+    mockEmailService = { send: jest.fn().mockResolvedValue(undefined) };
+    mockPushService = { send: jest.fn().mockResolvedValue(undefined) };
+
+    service = new NotificationService(mockJobsRepo, mockUsersRepo, mockDeviceTokenRepo, mockEmailService, mockPushService);
+  });
+
+  it('enqueues one job per admin when an event lands in the approval queue', async () => {
+    await service.notifyAdminsEventPendingApproval('event-1', 'Summer Fest', 'Acme Events');
+
+    expect(mockJobsRepo.save).toHaveBeenCalledWith(
+      expect.objectContaining({ userId: 'admin-1', type: 'event_pending_approval' }),
+    );
+    expect(mockJobsRepo.save).toHaveBeenCalledWith(
+      expect.objectContaining({ userId: 'admin-2', type: 'event_pending_approval' }),
+    );
+  });
+
+  it('renders a refund request with the requester, event and amount', async () => {
+    await service.notifyAdminsRefundRequested('refund-1', 'enr-1', 1500, 'Priya S', 'Summer Fest');
+
+    const [, subject, html] = mockEmailService.send.mock.calls[0];
+    expect(subject).toContain('refund');
+    expect(html).toContain('Priya S');
+    expect(html).toContain('Summer Fest');
+    expect(html).toContain('1500.00');
+  });
+
+  it('never emails a block — dashboard + push only', async () => {
+    await service.notifyAdminsUserBlocked('user-1', 'Ravi', 'user-2', 'Sam');
+
+    expect(mockJobsRepo.save).toHaveBeenCalledWith(expect.objectContaining({ type: 'user_blocked' }));
+    expect(mockEmailService.send).not.toHaveBeenCalled();
+  });
+
+  it('escapes user-entered names in the in-app report notification', async () => {
+    await service.notifyAdminsUserReported('report-1', 'user', 'user-9', '<img src=x onerror=alert(1)>', 'Spam');
+
+    const records = await (async () => {
+      mockJobsRepo.find = jest.fn().mockResolvedValue([
+        {
+          id: 'job-1',
+          type: 'user_reported',
+          payload: { reporterName: '<img src=x onerror=alert(1)>', targetType: 'user', reason: 'Spam' },
+          createdAt: new Date(),
+          readAt: null,
+        },
+      ]);
+      return service.findMyNotifications('admin-1');
+    })();
+
+    expect(records[0].body).toContain('&lt;img');
+    expect(records[0].body).not.toContain('<img');
+  });
+
+  it('logs and returns quietly when there are no admin accounts', async () => {
+    mockUsersRepo.find.mockResolvedValue([]);
+
+    await expect(service.notifyAdminsEventPendingApproval('event-1', 'Summer Fest', 'Acme')).resolves.toBeUndefined();
+    expect(mockJobsRepo.save).not.toHaveBeenCalled();
+  });
+});

@@ -13,6 +13,7 @@ import { Commission } from '../entities/commission.entity';
 import { Refund, RefundStatus } from '../entities/refund.entity';
 import { Payout, PayoutStatus } from '../entities/payout.entity';
 import { FeeCalculationService, FeeBreakdown, OrganizerCommissionConfig } from './fee-calculation.service';
+import type { InvoiceEmailLine } from '../email/templates';
 import { RazorpayService } from './razorpay.service';
 import { PayUService } from './payu.service';
 import { LedgerService } from './ledger.service';
@@ -240,7 +241,10 @@ export class PaymentsService {
     // the enrollment itself (payuTxnId) rather than encoded into the txnid string, since
     // PayU's classic flow has no "fetch order by id" API to round-trip through the way
     // Razorpay's fetchOrder() does.
-    const txnid = `${enrollment.id.replace(/-/g, '').slice(0, 20)}${Date.now().toString(36)}`;
+    // The enrollment-id prefix is not cosmetic: resolveEnrollmentForTxnid() decodes it to
+    // recover the booking when a late callback arrives for an attempt this one supersedes.
+    // Changing this format without changing that decoder reintroduces silent payment loss.
+    const txnid = `${enrollment.id.replace(/-/g, '').slice(0, ENROLLMENT_ID_PREFIX_LENGTH)}${Date.now().toString(36)}`;
     await this.enrollmentsRepository.update(enrollment.id, { payuTxnId: txnid });
 
     // PayU's hash uses `|` as the field delimiter — a literal pipe inside a free-text field
@@ -254,6 +258,60 @@ export class PaymentsService {
     const email = user.email;
 
     return { enrollment, user, txnid, amount, productinfo, firstname, email };
+  }
+
+  // Resolves the enrollment a PayU callback belongs to, including for a SUPERSEDED attempt.
+  //
+  // PayU requires a unique txnid per attempt, so every retry mints a new one and overwrites
+  // enrollment.payuTxnId (reusing a txnid PayU has already seen is rejected, which would
+  // break retry entirely — so "just don't overwrite it" is not an available fix). That left
+  // the column holding only the LATEST attempt: if a user abandoned attempt A, retried as B,
+  // and A then completed late — an async UPI collect approved after the fact, a delayed
+  // netbanking return, or PayU retrying surl server-side — the callback for A matched nothing
+  // and the payment was silently lost, with the buyer charged and no booking to show for it.
+  //
+  // No extra column or table is needed to fix it, because the txnid already carries the
+  // answer: it is built as <first 20 hex chars of the enrollment uuid><base36 timestamp>
+  // (see resolvePendingPayUAttempt). Any attempt, current or superseded, therefore names its
+  // own enrollment. The exact-match lookup stays first since it is the indexed common path;
+  // the prefix decode is the fallback.
+  //
+  // This widens only WHICH enrollment is found — every existing check still runs against it
+  // afterwards (reverse-hash, amount, and the caller-ownership check on the native path), so
+  // resolving a superseded attempt is no weaker than resolving the current one.
+  private async resolveEnrollmentForTxnid(txnid: string): Promise<Enrollment | null> {
+    const exact = await this.enrollmentsRepository.findOne({
+      where: { payuTxnId: txnid },
+      relations: ['event'],
+    });
+    if (exact) return exact;
+
+    // Only a well-formed prefix is ever fed to the LIKE below — the id fragment is hex by
+    // construction, so anything else is not one of our txnids and must not reach the query.
+    const prefix = txnid.slice(0, ENROLLMENT_ID_PREFIX_LENGTH).toLowerCase();
+    if (!/^[0-9a-f]{20}$/.test(prefix)) return null;
+
+    const matches = await this.enrollmentsRepository
+      .createQueryBuilder('enrollment')
+      .leftJoinAndSelect('enrollment.event', 'event')
+      .where(`REPLACE(enrollment.id::text, '-', '') LIKE :prefix`, { prefix: `${prefix}%` })
+      .limit(2)
+      .getMany();
+
+    // 80 bits of uuid make a collision negligible, but guessing between two bookings would
+    // mean confirming the wrong one — refuse rather than pick.
+    if (matches.length !== 1) {
+      if (matches.length > 1) {
+        this.logger.error(`PayU txnid ${txnid} prefix matched ${matches.length} enrollments; refusing to guess`);
+      }
+      return null;
+    }
+
+    this.logger.warn(
+      `PayU callback for superseded txnid ${txnid} resolved to enrollment ${matches[0].id} via id prefix ` +
+        `(current attempt is ${matches[0].payuTxnId ?? 'none'})`,
+    );
+    return matches[0];
   }
 
   // Called by PaymentsController's /payu/sign-hash route — the native SDK's generateHash
@@ -275,10 +333,7 @@ export class PaymentsService {
   // unauthenticated browser-redirect path (/payu/return), where the reverse-hash is the
   // only authentication layer.
   async handlePayUReturn(dto: PayUReturnDto, callerUserId?: string): Promise<Payment | null> {
-    const enrollment = await this.enrollmentsRepository.findOne({
-      where: { payuTxnId: dto.txnid },
-      relations: ['event'],
-    });
+    const enrollment = await this.resolveEnrollmentForTxnid(dto.txnid);
     if (!enrollment) {
       this.logger.warn(`PayU return for unknown txnid ${dto.txnid}`);
       return null;
@@ -357,7 +412,7 @@ export class PaymentsService {
     // client retry) can both pass the existence check before either commits, producing two
     // REQUESTED rows for one booking that can then each be independently approved and
     // double-processed (double capacity release, eventually double gateway refunds).
-    const saved = await this.dataSource.transaction(async (manager) => {
+    const { saved, eventTitle } = await this.dataSource.transaction(async (manager) => {
       const enrollment = await manager
         .createQueryBuilder(Enrollment, 'enrollment')
         .setLock('pessimistic_write')
@@ -402,12 +457,39 @@ export class PaymentsService {
         amount: enrollment.totalAmount,
         requestedAt: new Date(),
       });
-      return manager.save(Refund, refund);
+      return { saved: await manager.save(Refund, refund), eventTitle: enrollment.event?.title ?? 'an event' };
     });
 
     this.logger.log(`Refund ${saved.id} requested for enrollment ${saved.enrollmentId} by user ${userId}`);
     await this.notificationService.notifyRefundStatus(userId, saved.id, RefundStatus.REQUESTED, saved.enrollmentId);
+    // Second half of the same event: the acknowledgement above goes to the participant, this
+    // one puts the request in front of whoever has to decide it. Fire-and-forget — the refund
+    // row is already committed and must not be rolled back over a notification failure.
+    void this.notifyAdminsOfRefundRequest(saved.id, saved.enrollmentId, Number(saved.amount), userId, eventTitle);
     return saved;
+  }
+
+  private async notifyAdminsOfRefundRequest(
+    refundId: string,
+    enrollmentId: string,
+    amount: number,
+    requesterId: string,
+    eventTitle: string,
+  ): Promise<void> {
+    try {
+      const requester = await this.usersRepository.findOne({ where: { id: requesterId }, select: ['fullName'] });
+      await this.notificationService.notifyAdminsRefundRequested(
+        refundId,
+        enrollmentId,
+        amount,
+        requester?.fullName ?? 'A participant',
+        eventTitle,
+      );
+    } catch (err) {
+      this.logger.warn(
+        `Failed to notify admins of refund ${refundId}: ${err instanceof Error ? err.message : String(err)}`,
+      );
+    }
   }
 
   async approveRefund(refundId: string, actorUserId: string, userRoles: string[]): Promise<Refund> {
@@ -582,10 +664,28 @@ export class PaymentsService {
           );
         }
 
+        // Reversing the fee legs needs the same split the payment booked, so the breakdown is
+        // recomputed from the charged amount rather than only the gross being reversed.
+        // Recomputed (not read back from the Commission row) because that row has no GST
+        // column — mixing a stored commission with a recomputed GST would be inconsistent,
+        // and the codebase already accepts recompute-from-current-config as the model here.
+        // The caveat is the known one: if rates changed between payment and refund, the
+        // reversal won't exactly cancel the original legs.
+        const refundOrganizer = enrollment?.event
+          ? await manager.findOne(Organizer, { where: { id: enrollment.event.organizerId } })
+          : null;
+        const refundBreakdown = this.feeCalculationService.calculateFromChargedAmount(
+          Number(enrollment?.totalAmount || 0),
+          {
+            commissionRate: Number(refundOrganizer?.commissionRate ?? 0),
+            commissionFlatFee: Number(refundOrganizer?.commissionFlatFee ?? 0),
+          },
+          enrollment?.event?.feePayer ?? FeePayer.ORGANIZER,
+        );
         await this.ledgerService.recordRefundLedger(
           manager,
           refund.id,
-          Number(enrollment?.totalAmount || 0),
+          refundBreakdown,
           refund.enrollmentId,
           enrollment?.event?.currency || 'INR',
         );
@@ -700,13 +800,31 @@ export class PaymentsService {
         startTime: string;
         venueName: string;
       } | null = null;
+      // Collected inside the transaction (it needs the breakdown computed below) but sent
+      // only after it commits, same as confirmedBooking — emailing a receipt for a payment
+      // whose transaction then rolls back would be worse than a missing email.
+      let issuedInvoice: {
+        userId: string;
+        invoiceNumber: string;
+        enrollmentId: string;
+        eventTitle: string;
+        lines: InvoiceEmailLine[];
+        total: number;
+        currency: string;
+        transactionId?: string;
+      } | null = null;
       if (enrollment.status === 'refunded' || enrollment.status === 'cancelled') {
         this.logger.warn(
           `Webhook ${dto.gatewayEventId} (${dto.status}) received for enrollment ${dto.enrollmentId} which is already "${enrollment.status}"; payment recorded but enrollment left untouched`,
         );
       } else if (dto.status === 'success') {
         const organizer = await manager.findOne(Organizer, { where: { id: enrollment.event.organizerId } });
-        const breakdown = this.feeCalculationService.calculate(
+        // calculateFromChargedAmount, NOT calculate: dto.amount is the amount actually
+        // charged, which under feePayer=PARTICIPANT already includes commission + gateway
+        // fee + GST (enroll() persists breakdown.buyerPrice as totalAmount). Passing it to
+        // calculate() would apply all three a second time, inflating the Commission row and
+        // every ledger entry below it.
+        const breakdown = this.feeCalculationService.calculateFromChargedAmount(
           dto.amount,
           {
             commissionRate: Number(organizer?.commissionRate ?? 0),
@@ -748,13 +866,26 @@ export class PaymentsService {
           startTime: enrollment.event.startTime,
           venueName: enrollment.event.venueName,
         };
+
+        issuedInvoice = {
+          userId: enrollment.userId,
+          // Same number getInvoiceData() returns, so the emailed receipt and the in-app
+          // invoice screen always agree on the identifier.
+          invoiceNumber: `INV-${enrollment.bookingReference}`,
+          enrollmentId: enrollment.id,
+          eventTitle: enrollment.event.title,
+          lines: buildInvoiceEmailLines(breakdown),
+          total: breakdown.buyerPrice,
+          currency: enrollment.event.currency || 'INR',
+          transactionId: savedPayment.gatewayPaymentId,
+        };
       } else {
         enrollment.paymentStatus = 'failed';
         await manager.save(Enrollment, enrollment);
       }
 
       this.logger.log(`Processed ${dto.gateway} webhook ${dto.gatewayEventId} for enrollment ${dto.enrollmentId}: ${dto.status}`);
-      return { payment: savedPayment, confirmedBooking };
+      return { payment: savedPayment, confirmedBooking, issuedInvoice };
     });
 
     // Fired after the transaction commits — a payment succeeding is exactly the moment a
@@ -776,6 +907,20 @@ export class PaymentsService {
       );
     }
 
+    // The tax receipt, sent separately from the ticket above — see notifyInvoiceIssued.
+    if (result.issuedInvoice) {
+      const inv = result.issuedInvoice;
+      void this.notificationService.notifyInvoiceIssued(inv.userId, {
+        invoiceNumber: inv.invoiceNumber,
+        enrollmentId: inv.enrollmentId,
+        eventTitle: inv.eventTitle,
+        lines: inv.lines,
+        total: inv.total,
+        currency: inv.currency,
+        transactionId: inv.transactionId,
+      });
+    }
+
     return result.payment;
   }
 
@@ -788,32 +933,69 @@ export class PaymentsService {
     const delayDays = this.configService.get<number>('payout.delayDaysAfterEventEnd', 3);
     const now = new Date();
 
-    const candidates = await this.enrollmentsRepository
+    // Eligibility is filtered in SQL, not in JS. Previously this selected EVERY event with
+    // an unpaid confirmed enrollment — no date predicate at all — then issued one findOne per
+    // candidate and discarded the ones not yet due. On an hourly cron that meant the work
+    // grew with the number of open events (including ones months in the future) rather than
+    // with the number actually due.
+    //
+    // The end timestamp is composed the same way getEventEndDateTime() does it: end_time when
+    // present, otherwise start_time, falling back to midnight — kept in one SQL expression so
+    // the join can be a single indexed scan. The JS re-check below remains the authority for
+    // the exact boundary; this predicate only has to be no stricter than it.
+    const eligibleEvents = await this.enrollmentsRepository
       .createQueryBuilder('enrollment')
       .select('enrollment.eventId', 'eventId')
       .distinct(true)
+      .innerJoin(Event, 'event', 'event.id = enrollment.eventId')
       .where('enrollment.status = :status', { status: 'confirmed' })
       .andWhere('enrollment.paymentStatus = :paymentStatus', { paymentStatus: 'paid' })
       .andWhere('enrollment.payoutId IS NULL')
+      .andWhere(
+        `(event.event_date::timestamp + COALESCE(event.end_time, event.start_time, '00:00')::interval)
+           <= (:now::timestamp - make_interval(days => :delayDays))`,
+        { now, delayDays },
+      )
       .getRawMany<{ eventId: string }>();
 
     let payoutsCreated = 0;
-    for (const { eventId } of candidates) {
+    const settled: SettledPayout[] = [];
+    for (const { eventId } of eligibleEvents) {
       const event = await this.eventsRepository.findOne({ where: { id: eventId } });
       if (!event) continue;
 
+      // Re-checked in JS against the same helper the rest of the codebase uses, so the SQL
+      // predicate above is a pre-filter rather than a second, subtly-different definition of
+      // "due" that could drift from getEventEndDateTime().
       const eligibleAt = new Date(getEventEndDateTime(event).getTime() + delayDays * 24 * 60 * 60 * 1000);
       if (now < eligibleAt) continue;
 
-      const created = await this.settleEventPayout(event);
-      if (created) payoutsCreated++;
+      const result = await this.settleEventPayout(event);
+      if (result) {
+        payoutsCreated++;
+        settled.push(result);
+      }
     }
 
-    this.logger.log(`Payout sweep: ${payoutsCreated} payout(s) created across ${candidates.length} candidate event(s)`);
-    return { eventsProcessed: candidates.length, payoutsCreated };
+    // Sent only after each payout's own transaction has committed.
+    for (const payout of settled) {
+      void this.notificationService.notifyPayoutProcessed(payout.organizerUserId, {
+        payoutId: payout.payoutId,
+        eventId: payout.eventId,
+        eventTitle: payout.eventTitle,
+        ticketCount: payout.ticketCount,
+        grossRevenue: payout.grossRevenue,
+        platformFee: payout.platformFee,
+        gatewayFee: payout.gatewayFee,
+        payoutAmount: payout.payoutAmount,
+      });
+    }
+
+    this.logger.log(`Payout sweep: ${payoutsCreated} payout(s) created across ${eligibleEvents.length} due event(s)`);
+    return { eventsProcessed: eligibleEvents.length, payoutsCreated };
   }
 
-  private async settleEventPayout(event: Event): Promise<boolean> {
+  private async settleEventPayout(event: Event): Promise<SettledPayout | null> {
     return this.dataSource.transaction(async (manager) => {
       // Row-lock candidate enrollments so a concurrent sweep run can't double-pay. A
       // NOT EXISTS subquery (rather than a LEFT JOIN) keeps this a lockable single-table
@@ -831,7 +1013,7 @@ export class PaymentsService {
         )
         .getMany();
 
-      if (!enrollments.length) return false;
+      if (!enrollments.length) return null;
 
       // Explicit re-check rather than trusting the NOT EXISTS subquery above to still hold
       // once the FOR UPDATE locks are actually granted — requestRefund() takes its own
@@ -850,12 +1032,12 @@ export class PaymentsService {
       const payableEnrollments = openRefundEnrollmentIds.size
         ? enrollments.filter((e) => !openRefundEnrollmentIds.has(e.id))
         : enrollments;
-      if (!payableEnrollments.length) return false;
+      if (!payableEnrollments.length) return null;
 
       const organizer = await manager.findOne(Organizer, { where: { id: event.organizerId } });
       if (!organizer) {
         this.logger.error(`Skipping payout for event ${event.id}: organizer ${event.organizerId} not found`);
-        return false;
+        return null;
       }
 
       const commissionConfig: OrganizerCommissionConfig = {
@@ -863,10 +1045,30 @@ export class PaymentsService {
         commissionFlatFee: Number(organizer.commissionFlatFee),
       };
 
-      const totalPayout = payableEnrollments.reduce((sum, enrollment) => {
-        const breakdown = this.feeCalculationService.calculate(Number(enrollment.totalAmount), commissionConfig, event.feePayer);
-        return sum + breakdown.organizerPayout;
-      }, 0);
+      // Totals are accumulated per-fee (not just the payout) so the organizer's settlement
+      // email can show the same breakdown the payout was actually derived from, rather than
+      // recomputing it from a rounded aggregate afterwards.
+      const totals = payableEnrollments.reduce(
+        (acc, enrollment) => {
+          // enrollment.totalAmount is what the buyer was charged, not the bare ticket price —
+          // under feePayer=PARTICIPANT it already includes the fees. calculate() would treat
+          // it as a base price and return organizerPayout === totalAmount, paying the
+          // organizer the platform's own commission and the gateway fee along with it.
+          const breakdown = this.feeCalculationService.calculateFromChargedAmount(
+            Number(enrollment.totalAmount),
+            commissionConfig,
+            event.feePayer,
+          );
+          return {
+            payout: acc.payout + breakdown.organizerPayout,
+            gross: acc.gross + breakdown.buyerPrice,
+            platformFee: acc.platformFee + breakdown.platformCommissionAmount,
+            gatewayFee: acc.gatewayFee + breakdown.gatewayFeeAmount,
+          };
+        },
+        { payout: 0, gross: 0, platformFee: 0, gatewayFee: 0 },
+      );
+      const totalPayout = totals.payout;
 
       const payout = manager.create(Payout, {
         organizerId: event.organizerId,
@@ -889,7 +1091,7 @@ export class PaymentsService {
         manager,
         savedPayout.id,
         savedPayout.amount,
-        savedPayout.id,
+        event.id,
         event.currency || 'INR',
       );
 
@@ -897,7 +1099,19 @@ export class PaymentsService {
         `Payout ${savedPayout.id} created for event ${event.id} (organizer ${event.organizerId}): ` +
           `${payableEnrollments.length} ticket(s), ${savedPayout.currency} ${savedPayout.amount}`,
       );
-      return true;
+      // Returned rather than emailed here: the caller notifies only once this transaction
+      // has committed, so an organizer is never told about a payout that then rolls back.
+      return {
+        organizerUserId: organizer.userId,
+        payoutId: savedPayout.id,
+        eventId: event.id,
+        eventTitle: event.title,
+        ticketCount: payableEnrollments.length,
+        grossRevenue: round2(totals.gross),
+        platformFee: round2(totals.platformFee),
+        gatewayFee: round2(totals.gatewayFee),
+        payoutAmount: savedPayout.amount,
+      };
     });
   }
 
@@ -918,7 +1132,11 @@ export class PaymentsService {
       where: { enrollmentId: enrollment.id, status: PaymentStatus.SUCCESS },
     });
 
-    const breakdown = this.feeCalculationService.calculate(
+    // Same reason as handleWebhook/settleEventPayout: totalAmount is the charged amount, so
+    // it must be split, not re-marked-up. Using calculate() here printed an invoice whose
+    // "total" exceeded what the buyer was actually billed — a tax document stating an
+    // amount that was never charged.
+    const breakdown = this.feeCalculationService.calculateFromChargedAmount(
       Number(enrollment.totalAmount),
       {
         commissionRate: Number(enrollment.event.organizer?.commissionRate ?? 0),
@@ -951,6 +1169,56 @@ export class PaymentsService {
     };
   }
 }
+
+// What settleEventPayout hands back so runPayoutSweep can notify the organizer once the
+// payout's transaction has actually committed.
+interface SettledPayout {
+  organizerUserId: string;
+  payoutId: string;
+  eventId: string;
+  eventTitle: string;
+  ticketCount: number;
+  grossRevenue: number;
+  platformFee: number;
+  gatewayFee: number;
+  payoutAmount: number;
+}
+
+function round2(value: number): number {
+  return Math.round(value * 100) / 100;
+}
+
+// Printable invoice lines for the emailed receipt. Mirrors the identical rule in
+// Frontend's InvoiceDetailScreen: fee lines are shown ONLY when the participant actually
+// paid them. Under feePayer=ORGANIZER the buyer was charged exactly the ticket price, and
+// itemising platform/gateway/GST there would state charges they never incurred.
+function buildInvoiceEmailLines(breakdown: FeeBreakdown): InvoiceEmailLine[] {
+  const lines: InvoiceEmailLine[] = [{ label: 'Ticket price', amount: breakdown.ticketPrice }];
+  if (breakdown.feePayer !== FeePayer.PARTICIPANT) return lines;
+
+  if (breakdown.platformCommissionAmount > 0) {
+    lines.push({ label: 'Platform fee', amount: breakdown.platformCommissionAmount });
+  }
+  if (breakdown.gatewayFeeAmount > 0) {
+    lines.push({ label: 'Payment gateway fee', amount: breakdown.gatewayFeeAmount });
+  }
+  if (breakdown.gstAmount > 0) {
+    // Rate derived, never hardcoded — TAX_GST_RATE is configurable and an "18%" label would
+    // become a lie the moment it changes.
+    const rate = Math.round((breakdown.gstAmount / breakdown.platformCommissionAmount) * 10000) / 100;
+    lines.push({
+      label: Number.isFinite(rate) && rate > 0 ? `GST (${rate}% on platform fee)` : 'GST on platform fee',
+      amount: breakdown.gstAmount,
+    });
+  }
+  return lines;
+}
+
+// How many leading hex characters of the enrollment uuid every PayU txnid carries, so a
+// callback for any attempt — current or superseded — can be traced back to its booking.
+// Read by both the minting side (resolvePendingPayUAttempt) and the decoding side
+// (resolveEnrollmentForTxnid); they must agree.
+const ENROLLMENT_ID_PREFIX_LENGTH = 20;
 
 // PayU's hash format is pipe-delimited — see the comment at initiatePayUOrder's call site.
 function sanitizePayUField(value: string): string {

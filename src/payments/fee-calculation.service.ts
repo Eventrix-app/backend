@@ -81,6 +81,77 @@ export class FeeCalculationService {
     };
   }
 
+  // Inverse of calculate(): recovers the breakdown from an amount that was ALREADY CHARGED,
+  // rather than from a bare ticket price.
+  //
+  // This exists because enrollment.totalAmount is not always the ticket price. Under
+  // feePayer=PARTICIPANT, EventsService.enroll() persists breakdown.buyerPrice — the
+  // fee-inclusive total — so feeding it back into calculate() applies commission, gateway
+  // fee and GST a SECOND time on top of a figure that already contains them. That silently
+  // overpaid organizers (payout came out as the full buyer price, fees included), inflated
+  // the commission/ledger rows, and overstated GST. Settlement, payout and invoicing must
+  // all call this instead; only the pre-booking paths (enroll, waitlist promotion, the
+  // fee-estimate endpoint) legitimately start from a bare price and call calculate().
+  calculateFromChargedAmount(
+    chargedAmount: number,
+    organizer: OrganizerCommissionConfig,
+    feePayer: FeePayer = FeePayer.ORGANIZER,
+  ): FeeBreakdown {
+    // Under ORGANIZER the buyer was charged exactly the ticket price (fees came out of the
+    // organizer's side, never added on top) — the charged amount IS the base, no inversion.
+    if (feePayer !== FeePayer.PARTICIPANT) {
+      return this.calculate(chargedAmount, organizer, feePayer);
+    }
+
+    const charged = Number(chargedAmount);
+    if (!charged || charged <= 0) {
+      return this.calculate(0, organizer, feePayer);
+    }
+
+    const g = this.configService.get<number>('gatewayFee.percent', 2) / 100;
+    const gf = this.configService.get<number>('gatewayFee.flat', 3);
+    const t = this.configService.get<number>('tax.gstRate', 0) / 100;
+    const r = Number(organizer.commissionRate ?? 0) / 100;
+    const f = Number(organizer.commissionFlatFee ?? 0);
+
+    // Forward formula, with each component's rounding dropped:
+    //   charged = price(1 + r + g + r·t) + f + gf + f·t
+    // Solving for price. The denominator is >= 1 for any non-negative rate, so it can
+    // never divide by zero.
+    const estimate = (charged - f - gf - f * t) / (1 + r + g + r * t);
+
+    // calculate() rounds each component to 2dp independently, so the analytic estimate can
+    // land a paisa or two off the true preimage. Scan the immediate neighbourhood for the
+    // base price that forward-computes to EXACTLY the charged amount; comparison is in
+    // integer paise for the same reason handlePayUReturn compares amounts that way.
+    const targetPaise = Math.round(charged * 100);
+    for (let deltaPaise = 0; deltaPaise <= 5; deltaPaise++) {
+      for (const signed of deltaPaise === 0 ? [0] : [deltaPaise, -deltaPaise]) {
+        const candidate = this.round(estimate + signed / 100);
+        if (candidate < 0) continue;
+        const breakdown = this.calculate(candidate, organizer, feePayer);
+        if (Math.round(breakdown.buyerPrice * 100) === targetPaise) {
+          return breakdown;
+        }
+      }
+    }
+
+    // No exact preimage — the commission/gateway/GST config has changed since this booking
+    // was charged, so no ticket price under TODAY's rates produces the amount actually
+    // taken. Fall back to the closest split, but pin buyerPrice to what was really charged:
+    // an invoice must never claim a total the buyer was not billed, and the payout must not
+    // silently drift with a config change. The residual lands on organizerPayout, which is
+    // the correct place for it under PARTICIPANT (the organizer receives the base price).
+    const approx = this.calculate(Math.max(this.round(estimate), 0), organizer, feePayer);
+    const fees = this.round(approx.platformCommissionAmount + approx.gatewayFeeAmount + approx.gstAmount);
+    return {
+      ...approx,
+      buyerPrice: this.round(charged),
+      subtotalBeforeTax: this.round(charged - approx.gstAmount),
+      organizerPayout: Math.max(this.round(charged - fees), 0),
+    };
+  }
+
   private round(value: number): number {
     return Math.round(value * 100) / 100;
   }

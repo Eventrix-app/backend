@@ -44,6 +44,21 @@ export const validateEnv = (config: Record<string, unknown>) => {
     RAZORPAY_KEY_ID: Joi.string().optional(),
     RAZORPAY_KEY_SECRET: Joi.string().optional(),
     RAZORPAY_WEBHOOK_SECRET: Joi.string().optional(),
+    // Optional — same fail-fast posture as RAZORPAY_* above: PayUService throws a clear 503
+    // until these are set rather than silently producing a hash PayU will always reject.
+    // PAYU_BASE_URL doubles as the test/production switch (see PayUService.isTestMode) —
+    // anything containing "test" keeps checkout AND the refund API on their sandbox hosts.
+    PAYU_MERCHANT_KEY: Joi.string().optional(),
+    PAYU_MERCHANT_SALT: Joi.string().optional(),
+    PAYU_BASE_URL: Joi.string().optional(),
+    // Optional explicit host pins. Unset means "derive from PAYU_BASE_URL" (the default).
+    // Origins only — PayUService appends the protocol paths itself.
+    PAYU_CHECKOUT_URL: Joi.string().uri().optional(),
+    PAYU_API_URL: Joi.string().uri().optional(),
+    // GST rate (percent) applied to the platform's commission. Unset/0 keeps the entire GST
+    // path inert — see configuration.ts's `tax.gstRate` comment for why that is the default
+    // rather than 18.
+    TAX_GST_RATE: Joi.number().min(0).max(100).optional(),
     GATEWAY_FEE_PERCENT: Joi.number().optional(),
     GATEWAY_FEE_FLAT: Joi.number().optional(),
     REFUND_WINDOW_HOURS: Joi.number().optional(),
