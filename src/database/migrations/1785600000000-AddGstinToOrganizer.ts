@@ -8,8 +8,8 @@ import { MigrationInterface, QueryRunner } from 'typeorm';
 // Nullable with no default and no backfill — organizers below the GST registration
 // threshold genuinely have none, and inventing a placeholder would put a fake
 // registration number on a statutory document.
-export class AddGstinToOrganizer1785200000000 implements MigrationInterface {
-  name = 'AddGstinToOrganizer1785200000000';
+export class AddGstinToOrganizer1785600000000 implements MigrationInterface {
+  name = 'AddGstinToOrganizer1785600000000';
 
   public async up(queryRunner: QueryRunner): Promise<void> {
     await queryRunner.query(`ALTER TABLE "organizers" ADD COLUMN IF NOT EXISTS "gstin" character varying(15)`);

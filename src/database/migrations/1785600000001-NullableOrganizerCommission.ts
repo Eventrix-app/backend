@@ -13,8 +13,8 @@ import { MigrationInterface, QueryRunner } from 'typeorm';
 //
 // down() restores NOT NULL DEFAULT 0, coalescing NULLs back to 0 first so the constraint
 // can be re-applied.
-export class NullableOrganizerCommission1785300000000 implements MigrationInterface {
-  name = 'NullableOrganizerCommission1785300000000';
+export class NullableOrganizerCommission1785600000001 implements MigrationInterface {
+  name = 'NullableOrganizerCommission1785600000001';
 
   public async up(queryRunner: QueryRunner): Promise<void> {
     await queryRunner.query(`ALTER TABLE "organizers" ALTER COLUMN "commission_rate" DROP NOT NULL`);
