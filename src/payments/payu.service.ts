@@ -1,4 +1,4 @@
-import { Injectable, Logger, ServiceUnavailableException } from '@nestjs/common';
+import { BadRequestException, Injectable, Logger, ServiceUnavailableException } from '@nestjs/common';
 import { ConfigService } from '@nestjs/config';
 import * as crypto from 'crypto';
 
@@ -130,8 +130,49 @@ export class PayUService {
   // "send this string to your backend and append the salt at the end" — direct concatenation,
   // no delimiter (unlike the pipe-joined formulas above, which already end in the right
   // number of empty fields before the salt is appended).
+  // SECURITY: this is a salt-append oracle, and PayU's postservice API authenticates with
+  // exactly the same construction — sha512(key|command|var1|SALT). Signing anything the
+  // caller asks for therefore hands any authenticated user a valid hash for
+  //
+  //     key|cancel_refund_transaction|<mihpayid>|
+  //
+  // which is all that is needed to POST PayU's refund endpoint directly and be refunded,
+  // while our database never learns of it: no Refund row, the enrollment stays confirmed and
+  // paid, the ticket keeps working, and the payout sweep still pays the organizer. Free
+  // tickets, with the platform absorbing the loss. The merchant key is public (it is handed
+  // to the client by initiate-native) and a buyer's own mihpayid comes back in their own
+  // payuResponse, so both inputs are already in the attacker's hands.
+  //
+  // Guarded with a denylist rather than an allowlist on purpose: the SDK requests hash types
+  // that vary by payment method and cannot be enumerated from its source alone (they come
+  // from PayU's compiled checkoutpro binary), so an allowlist would risk silently breaking a
+  // real payment method that has never been exercised on a device here. A denylist of the
+  // money-moving commands is narrow, complete for the known-dangerous set, and cannot break a
+  // legitimate checkout hash — none of these commands appear in one.
+  //
+  // Requiring the merchant-key prefix is the second half: every genuine PayU hash string
+  // begins with it, so this rejects entirely free-form input without constraining the SDK.
   signHash(hashStringWithoutSalt: string): string {
-    const { salt } = this.getCredentials();
+    const { key, salt } = this.getCredentials();
+
+    if (hashStringWithoutSalt.length > MAX_HASH_STRING_LENGTH) {
+      throw new BadRequestException('Hash string is too long');
+    }
+
+    const parts = hashStringWithoutSalt.split('|');
+    if (parts[0] !== key) {
+      this.logger.warn('Rejected sign-hash request whose first field is not the merchant key');
+      throw new BadRequestException('Unsupported hash string');
+    }
+
+    const command = (parts[1] ?? '').trim().toLowerCase();
+    if (DENIED_HASH_COMMANDS.has(command)) {
+      // Nothing legitimate reaches here — a client has asked us to authenticate a
+      // money-moving postservice call. Logged at error so it surfaces as an incident.
+      this.logger.error(`Rejected sign-hash request for privileged PayU command "${command}"`);
+      throw new BadRequestException('Unsupported hash string');
+    }
+
     return crypto.createHash('sha512').update(`${hashStringWithoutSalt}${salt}`).digest('hex');
   }
 
@@ -189,6 +230,33 @@ export class PayUService {
 function formatAmount(amount: number): string {
   return amount.toFixed(2);
 }
+
+// PayU postservice commands that move, reverse or capture money, or that mutate a stored
+// instrument. None of these ever appear in a checkout hash, so refusing to sign them cannot
+// break a payment — see the SECURITY note on signHash for what happens if they are signed.
+// Stored lowercase; the check trims and lowercases before comparing.
+const DENIED_HASH_COMMANDS: ReadonlySet<string> = new Set([
+  'cancel_refund_transaction',
+  'refund_transaction',
+  'cancel_transaction',
+  'capture_transaction',
+  'update_amount',
+  'update_requests',
+  'money_transfer',
+  'create_invoice',
+  'delete_invoice',
+  'payout',
+  'instant_payout',
+  'split_settlement',
+  'save_user_card',
+  'edit_user_card',
+  'delete_user_card',
+]);
+
+// Generous relative to any real PayU hash string (the longest, the checkout request hash,
+// is a few hundred characters) but bounded, so this endpoint can't be used to hash
+// megabytes of attacker-chosen input.
+const MAX_HASH_STRING_LENGTH = 2048;
 
 // A configured origin with a trailing slash would otherwise produce a double slash in the
 // path, which some gateways 404 on rather than normalise.

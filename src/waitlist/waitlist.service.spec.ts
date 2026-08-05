@@ -17,6 +17,7 @@ describe('WaitlistService — promoteNext paymentStatus', () => {
   let mockEventsRepo: any;
   let mockOrganizersRepo: any;
   let mockFeeCalculationService: any;
+  let mockLedgerService: any;
 
   let entry: any;
 
@@ -32,6 +33,9 @@ describe('WaitlistService — promoteNext paymentStatus', () => {
     mockEventsRepo = {};
     mockOrganizersRepo = {};
     mockFeeCalculationService = { calculate: jest.fn() };
+    // A promoted FREE booking owes the same flat platform fee a direct enroll() does, and
+    // neither reaches handleWebhook — WaitlistService books it straight to the ledger.
+    mockLedgerService = { recordFreeBookingLedger: jest.fn().mockResolvedValue([]) };
     service = new WaitlistService(
       mockWaitlistRepo,
       mockEventsRepo,
@@ -41,6 +45,7 @@ describe('WaitlistService — promoteNext paymentStatus', () => {
       mockNotificationService,
       mockCacheService,
       mockFeeCalculationService,
+      mockLedgerService,
     );
   });
 
@@ -62,6 +67,53 @@ describe('WaitlistService — promoteNext paymentStatus', () => {
     await service.promoteNext('tt-1');
 
     expect(capturedEnrollment.paymentStatus).toBe('paid');
+  });
+
+  // A free booking must owe the platform's flat free-event fee whether it came from
+  // enroll() or from a waitlist promotion. Neither path reaches handleWebhook, so if this
+  // call is dropped the fee is simply never recorded for promoted bookings — the same
+  // booking escaping the fee purely by how it was created.
+  it('books the free-event platform fee on a promoted free booking', async () => {
+    mockFeeCalculationService.calculate.mockReturnValue({
+      platformCommissionAmount: 12.5,
+      gstAmount: 2.25,
+      buyerPrice: 0,
+    });
+    mockDataSource.transaction.mockImplementation(async (callback: any) => {
+      const manager = {
+        findOne: jest.fn().mockResolvedValue(entry),
+        query: jest.fn().mockResolvedValue([[{ id: 'tt-1', price: '0.00' }], 1]),
+        create: jest.fn().mockImplementation((entity: any, data: any) => data),
+        save: jest.fn().mockImplementation((entity: any, data: any) => Promise.resolve({ id: 'enr-promoted', ...data })),
+      };
+      return callback(manager);
+    });
+
+    await service.promoteNext('tt-1');
+
+    expect(mockLedgerService.recordFreeBookingLedger).toHaveBeenCalledWith(
+      expect.anything(),
+      'enr-promoted',
+      expect.objectContaining({ platformCommissionAmount: 12.5 }),
+      'enr-promoted',
+      expect.any(String),
+    );
+  });
+
+  it('does not book a free-event fee on a promoted PAID booking', async () => {
+    mockDataSource.transaction.mockImplementation(async (callback: any) => {
+      const manager = {
+        findOne: jest.fn().mockResolvedValue(entry),
+        query: jest.fn().mockResolvedValue([[{ id: 'tt-1', price: '49.99' }], 1]),
+        create: jest.fn().mockImplementation((entity: any, data: any) => data),
+        save: jest.fn().mockImplementation((entity: any, data: any) => Promise.resolve({ id: 'enr-paid', ...data })),
+      };
+      return callback(manager);
+    });
+
+    await service.promoteNext('tt-1');
+
+    expect(mockLedgerService.recordFreeBookingLedger).not.toHaveBeenCalled();
   });
 
   it('leaves a promoted paid-ticket enrollment pending until the webhook confirms it', async () => {

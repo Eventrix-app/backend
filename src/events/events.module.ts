@@ -18,6 +18,7 @@ import { CategoryController } from './category.controller';
 import { WaitlistModule } from '../waitlist/waitlist.module';
 import { UploadsModule } from '../uploads/uploads.module';
 import { FeeCalculationService } from '../payments/fee-calculation.service';
+import { LedgerService } from '../payments/ledger.service';
 
 @Module({
   imports: [
@@ -35,7 +36,7 @@ import { FeeCalculationService } from '../payments/fee-calculation.service';
     }),
   ],
   controllers: [EventsController, CategoryController],
-  providers: [EventsService, CategoryService, FeeCalculationService],
+  providers: [EventsService, CategoryService, FeeCalculationService, LedgerService],
   exports: [EventsService, CategoryService],
 })
 export class EventsModule {}

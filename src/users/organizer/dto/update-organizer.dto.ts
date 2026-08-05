@@ -1,4 +1,5 @@
-import { IsBoolean, IsEnum, IsNumber, IsOptional, IsString, IsUrl, Max, MinLength, Min } from 'class-validator';
+import { IsBoolean, IsEnum, IsNumber, IsOptional, IsString, IsUrl, Matches, Max, MinLength, Min } from 'class-validator';
+import { Transform } from 'class-transformer';
 import { VerificationLevel } from '../../../entities/organizer.entity';
 
 export class UpdateOrganizerDto {
@@ -31,6 +32,21 @@ export class UpdateOrganizerDto {
   @IsOptional()
   @IsUrl()
   companyLogoUrl?: string;
+
+  // Supplier GSTIN for tax invoices. Self-service: the organizer knows their own
+  // registration number, and it appears on invoices issued to their attendees.
+  //
+  // Validated against the statutory 15-character format rather than accepting free text —
+  // a malformed GSTIN on an issued invoice is a compliance problem, not a display bug.
+  // Uppercased before validation so a lowercase entry is corrected rather than rejected.
+  // An empty string clears it (for an organizer who deregisters); null/undefined leaves
+  // it untouched, matching how every other optional field on this DTO behaves.
+  @IsOptional()
+  @Transform(({ value }) => (typeof value === 'string' ? value.trim().toUpperCase() : value))
+  @Matches(/^$|^[0-9]{2}[A-Z]{5}[0-9]{4}[A-Z][1-9A-Z]Z[0-9A-Z]$/, {
+    message: 'gstin must be a valid 15-character GSTIN',
+  })
+  gstin?: string;
 
   // Admin-only fields — enforced in OrganizerController, not self-service.
   @IsOptional()

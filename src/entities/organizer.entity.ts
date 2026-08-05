@@ -72,6 +72,16 @@ export class Organizer {
   @Column({ name: 'upi_id', type: 'varchar', nullable: true })
   upiId!: string;
 
+  // Supplier GSTIN printed on the tax invoice (PaymentsService.getTaxInvoice). Nullable
+  // because plenty of organizers are below the registration threshold and legitimately have
+  // none — the invoice simply omits the line rather than showing a blank field.
+  //
+  // Exactly 15 characters by the statutory format: 2-digit state code, 10-char PAN,
+  // 1-char entity number, 'Z', 1-char checksum. Stored uppercase (see UpdateOrganizerDto's
+  // transform) so the printed value matches the registration certificate.
+  @Column({ name: 'gstin', type: 'varchar', length: 15, nullable: true })
+  gstin?: string;
+
   // Set when the organizer (re)submits their KYC documents for review, cleared on
   // rejection so `submittedForReviewAt == null` unambiguously means "nothing pending" —
   // distinct from verificationLevel, which only flips once an admin actually approves.
@@ -100,11 +110,17 @@ export class Organizer {
   @Column({ name: 'auto_approve_events', type: 'boolean', default: false })
   autoApproveEvents!: boolean;
 
-  @Column({ name: 'commission_rate', type: 'decimal', precision: 5, scale: 2, default: 0 })
-  commissionRate!: number;
+  // NULL means "no negotiated rate — use the platform default" (config `platform.
+  // commissionPercent`, currently 5%). An explicit value always wins, INCLUDING an explicit 0
+  // for a commission-free partner. That distinction is the whole reason these are nullable
+  // rather than `default: 0`: with a non-null default, "never configured" and "negotiated at
+  // zero" are the same value and a platform default can never be applied to the former
+  // without also overriding the latter.
+  @Column({ name: 'commission_rate', type: 'decimal', precision: 5, scale: 2, nullable: true })
+  commissionRate?: number | null;
 
-  @Column({ name: 'commission_flat_fee', type: 'decimal', precision: 10, scale: 2, default: 0 })
-  commissionFlatFee!: number;
+  @Column({ name: 'commission_flat_fee', type: 'decimal', precision: 10, scale: 2, nullable: true })
+  commissionFlatFee?: number | null;
 
   @CreateDateColumn({ name: 'created_at' })
   createdAt!: Date;

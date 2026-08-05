@@ -1,5 +1,5 @@
 import * as crypto from 'crypto';
-import { ServiceUnavailableException } from '@nestjs/common';
+import { BadRequestException, ServiceUnavailableException } from '@nestjs/common';
 import { PayUService } from './payu.service';
 
 describe('PayUService', () => {
@@ -59,12 +59,63 @@ describe('PayUService', () => {
     });
 
     it('produces a different hash for a different input string', () => {
-      expect(service.signHash('a')).not.toBe(service.signHash('b'));
+      expect(service.signHash(`${MERCHANT_KEY}|a`)).not.toBe(service.signHash(`${MERCHANT_KEY}|b`));
     });
 
     it('throws instead of silently signing when unconfigured', () => {
       mockConfigService.get.mockReturnValue(undefined);
-      expect(() => service.signHash('anything')).toThrow(ServiceUnavailableException);
+      expect(() => service.signHash(`${MERCHANT_KEY}|anything`)).toThrow(ServiceUnavailableException);
+    });
+
+    // This endpoint applies the merchant salt to caller-supplied input, and PayU's
+    // postservice API authenticates with the SAME sha512(...|SALT) construction. Signing
+    // freely would let any authenticated user mint the hash for a refund call, be refunded
+    // directly by PayU, and keep a booking our database still believes is paid.
+    describe('privileged-command guard', () => {
+      it('refuses to sign a refund-API hash string', () => {
+        expect(() => service.signHash(`${MERCHANT_KEY}|cancel_refund_transaction|mihpay12345|`)).toThrow(
+          BadRequestException,
+        );
+      });
+
+      it.each([
+        'cancel_refund_transaction',
+        'refund_transaction',
+        'cancel_transaction',
+        'capture_transaction',
+        'update_amount',
+        'money_transfer',
+        'payout',
+        'delete_user_card',
+      ])('refuses command %s', (command) => {
+        expect(() => service.signHash(`${MERCHANT_KEY}|${command}|var1|`)).toThrow(BadRequestException);
+      });
+
+      it('is not fooled by casing or padding', () => {
+        expect(() => service.signHash(`${MERCHANT_KEY}|Cancel_Refund_Transaction|x|`)).toThrow(BadRequestException);
+        expect(() => service.signHash(`${MERCHANT_KEY}|  cancel_refund_transaction  |x|`)).toThrow(BadRequestException);
+      });
+
+      it('rejects a string that does not begin with the merchant key', () => {
+        expect(() => service.signHash('someoneelseskey|cancel_refund_transaction|x|')).toThrow(BadRequestException);
+        expect(() => service.signHash('arbitrary attacker chosen text')).toThrow(BadRequestException);
+      });
+
+      it('rejects an oversized string rather than hashing unbounded input', () => {
+        expect(() => service.signHash(`${MERCHANT_KEY}|${'a'.repeat(5000)}`)).toThrow(BadRequestException);
+      });
+
+      // The guard must not break real checkout traffic — these are the shapes the SDK
+      // actually asks for.
+      it.each([
+        ['checkout payment hash', `${MERCHANT_KEY}|txn1|1000.00|VIP Ticket|Aarish|a@example.com|||||||||||`],
+        ['mobile SDK details lookup', `${MERCHANT_KEY}|payment_related_details_for_mobile_sdk|txn1|`],
+        ['VAS lookup', `${MERCHANT_KEY}|vas_for_mobile_sdk|default|`],
+        ['stored card fetch', `${MERCHANT_KEY}|get_user_cards|user-123|`],
+      ])('still signs a legitimate %s', (_label, hashString) => {
+        const expected = crypto.createHash('sha512').update(`${hashString}${MERCHANT_SALT}`).digest('hex');
+        expect(service.signHash(hashString)).toBe(expected);
+      });
     });
   });
 

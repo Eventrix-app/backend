@@ -23,7 +23,8 @@ import { NotificationService } from '../notifications/notification.service';
 import { getEventEndDateTime, isEventOver, todayIstDateKey } from './utils/event-dates.util';
 import { EVENTS_LIST_VERSION_KEY, eventDetailCacheKey, invalidateEventCaches } from './utils/event-cache.util';
 import { CacheService } from '../common/cache/cache.service';
-import { FeeCalculationService } from '../payments/fee-calculation.service';
+import { FeeCalculationService, toCommissionConfig } from '../payments/fee-calculation.service';
+import { LedgerService } from '../payments/ledger.service';
 
 // Loading the 'organizer.user' relation pulls the full User entity by default, including
 // passwordHash and other PII — there's no @Exclude()/serializer scoping it out anywhere in
@@ -77,6 +78,7 @@ export class EventsService {
     private readonly notificationService: NotificationService,
     private readonly cache: CacheService,
     private readonly feeCalculationService: FeeCalculationService,
+    private readonly ledgerService: LedgerService,
   ) {}
 
   // Public listings are read far more often than events are written, so they're cached for
@@ -1192,10 +1194,7 @@ export class EventsService {
         const organizer = await manager.findOne(Organizer, { where: { id: event.organizerId } });
         const breakdown = this.feeCalculationService.calculate(
           baseAmount,
-          {
-            commissionRate: Number(organizer?.commissionRate ?? 0),
-            commissionFlatFee: Number(organizer?.commissionFlatFee ?? 0),
-          },
+          toCommissionConfig(organizer),
           event.feePayer,
         );
         totalAmount = breakdown.buyerPrice;
@@ -1228,6 +1227,26 @@ export class EventsService {
           throw new ConflictException('User already enrolled in this event');
         }
         throw err;
+      }
+
+      // Free bookings never reach handleWebhook (there is no payment to confirm), so the
+      // platform's flat free-event fee has to be booked here or it would be computed by
+      // FeeCalculationService and then recorded precisely nowhere. Inside this transaction
+      // deliberately: the receivable and the booking that created it commit together.
+      if (baseAmount <= 0) {
+        const freeOrganizer = await manager.findOne(Organizer, { where: { id: event.organizerId } });
+        const freeBreakdown = this.feeCalculationService.calculate(
+          0,
+          toCommissionConfig(freeOrganizer),
+          event.feePayer,
+        );
+        await this.ledgerService.recordFreeBookingLedger(
+          manager,
+          saved.id,
+          freeBreakdown,
+          saved.id,
+          event.currency || 'INR',
+        );
       }
 
       // Section 5b: generate signed ticket_code for confirmed events (enclosing enrollmentId and eventId)

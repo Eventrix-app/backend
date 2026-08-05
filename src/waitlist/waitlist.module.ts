@@ -8,6 +8,7 @@ import { Event } from '../entities/event.entity';
 import { Organizer } from '../entities/organizer.entity';
 import { WaitlistService } from './waitlist.service';
 import { FeeCalculationService } from '../payments/fee-calculation.service';
+import { LedgerService } from '../payments/ledger.service';
 
 @Module({
   imports: [
@@ -22,7 +23,7 @@ import { FeeCalculationService } from '../payments/fee-calculation.service';
       inject: [ConfigService],
     }),
   ],
-  providers: [WaitlistService, FeeCalculationService],
+  providers: [WaitlistService, FeeCalculationService, LedgerService],
   exports: [WaitlistService],
 })
 export class WaitlistModule {}

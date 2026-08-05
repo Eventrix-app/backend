@@ -6,7 +6,8 @@ import { WaitlistEntry, WaitlistStatus } from '../entities/waitlist-entry.entity
 import { Enrollment } from '../entities/enrollment.entity';
 import { Event, FeePayer } from '../entities/event.entity';
 import { Organizer } from '../entities/organizer.entity';
-import { FeeCalculationService } from '../payments/fee-calculation.service';
+import { FeeCalculationService, toCommissionConfig } from '../payments/fee-calculation.service';
+import { LedgerService } from '../payments/ledger.service';
 import { NotificationService } from '../notifications/notification.service';
 import { CacheService } from '../common/cache/cache.service';
 import { invalidateEventCaches } from '../events/utils/event-cache.util';
@@ -30,6 +31,7 @@ export class WaitlistService {
     private readonly notificationService: NotificationService,
     private readonly cache: CacheService,
     private readonly feeCalculationService: FeeCalculationService,
+    private readonly ledgerService: LedgerService,
   ) {}
 
   async join(eventId: string, ticketTypeId: string, userId: string, quantity: number): Promise<WaitlistEntryWithPosition> {
@@ -182,10 +184,7 @@ export class WaitlistService {
         const organizer = await manager.findOne(Organizer, { where: { id: event.organizerId } });
         const breakdown = this.feeCalculationService.calculate(
           baseAmount,
-          {
-            commissionRate: Number(organizer?.commissionRate ?? 0),
-            commissionFlatFee: Number(organizer?.commissionFlatFee ?? 0),
-          },
+          toCommissionConfig(organizer),
           event.feePayer,
         );
         totalAmount = breakdown.buyerPrice;
@@ -205,6 +204,28 @@ export class WaitlistService {
         bookingReference,
       });
       let saved = await manager.save(Enrollment, enrollment);
+
+      // Mirrors EventsService.enroll() again: a free booking created by promotion owes the
+      // platform the same flat free-event fee as one created directly, and neither reaches
+      // handleWebhook (there is no payment), so it has to be booked here. Without this, a
+      // free booking would escape the fee purely by having arrived via the waitlist.
+      if (baseAmount <= 0) {
+        const freeOrganizer = event
+          ? await manager.findOne(Organizer, { where: { id: event.organizerId } })
+          : null;
+        const freeBreakdown = this.feeCalculationService.calculate(
+          0,
+          toCommissionConfig(freeOrganizer),
+          event?.feePayer ?? FeePayer.ORGANIZER,
+        );
+        await this.ledgerService.recordFreeBookingLedger(
+          manager,
+          saved.id,
+          freeBreakdown,
+          saved.id,
+          event?.currency || 'INR',
+        );
+      }
 
       const ticketCode = this.jwtService.sign(
         { enrollmentId: saved.id, eventId: saved.eventId },

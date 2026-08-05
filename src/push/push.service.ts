@@ -25,7 +25,7 @@ export class PushService {
   ): Promise<void> {
     if (!pushToken) return;
     if (!Expo.isExpoPushToken(pushToken)) {
-      this.logger.warn(`Skipping push — not a valid Expo push token: ${pushToken}`);
+      this.logger.warn(`Skipping push — not a valid Expo push token: ${maskToken(pushToken)}`);
       return;
     }
 
@@ -33,7 +33,7 @@ export class PushService {
     try {
       const [ticket] = await this.expo.sendPushNotificationsAsync([message]);
       if (ticket.status === 'error') {
-        this.logger.error(`Expo push rejected for token ${pushToken}: ${ticket.message}`);
+        this.logger.error(`Expo push rejected for token ${maskToken(pushToken)}: ${ticket.message}`);
         return;
       }
       this.logger.log(`Push sent: "${title}"`);
@@ -41,4 +41,11 @@ export class PushService {
       this.logger.error(`Failed to send push "${title}": ${err instanceof Error ? err.message : String(err)}`);
     }
   }
+}
+
+// Push tokens are a capability, not just an identifier — whoever holds one can send
+// notifications to that device. Logged truncated so a log dump (or a shipped log
+// aggregator) doesn't hand them out, while keeping enough prefix to correlate entries.
+function maskToken(token: string): string {
+  return token.length <= 14 ? '<redacted>' : `${token.slice(0, 14)}…`;
 }

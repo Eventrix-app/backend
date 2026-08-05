@@ -12,7 +12,8 @@ import { Payment, PaymentGateway, PaymentStatus } from '../entities/payment.enti
 import { Commission } from '../entities/commission.entity';
 import { Refund, RefundStatus } from '../entities/refund.entity';
 import { Payout, PayoutStatus } from '../entities/payout.entity';
-import { FeeCalculationService, FeeBreakdown, OrganizerCommissionConfig } from './fee-calculation.service';
+import { TicketType } from '../entities/ticket-type.entity';
+import { FeeCalculationService, FeeBreakdown, OrganizerCommissionConfig, toCommissionConfig } from './fee-calculation.service';
 import type { InvoiceEmailLine } from '../email/templates';
 import { RazorpayService } from './razorpay.service';
 import { PayUService } from './payu.service';
@@ -20,6 +21,7 @@ import { LedgerService } from './ledger.service';
 import { WaitlistService } from '../waitlist/waitlist.service';
 import { NotificationService } from '../notifications/notification.service';
 import { FeeEstimateDto } from './dto/fee-estimate.dto';
+import { CheckoutEstimateDto } from './dto/checkout-estimate.dto';
 import { RequestRefundDto } from './dto/request-refund.dto';
 import { CreateOrderDto } from './dto/create-order.dto';
 import { VerifyPaymentDto } from './dto/verify-payment.dto';
@@ -64,6 +66,8 @@ export class PaymentsService {
     private readonly usersRepository: Repository<User>,
     @InjectRepository(Payout)
     private readonly payoutsRepository: Repository<Payout>,
+    @InjectRepository(TicketType)
+    private readonly ticketTypesRepository: Repository<TicketType>,
     private readonly dataSource: DataSource,
     private readonly configService: ConfigService,
     private readonly feeCalculationService: FeeCalculationService,
@@ -395,10 +399,82 @@ export class PaymentsService {
     // No organizer profile yet (e.g. previewing fees before ever creating an event):
     // fall back to platform-default rates (0% + 0 flat) rather than failing the preview.
     const commissionConfig: OrganizerCommissionConfig = organizer
-      ? { commissionRate: Number(organizer.commissionRate), commissionFlatFee: Number(organizer.commissionFlatFee) }
-      : { commissionRate: 0, commissionFlatFee: 0 };
+      ? toCommissionConfig(organizer)
+      // No organizer profile yet (previewing fees before ever creating an event): resolve to
+      // the platform default rather than an optimistic zero, so the preview matches reality.
+      : toCommissionConfig(null);
 
     return this.feeCalculationService.calculate(dto.ticketPrice, commissionConfig, dto.feePayer ?? FeePayer.ORGANIZER);
+  }
+
+  // Buyer-facing checkout preview: the exact amount enroll() will charge, computed by the
+  // same FeeCalculationService call enroll() makes, so the "Pay ₹X" button can never state a
+  // different number from what the gateway is asked for.
+  //
+  // Separate from getFeeEstimate() rather than a relaxation of it, for two reasons:
+  //   - that endpoint lets the caller name an organizer and returns organizerPayout, so it
+  //     stays 403-guarded against commission-rate enumeration. Here the client supplies only
+  //     a ticket tier and the organizer is resolved server-side, so there is nothing to guard.
+  //   - the fee lines returned here are BUYER-visible only. Under feePayer=ORGANIZER the
+  //     buyer pays exactly the ticket price and the organizer's commission is their own
+  //     business, so no fee lines are emitted at all — the same rule getTaxInvoice and
+  //     the emailed receipt already follow.
+  async getCheckoutEstimate(dto: CheckoutEstimateDto) {
+    const ticketType = await this.ticketTypesRepository.findOne({
+      where: { id: dto.ticketTypeId },
+      relations: ['event', 'event.organizer'],
+    });
+    if (!ticketType) throw new NotFoundException('Ticket type not found');
+
+    const unitPrice = Number(ticketType.price);
+    const subtotal = this.roundMoney(unitPrice * dto.quantity);
+    const feePayer = ticketType.event.feePayer;
+
+    // Mirrors EventsService.enroll(): the base amount is price x quantity, and fees are
+    // computed on that total, not per ticket.
+    const breakdown = this.feeCalculationService.calculate(
+      subtotal,
+      toCommissionConfig(ticketType.event.organizer),
+      feePayer,
+    );
+
+    const lines: { label: string; amount: number }[] = [];
+    // `buyerPrice > 0` is not redundant with the feePayer check. On a FREE event the
+    // platform still charges a flat fee, but it accrues against the organizer and the buyer
+    // pays nothing — so platformCommissionAmount is non-zero while buyerPrice is 0. Without
+    // this guard a free event would render "Platform fee ₹12.50" above a "Total ₹0".
+    if (feePayer === FeePayer.PARTICIPANT && breakdown.buyerPrice > 0) {
+      if (breakdown.platformCommissionAmount > 0) {
+        lines.push({ label: 'Platform fee', amount: breakdown.platformCommissionAmount });
+      }
+      if (breakdown.gatewayFeeAmount > 0) {
+        lines.push({ label: 'Payment gateway fee', amount: breakdown.gatewayFeeAmount });
+      }
+      if (breakdown.gstAmount > 0) {
+        const rate = Math.round((breakdown.gstAmount / breakdown.platformCommissionAmount) * 10000) / 100;
+        lines.push({
+          label: Number.isFinite(rate) && rate > 0 ? `GST (${rate}% on platform fee)` : 'GST on platform fee',
+          amount: breakdown.gstAmount,
+        });
+      }
+    }
+
+    return {
+      ticketTypeId: ticketType.id,
+      unitPrice,
+      quantity: dto.quantity,
+      subtotal,
+      feePayer,
+      currency: ticketType.currency || ticketType.event.currency || 'INR',
+      lines,
+      // What enroll() will persist as enrollment.totalAmount and what PayU will be asked to
+      // charge — free tiers included (buyerPrice is 0 there).
+      total: breakdown.buyerPrice,
+    };
+  }
+
+  private roundMoney(value: number): number {
+    return Math.round(value * 100) / 100;
   }
 
   // ---------------------------------------------------------------------
@@ -676,10 +752,7 @@ export class PaymentsService {
           : null;
         const refundBreakdown = this.feeCalculationService.calculateFromChargedAmount(
           Number(enrollment?.totalAmount || 0),
-          {
-            commissionRate: Number(refundOrganizer?.commissionRate ?? 0),
-            commissionFlatFee: Number(refundOrganizer?.commissionFlatFee ?? 0),
-          },
+          toCommissionConfig(refundOrganizer),
           enrollment?.event?.feePayer ?? FeePayer.ORGANIZER,
         );
         await this.ledgerService.recordRefundLedger(
@@ -817,6 +890,25 @@ export class PaymentsService {
         this.logger.warn(
           `Webhook ${dto.gatewayEventId} (${dto.status}) received for enrollment ${dto.enrollmentId} which is already "${enrollment.status}"; payment recorded but enrollment left untouched`,
         );
+      } else if (dto.status === 'success' && enrollment.paymentStatus === 'paid') {
+        // A SECOND, genuinely different successful payment for a booking that is already
+        // settled — not a duplicate delivery of the same one, which the gatewayEventId
+        // idempotency check above already absorbed.
+        //
+        // Reachable when a user opens two checkout sheets before either resolves: both are
+        // minted while the enrollment is still 'pending', and both can then succeed at PayU
+        // with distinct mihpayids. Re-running the settlement branch would write a second
+        // Commission row and a second full set of ledger entries, double-counting revenue
+        // and the organizer's payable against one ticket.
+        //
+        // The Payment row is still recorded above — it has to be, the money is real — but
+        // nothing downstream is re-booked. This is a genuine duplicate charge that needs
+        // refunding, so it is logged at error rather than swallowed quietly.
+        this.logger.error(
+          `Duplicate successful payment for enrollment ${dto.enrollmentId}: ${dto.gateway} payment ` +
+            `${dto.gatewayPaymentId} recorded, but the booking was already paid. The buyer has been ` +
+            `charged twice and needs a refund for this payment; no commission or ledger entries were booked for it.`,
+        );
       } else if (dto.status === 'success') {
         const organizer = await manager.findOne(Organizer, { where: { id: enrollment.event.organizerId } });
         // calculateFromChargedAmount, NOT calculate: dto.amount is the amount actually
@@ -826,10 +918,7 @@ export class PaymentsService {
         // every ledger entry below it.
         const breakdown = this.feeCalculationService.calculateFromChargedAmount(
           dto.amount,
-          {
-            commissionRate: Number(organizer?.commissionRate ?? 0),
-            commissionFlatFee: Number(organizer?.commissionFlatFee ?? 0),
-          },
+          toCommissionConfig(organizer),
           enrollment.event.feePayer,
         );
 
@@ -869,7 +958,7 @@ export class PaymentsService {
 
         issuedInvoice = {
           userId: enrollment.userId,
-          // Same number getInvoiceData() returns, so the emailed receipt and the in-app
+          // Same number getTaxInvoice() returns, so the emailed receipt and the in-app
           // invoice screen always agree on the identifier.
           invoiceNumber: `INV-${enrollment.bookingReference}`,
           enrollmentId: enrollment.id,
@@ -952,8 +1041,22 @@ export class PaymentsService {
       .andWhere('enrollment.paymentStatus = :paymentStatus', { paymentStatus: 'paid' })
       .andWhere('enrollment.payoutId IS NULL')
       .andWhere(
-        `(event.event_date::timestamp + COALESCE(event.end_time, event.start_time, '00:00')::interval)
-           <= (:now::timestamp - make_interval(days => :delayDays))`,
+        // Must mirror getEventEndDateTime() exactly, or this pre-filter silently disagrees
+        // with the authoritative JS check below:
+        //   - COALESCE(event_end_date, event_date): a multi-day event ends on its LAST day.
+        //     Using event_date alone made this looser than the JS check (harmless, just
+        //     wasted work), but it is wrong and would bite the moment the order of the two
+        //     checks changed.
+        //   - AT TIME ZONE 'Asia/Kolkata': event_date/start_time are civil IST wall-clock
+        //     values with no stored offset (see event-dates.util.ts). Comparing them as if
+        //     they were UTC made this filter 5.5 HOURS STRICTER than the JS check, which
+        //     delayed every single-day event's payout by that much — the dangerous
+        //     direction, since a pre-filter that excludes a due event means it is simply
+        //     never paid on time.
+        `((COALESCE(event.event_end_date, event.event_date)::timestamp
+             + COALESCE(event.end_time, event.start_time, '00:00')::interval
+          ) AT TIME ZONE 'Asia/Kolkata')
+           <= (:now::timestamptz - make_interval(days => :delayDays))`,
         { now, delayDays },
       )
       .getRawMany<{ eventId: string }>();
@@ -1040,10 +1143,7 @@ export class PaymentsService {
         return null;
       }
 
-      const commissionConfig: OrganizerCommissionConfig = {
-        commissionRate: Number(organizer.commissionRate),
-        commissionFlatFee: Number(organizer.commissionFlatFee),
-      };
+      const commissionConfig: OrganizerCommissionConfig = toCommissionConfig(organizer);
 
       // Totals are accumulated per-fee (not just the payout) so the organizer's settlement
       // email can show the same breakdown the payout was actually derived from, rather than
@@ -1115,7 +1215,56 @@ export class PaymentsService {
     });
   }
 
-  async getInvoiceData(userId: string, enrollmentId: string) {
+  // The single invoice view: a flat, GST-invoice-shaped projection of a settled booking.
+  // Consumed by both invoice UIs (the Tax Invoice sheet on BookingsScreen and
+  // InvoiceDetailScreen) — there was briefly a second, nested shape on its own route, which
+  // meant two endpoints returning the same data in two formats for no benefit.
+  //
+  // Every buyer-facing amount follows the same rule as the emailed receipt: under feePayer=ORGANIZER the buyer paid exactly the ticket price, so the fee and
+  // tax lines are reported as 0 rather than disclosing what the organizer was charged. They
+  // are not "missing" — the buyer genuinely was not billed them.
+  async getTaxInvoice(userId: string, enrollmentId: string) {
+    const { enrollment, payment, breakdown } = await this.loadInvoiceContext(userId, enrollmentId);
+    // Same rule as getCheckoutEstimate: a free booking's platform fee is an organizer
+    // receivable, never something the buyer was charged, so it must not appear on their
+    // invoice — buyerPrice is 0 there even though platformCommissionAmount is not.
+    const buyerPaidFees = breakdown.feePayer === FeePayer.PARTICIPANT && breakdown.buyerPrice > 0;
+    const quantity = enrollment.quantity || 1;
+
+    return {
+      invoiceNumber: `INV-${enrollment.bookingReference}`,
+      invoiceDate: payment?.createdAt || enrollment.createdAt,
+      enrollmentId: enrollment.id,
+      bookingReference: enrollment.bookingReference,
+      eventTitle: enrollment.event.title,
+      eventDate: enrollment.event.eventDate,
+      venueName: enrollment.event.venueName,
+      ticketTypeName: enrollment.ticketType?.name || 'Standard Entry',
+      quantity,
+      // breakdown.ticketPrice is the base across the whole order, so divide back out.
+      unitPrice: this.roundMoney(breakdown.ticketPrice / quantity),
+      subtotalBeforeTax: buyerPaidFees ? breakdown.subtotalBeforeTax : breakdown.buyerPrice,
+      gstRate: this.configService.get<number>('tax.gstRate', 0),
+      gstAmount: buyerPaidFees ? breakdown.gstAmount : 0,
+      // Commission and gateway fee are one "platform fee" line to the buyer — the split
+      // between what the platform keeps and what the gateway takes is not their concern.
+      platformFeeAmount: buyerPaidFees
+        ? this.roundMoney(breakdown.platformCommissionAmount + breakdown.gatewayFeeAmount)
+        : 0,
+      totalAmountPaid: breakdown.buyerPrice,
+      buyerName: enrollment.user.fullName,
+      buyerEmail: enrollment.user.email,
+      organizerName: enrollment.event.organizer?.companyName || 'Eventrix Host',
+      // Undefined for an organizer below the GST registration threshold — the invoice omits
+      // the line rather than printing an empty field.
+      organizerGstin: enrollment.event.organizer?.gstin || undefined,
+    };
+  }
+
+  // Shared loader for both invoice shapes — ownership, paid-status and the fee split are
+  // identical concerns, and duplicating them risks the two views disagreeing about who may
+  // see what.
+  private async loadInvoiceContext(userId: string, enrollmentId: string) {
     const enrollment = await this.enrollmentsRepository.findOne({
       where: { id: enrollmentId },
       relations: ['event', 'event.organizer', 'ticketType', 'user'],
@@ -1132,42 +1281,15 @@ export class PaymentsService {
       where: { enrollmentId: enrollment.id, status: PaymentStatus.SUCCESS },
     });
 
-    // Same reason as handleWebhook/settleEventPayout: totalAmount is the charged amount, so
-    // it must be split, not re-marked-up. Using calculate() here printed an invoice whose
-    // "total" exceeded what the buyer was actually billed — a tax document stating an
-    // amount that was never charged.
     const breakdown = this.feeCalculationService.calculateFromChargedAmount(
       Number(enrollment.totalAmount),
-      {
-        commissionRate: Number(enrollment.event.organizer?.commissionRate ?? 0),
-        commissionFlatFee: Number(enrollment.event.organizer?.commissionFlatFee ?? 0),
-      },
+      toCommissionConfig(enrollment.event.organizer),
       enrollment.event.feePayer,
     );
 
-    return {
-      invoiceNumber: `INV-${enrollment.bookingReference}`,
-      issueDate: payment?.createdAt || enrollment.createdAt,
-      bookingReference: enrollment.bookingReference,
-      event: {
-        id: enrollment.event.id,
-        title: enrollment.event.title,
-        eventDate: enrollment.event.eventDate,
-        venueName: enrollment.event.venueName,
-      },
-      organizer: {
-        companyName: enrollment.event.organizer?.companyName || 'Eventrix Host',
-      },
-      participant: {
-        fullName: enrollment.user.fullName,
-        email: enrollment.user.email,
-      },
-      ticketType: enrollment.ticketType?.name || 'Standard Entry',
-      quantity: enrollment.quantity,
-      currency: enrollment.event.currency || 'INR',
-      breakdown,
-    };
+    return { enrollment, payment, breakdown };
   }
+
 }
 
 // What settleEventPayout hands back so runPayoutSweep can notify the organizer once the
@@ -1194,7 +1316,8 @@ function round2(value: number): number {
 // itemising platform/gateway/GST there would state charges they never incurred.
 function buildInvoiceEmailLines(breakdown: FeeBreakdown): InvoiceEmailLine[] {
   const lines: InvoiceEmailLine[] = [{ label: 'Ticket price', amount: breakdown.ticketPrice }];
-  if (breakdown.feePayer !== FeePayer.PARTICIPANT) return lines;
+  // buyerPrice > 0 excludes free bookings, whose platform fee is billed to the organizer.
+  if (breakdown.feePayer !== FeePayer.PARTICIPANT || breakdown.buyerPrice <= 0) return lines;
 
   if (breakdown.platformCommissionAmount > 0) {
     lines.push({ label: 'Platform fee', amount: breakdown.platformCommissionAmount });

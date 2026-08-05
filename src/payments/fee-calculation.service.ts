@@ -2,9 +2,32 @@ import { Injectable } from '@nestjs/common';
 import { ConfigService } from '@nestjs/config';
 import { FeePayer } from '../entities/event.entity';
 
+// Nullable on purpose: null/undefined means "this organizer has no negotiated rate — apply
+// the platform default" (config `platform.commissionPercent`). An explicit number always
+// wins, INCLUDING an explicit 0 for a commission-free partner. Callers must therefore pass
+// the raw column through rather than coercing it with `?? 0`, which would silently turn
+// every unconfigured organizer into a negotiated-zero one and defeat the default entirely.
 export interface OrganizerCommissionConfig {
-  commissionRate: number; // percent, e.g. 10 = 10%
-  commissionFlatFee: number;
+  commissionRate?: number | null; // percent, e.g. 10 = 10%
+  commissionFlatFee?: number | null;
+}
+
+// Maps an organizer row (or its absence) to a commission config WITHOUT flattening null to 0.
+// Every call site should go through this: `Number(organizer?.commissionRate ?? 0)` looks
+// harmless but converts "no negotiated rate" into "negotiated 0%", which silently suppresses
+// the platform default for every organizer who has never had a rate set — i.e. all of them.
+// Decimal columns arrive from pg as strings, hence the Number() on the non-null branch.
+//
+// A missing organizer resolves to the platform default too, which is right for the
+// fee-estimate preview a user sees before they have an organizer profile at all: it shows
+// what they will actually be charged rather than an optimistic zero.
+export function toCommissionConfig(
+  organizer: { commissionRate?: number | null; commissionFlatFee?: number | null } | null | undefined,
+): OrganizerCommissionConfig {
+  return {
+    commissionRate: organizer?.commissionRate == null ? null : Number(organizer.commissionRate),
+    commissionFlatFee: organizer?.commissionFlatFee == null ? null : Number(organizer.commissionFlatFee),
+  };
 }
 
 export interface FeeBreakdown {
@@ -34,15 +57,25 @@ export class FeeCalculationService {
     feePayer: FeePayer = FeePayer.ORGANIZER,
   ): FeeBreakdown {
     const price = Number(ticketPrice);
+    const gstRate = this.configService.get<number>('tax.gstRate', 0);
 
-    // Free events: no commission/gateway fee applies either way.
+    // Free events. The attendee is charged nothing and no gateway is involved, but the
+    // platform still takes a flat fee — which, having no payment to be netted out of,
+    // accrues against the organizer as a receivable instead (see LedgerService's
+    // recordFreeBookingLedger). buyerPrice stays 0, which is what keeps EventsService.
+    // enroll()'s instant-confirm path for free bookings intact.
+    //
+    // organizerPayout is 0 rather than negative: it means "nothing is paid out", not "the
+    // organizer is owed nothing". The debt lives in the ledger, and the payout sweep has no
+    // concept of a negative payout to express it with.
     if (!price || price <= 0) {
+      const freeEventFee = this.round(this.configService.get<number>('platform.freeEventFee', 12.5));
       return {
         ticketPrice: 0,
         feePayer,
-        platformCommissionAmount: 0,
+        platformCommissionAmount: freeEventFee,
         gatewayFeeAmount: 0,
-        gstAmount: 0,
+        gstAmount: this.round(freeEventFee * (gstRate / 100)),
         subtotalBeforeTax: 0,
         buyerPrice: 0,
         organizerPayout: 0,
@@ -51,11 +84,14 @@ export class FeeCalculationService {
 
     const gatewayFeePercent = this.configService.get<number>('gatewayFee.percent', 2);
     const gatewayFeeFlat = this.configService.get<number>('gatewayFee.flat', 3);
-    const gstRate = this.configService.get<number>('tax.gstRate', 0);
 
-    const platformCommissionAmount = this.round(
-      price * (Number(organizer.commissionRate ?? 0) / 100) + Number(organizer.commissionFlatFee ?? 0),
-    );
+    // `?? platformDefault`, not `?? 0` — see OrganizerCommissionConfig. Only null/undefined
+    // falls through to the default; an explicit 0 is honoured as a negotiated zero rate.
+    const commissionRate =
+      organizer.commissionRate ?? this.configService.get<number>('platform.commissionPercent', 5);
+    const commissionFlatFee = organizer.commissionFlatFee ?? 0;
+
+    const platformCommissionAmount = this.round(price * (Number(commissionRate) / 100) + Number(commissionFlatFee));
     const gatewayFeeAmount = this.round(price * (gatewayFeePercent / 100) + gatewayFeeFlat);
     const gstAmount = this.round(platformCommissionAmount * (gstRate / 100));
 
@@ -111,7 +147,10 @@ export class FeeCalculationService {
     const g = this.configService.get<number>('gatewayFee.percent', 2) / 100;
     const gf = this.configService.get<number>('gatewayFee.flat', 3);
     const t = this.configService.get<number>('tax.gstRate', 0) / 100;
-    const r = Number(organizer.commissionRate ?? 0) / 100;
+    // Must resolve the platform default identically to calculate(), or the inverse would
+    // invert a different formula than the one that produced the charged amount.
+    const r =
+      Number(organizer.commissionRate ?? this.configService.get<number>('platform.commissionPercent', 5)) / 100;
     const f = Number(organizer.commissionFlatFee ?? 0);
 
     // Forward formula, with each component's rounding dropped:

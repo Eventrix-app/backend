@@ -9,6 +9,7 @@ import { Throttle } from '@nestjs/throttler';
 import { PaymentsService } from './payments.service';
 import { RazorpayService } from './razorpay.service';
 import { FeeEstimateDto } from './dto/fee-estimate.dto';
+import { CheckoutEstimateDto } from './dto/checkout-estimate.dto';
 import { RequestRefundDto } from './dto/request-refund.dto';
 import { RejectRefundDto } from './dto/reject-refund.dto';
 import { CreateOrderDto } from './dto/create-order.dto';
@@ -106,6 +107,10 @@ export class PaymentsController {
   // (unlike payu/return, this is a direct authenticated call from our own app mid-session, not
   // an unauthenticated redirect from PayU's server) since the salt-secrecy property doesn't
   // depend on knowing which hash type is being requested.
+  // Rate-limited on top of the merchant-key/command guard in PayUService.signHash: this is
+  // the one endpoint that applies the merchant salt to caller-supplied input, so it should
+  // never be cheap to probe in bulk. A real checkout asks for only a handful of hashes.
+  @Throttle({ default: { limit: 30, ttl: 60000 } })
   @Post('payu/sign-hash')
   @HttpCode(HttpStatus.OK)
   signPayUHash(@Body() dto: SignPayUHashDto, @Request() req: Request & { user: JwtPayload }) {
@@ -157,9 +162,22 @@ export class PaymentsController {
     return await this.paymentsService.getFeeEstimate(dto, req.user.id, req.user.roles);
   }
 
-  @Get('invoice/:enrollmentId')
-  async getInvoiceData(@Param('enrollmentId', ParseUUIDPipe) enrollmentId: string, @Request() req: Request & { user: JwtPayload }) {
-    return await this.paymentsService.getInvoiceData(req.user.id, enrollmentId);
+  // Buyer-facing counterpart to fee-estimate above: the exact total enroll() will charge for
+  // a given tier + quantity. Unlike fee-estimate it takes no organizerId (the server resolves
+  // it from the tier) and returns no organizer economics, so it needs no ownership guard —
+  // see PaymentsService.getCheckoutEstimate.
+  @Get('checkout-estimate')
+  async getCheckoutEstimate(@Query() dto: CheckoutEstimateDto) {
+    return await this.paymentsService.getCheckoutEstimate(dto);
+  }
+
+  // The one invoice endpoint. Both invoice UIs (BookingsScreen's Tax Invoice sheet and
+  // InvoiceDetailScreen) read this same shape — a second, nested variant on `invoice/:id`
+  // briefly existed and was removed: two routes returning the same booking in two formats
+  // is two things to keep in sync for no benefit.
+  @Get('invoices/:enrollmentId')
+  async getTaxInvoice(@Param('enrollmentId', ParseUUIDPipe) enrollmentId: string, @Request() req: Request & { user: JwtPayload }) {
+    return await this.paymentsService.getTaxInvoice(req.user.id, enrollmentId);
   }
 
   @Post('refunds')

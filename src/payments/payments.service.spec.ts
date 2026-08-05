@@ -1,4 +1,4 @@
-import { BadRequestException, ConflictException } from '@nestjs/common';
+import { BadRequestException, ConflictException, NotFoundException } from '@nestjs/common';
 import { PaymentsService } from './payments.service';
 import { RefundStatus } from '../entities/refund.entity';
 
@@ -16,6 +16,7 @@ describe('PaymentsService — paymentStatus enforcement', () => {
   let mockOrganizersRepo: any;
   let mockUsersRepo: any;
   let mockPayoutsRepo: any;
+  let mockTicketTypesRepo: any;
   let mockDataSource: any;
   let mockConfigService: any;
   let mockFeeCalculationService: any;
@@ -45,6 +46,7 @@ describe('PaymentsService — paymentStatus enforcement', () => {
     mockOrganizersRepo = { findOne: jest.fn() };
     mockUsersRepo = { findOne: jest.fn() };
     mockPayoutsRepo = {};
+    mockTicketTypesRepo = { findOne: jest.fn() };
     mockDataSource = { transaction: jest.fn() };
     mockConfigService = { get: jest.fn((key: string, def: any) => def) };
     // Settlement, payout and invoicing all split an ALREADY-CHARGED amount, so they go
@@ -90,6 +92,7 @@ describe('PaymentsService — paymentStatus enforcement', () => {
       mockOrganizersRepo,
       mockUsersRepo,
       mockPayoutsRepo,
+      mockTicketTypesRepo,
       mockDataSource,
       mockConfigService,
       mockFeeCalculationService,
@@ -367,6 +370,98 @@ describe('PaymentsService — paymentStatus enforcement', () => {
       mockPayUService.signHash.mockReturnValue('signed-hash');
       expect(service.signPayUHash('raw-string')).toBe('signed-hash');
       expect(mockPayUService.signHash).toHaveBeenCalledWith('raw-string');
+    });
+  });
+
+  // The whole point of this endpoint: the number on the "Pay ₹X" button must be the number
+  // the gateway is actually asked for. CheckoutScreen previously computed it client-side from
+  // hardcoded constants (flat ₹9 + 18% of the ticket), which matched nothing the backend does.
+  describe('getCheckoutEstimate', () => {
+    const tier = (price: number, feePayer: string, organizer: unknown) => ({
+      id: 'tt-1',
+      price: String(price),
+      currency: 'INR',
+      event: { feePayer, currency: 'INR', organizer },
+    });
+
+    it('adds no fees on top under the default organizer-pays configuration', async () => {
+      mockTicketTypesRepo.findOne.mockResolvedValue(tier(1000, 'organizer', { commissionRate: 10, commissionFlatFee: 0 }));
+      mockFeeCalculationService.calculate.mockReturnValue({
+        platformCommissionAmount: 100,
+        gatewayFeeAmount: 23,
+        gstAmount: 18,
+        buyerPrice: 1000,
+      });
+
+      const result = await service.getCheckoutEstimate({ ticketTypeId: 'tt-1', quantity: 1 });
+
+      expect(result.total).toBe(1000);
+      // The organizer's commission is their own business — never itemised to the buyer, who
+      // was not charged it.
+      expect(result.lines).toEqual([]);
+    });
+
+    it('itemises every fee the buyer actually pays under participant-pays', async () => {
+      mockTicketTypesRepo.findOne.mockResolvedValue(tier(1000, 'participant', { commissionRate: 10, commissionFlatFee: 0 }));
+      mockFeeCalculationService.calculate.mockReturnValue({
+        platformCommissionAmount: 100,
+        gatewayFeeAmount: 23,
+        gstAmount: 18,
+        buyerPrice: 1141,
+      });
+
+      const result = await service.getCheckoutEstimate({ ticketTypeId: 'tt-1', quantity: 1 });
+
+      expect(result.total).toBe(1141);
+      expect(result.lines).toEqual([
+        { label: 'Platform fee', amount: 100 },
+        { label: 'Payment gateway fee', amount: 23 },
+        { label: 'GST (18% on platform fee)', amount: 18 },
+      ]);
+      // Subtotal + itemised lines must reconcile to the total, or the summary visibly fails
+      // to add up on screen.
+      expect(result.subtotal + result.lines.reduce((s, l) => s + l.amount, 0)).toBe(result.total);
+    });
+
+    it('computes fees on price x quantity, the same base enroll() uses', async () => {
+      mockTicketTypesRepo.findOne.mockResolvedValue(tier(250, 'participant', { commissionRate: 0, commissionFlatFee: 0 }));
+      mockFeeCalculationService.calculate.mockReturnValue({
+        platformCommissionAmount: 0,
+        gatewayFeeAmount: 23,
+        gstAmount: 0,
+        buyerPrice: 1023,
+      });
+
+      const result = await service.getCheckoutEstimate({ ticketTypeId: 'tt-1', quantity: 4 });
+
+      expect(mockFeeCalculationService.calculate).toHaveBeenCalledWith(1000, expect.anything(), 'participant');
+      expect(result.subtotal).toBe(1000);
+    });
+
+    it('404s for a ticket type that does not exist', async () => {
+      mockTicketTypesRepo.findOne.mockResolvedValue(null);
+      await expect(service.getCheckoutEstimate({ ticketTypeId: 'tt-x', quantity: 1 })).rejects.toThrow(NotFoundException);
+    });
+
+    it('falls through to the platform default when the organizer has no negotiated rate', async () => {
+      mockTicketTypesRepo.findOne.mockResolvedValue(tier(500, 'participant', null));
+      mockFeeCalculationService.calculate.mockReturnValue({
+        platformCommissionAmount: 0,
+        gatewayFeeAmount: 13,
+        gstAmount: 0,
+        buyerPrice: 513,
+      });
+
+      const result = await service.getCheckoutEstimate({ ticketTypeId: 'tt-1', quantity: 1 });
+
+      // null, NOT 0 — the fee service resolves null to the platform default (5%). Passing 0
+      // here would read as a negotiated commission-free deal and suppress the default.
+      expect(mockFeeCalculationService.calculate).toHaveBeenCalledWith(
+        500,
+        { commissionRate: null, commissionFlatFee: null },
+        'participant',
+      );
+      expect(result.total).toBe(513);
     });
   });
 
@@ -830,6 +925,49 @@ describe('PaymentsService — paymentStatus enforcement', () => {
     });
   });
 
+  // Two checkout sheets opened before either resolves are both minted while the enrollment
+  // is still 'pending', so both can succeed at PayU with distinct mihpayids. The
+  // gatewayEventId idempotency check does not catch that — they are genuinely different
+  // payments — so without an explicit guard the settlement branch ran twice and booked two
+  // Commission rows plus two full sets of ledger entries against one ticket.
+  it('records a second successful payment but does not re-book commission or ledger', async () => {
+    const enrollment = {
+      id: 'enr-dup',
+      userId: 'user-1',
+      eventId: 'event-1',
+      bookingReference: 'BK-DUP',
+      quantity: 1,
+      status: 'confirmed',
+      paymentStatus: 'paid', // already settled by the first payment
+      totalAmount: '199.50',
+      event: futureEvent,
+    };
+    const manager = {
+      findOne: jest.fn().mockResolvedValueOnce(null).mockResolvedValueOnce(enrollment),
+      create: jest.fn((entity: any, data: any) => data),
+      save: jest.fn((entity: any, data: any) => Promise.resolve({ id: 'payment-dup', ...data })),
+      transaction: jest.fn((cb: any) => cb(manager)),
+    };
+    mockDataSource.transaction.mockImplementation((cb: any) => cb(manager));
+
+    const payment = await service.handleWebhook({
+      gateway: 'payu',
+      gatewayEventId: 'mihpay-second',
+      gatewayPaymentId: 'mihpay-second',
+      enrollmentId: 'enr-dup',
+      amount: 199.5,
+      status: 'success',
+    } as any);
+
+    // The money is real, so the Payment row is still written for the audit trail.
+    expect(payment).toBeDefined();
+    // But nothing downstream is double-counted.
+    expect(mockLedgerService.recordPaymentLedger).not.toHaveBeenCalled();
+    expect(mockFeeCalculationService.calculateFromChargedAmount).not.toHaveBeenCalled();
+    // And the buyer is not told they are confirmed a second time.
+    expect(mockNotificationService.notifyBookingConfirmed).not.toHaveBeenCalled();
+  });
+
   describe('runPayoutSweep candidate query', () => {
     it('filters payout candidates to paid enrollments only', async () => {
       const qb: any = {};
@@ -846,6 +984,31 @@ describe('PaymentsService — paymentStatus enforcement', () => {
       await service.runPayoutSweep();
 
       expect(qb.andWhere).toHaveBeenCalledWith('enrollment.paymentStatus = :paymentStatus', { paymentStatus: 'paid' });
+    });
+
+    // This predicate is raw SQL that no test executes against a real database, and it has to
+    // agree with getEventEndDateTime(). Two ways it silently went wrong before: using
+    // event_date instead of event_end_date (wrong end for a multi-day event), and comparing
+    // IST wall-clock values as if they were UTC, which made the filter 5.5h STRICTER than
+    // the authoritative JS check and delayed every single-day payout by that much.
+    it('filters on the multi-day end date, interpreted as IST', async () => {
+      const qb: any = {};
+      qb.select = jest.fn().mockReturnValue(qb);
+      qb.distinct = jest.fn().mockReturnValue(qb);
+      qb.innerJoin = jest.fn().mockReturnValue(qb);
+      qb.where = jest.fn().mockReturnValue(qb);
+      qb.andWhere = jest.fn().mockReturnValue(qb);
+      qb.getRawMany = jest.fn().mockResolvedValue([]);
+      mockEnrollmentsRepo.createQueryBuilder.mockReturnValue(qb);
+
+      await service.runPayoutSweep();
+
+      const predicate = qb.andWhere.mock.calls.map((c: unknown[]) => String(c[0])).join('\n');
+      expect(predicate).toContain('COALESCE(event.event_end_date, event.event_date)');
+      expect(predicate).toContain("AT TIME ZONE 'Asia/Kolkata'");
+      // timestamptz, not timestamp — an absolute instant compared against the converted
+      // event end, rather than two naive values living in different frames.
+      expect(predicate).toContain(':now::timestamptz');
     });
 
     it('filters to events already past their payout delay in SQL, not in JS', async () => {

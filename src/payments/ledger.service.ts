@@ -91,6 +91,61 @@ export class LedgerService {
   }
 
   /**
+   * Records the platform fee on a FREE booking.
+   *
+   * Unlike every other fee here, this one has no payment to be netted out of — the attendee
+   * paid nothing and no gateway was involved. It is therefore booked as a straight
+   * receivable: ORGANIZER_PAYABLE goes negative by the fee, PLATFORM_REVENUE goes up by it.
+   *
+   * ⚠️ Nothing currently COLLECTS that receivable. There is no organizer invoicing, and the
+   * payout sweep only ever moves money in the organizer's favour (it has no concept of a
+   * negative payout). So this records the debt accurately and it accumulates — reconciling
+   * or billing it is a separate, unbuilt piece. See PAYMENT_MODEL.md before treating the
+   * PLATFORM_REVENUE side of this as realised revenue.
+   */
+  async recordFreeBookingLedger(
+    manager: EntityManager,
+    transactionId: string,
+    breakdown: FeeBreakdown,
+    referenceId: string,
+    currency = 'INR',
+  ): Promise<LedgerEntry[]> {
+    if (breakdown.platformCommissionAmount <= 0) return [];
+
+    const entries: Partial<LedgerEntry>[] = [
+      {
+        transactionId,
+        debitAccount: LedgerAccount.ORGANIZER_PAYABLE,
+        creditAccount: LedgerAccount.PLATFORM_REVENUE,
+        amount: breakdown.platformCommissionAmount,
+        currency,
+        entryType: LedgerEntryType.COMMISSION,
+        referenceId,
+      },
+    ];
+
+    // GST on that fee is the platform's own output tax, funded out of the fee it just
+    // booked — the same treatment as feePayer=ORGANIZER on a paid booking, and for the same
+    // reason: the buyer contributed nothing towards it.
+    if (breakdown.gstAmount > 0) {
+      entries.push({
+        transactionId,
+        debitAccount: LedgerAccount.PLATFORM_REVENUE,
+        creditAccount: LedgerAccount.GST_OUTPUT_TAX,
+        amount: breakdown.gstAmount,
+        currency,
+        entryType: LedgerEntryType.GST_TAX,
+        referenceId,
+      });
+    }
+
+    const created = manager.create(LedgerEntry, entries);
+    const saved = await manager.save(LedgerEntry, created);
+    this.logger.log(`Recorded free-booking platform fee for transaction ${transactionId}`);
+    return saved;
+  }
+
+  /**
    * Records organizer payout execution.
    */
   async recordPayoutLedger(

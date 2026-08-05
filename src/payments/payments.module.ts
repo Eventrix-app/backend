@@ -16,11 +16,12 @@ import { Organizer } from '../entities/organizer.entity';
 import { User } from '../entities/user.entity';
 import { Payout } from '../entities/payout.entity';
 import { LedgerEntry } from '../entities/ledger-entry.entity';
+import { TicketType } from '../entities/ticket-type.entity';
 import { WaitlistModule } from '../waitlist/waitlist.module';
 
 @Module({
   imports: [
-    TypeOrmModule.forFeature([Payment, Commission, Refund, Enrollment, Event, Organizer, User, Payout, LedgerEntry]),
+    TypeOrmModule.forFeature([Payment, Commission, Refund, Enrollment, Event, Organizer, User, Payout, LedgerEntry, TicketType]),
     WaitlistModule,
   ],
   controllers: [PaymentsController],

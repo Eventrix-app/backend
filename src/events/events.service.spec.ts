@@ -18,6 +18,7 @@ import { WaitlistService } from '../waitlist/waitlist.service';
 import { NotificationService } from '../notifications/notification.service';
 import { CacheService } from '../common/cache/cache.service';
 import { FeeCalculationService } from '../payments/fee-calculation.service';
+import { LedgerService } from '../payments/ledger.service';
 
 describe('EventsService - Fixed Issues', () => {
   let service: EventsService;
@@ -37,6 +38,7 @@ describe('EventsService - Fixed Issues', () => {
   let mockNotificationService: any;
   let mockCacheService: any;
   let mockFeeCalculationService: any;
+  let mockLedgerService: any;
 
   beforeEach(async () => {
     mockEventRepo = {
@@ -139,6 +141,9 @@ describe('EventsService - Fixed Issues', () => {
       bumpVersion: jest.fn().mockResolvedValue(undefined),
     };
 
+    // Free bookings book the platform's flat free-event fee straight to the ledger
+    // (no payment exists to net it out of) — see EventsService.enroll().
+    mockLedgerService = { recordFreeBookingLedger: jest.fn().mockResolvedValue([]) };
     mockFeeCalculationService = {
       calculate: jest.fn(),
     };
@@ -162,6 +167,7 @@ describe('EventsService - Fixed Issues', () => {
         { provide: NotificationService, useValue: mockNotificationService },
         { provide: CacheService, useValue: mockCacheService },
         { provide: FeeCalculationService, useValue: mockFeeCalculationService },
+        { provide: LedgerService, useValue: mockLedgerService },
       ],
     }).compile();
 

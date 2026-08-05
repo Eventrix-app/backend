@@ -59,6 +59,10 @@ export const validateEnv = (config: Record<string, unknown>) => {
     // path inert — see configuration.ts's `tax.gstRate` comment for why that is the default
     // rather than 18.
     TAX_GST_RATE: Joi.number().min(0).max(100).optional(),
+    // Platform default commission (percent) for organizers with no negotiated rate, and the
+    // flat fee charged per free-event booking. See configuration.ts's `platform` block.
+    PLATFORM_COMMISSION_PERCENT: Joi.number().min(0).max(100).optional(),
+    PLATFORM_FREE_EVENT_FEE: Joi.number().min(0).optional(),
     GATEWAY_FEE_PERCENT: Joi.number().optional(),
     GATEWAY_FEE_FLAT: Joi.number().optional(),
     REFUND_WINDOW_HOURS: Joi.number().optional(),

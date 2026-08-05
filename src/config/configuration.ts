@@ -65,13 +65,30 @@ export default () => ({
     // Defaults to 0 (inert) rather than 18 on purpose: a deployment that has not yet
     // registered for GST must not start collecting it, and FeeCalculationService's
     // `gstRate / 100` term collapses the whole GST path to zero when unset. Set
-    // TAX_GST_RATE=18 explicitly once the GSTIN is live — see docs/PAYMENT_CONFIG.md.
+    // TAX_GST_RATE=18 explicitly once the GSTIN is live.
     //
     // Who actually funds this depends on event.feePayer, and LedgerService.
     // recordPaymentLedger() books it from a different account for each case (see its
     // GST comment): PARTICIPANT means the buyer paid it on top and it is remitted out of
     // the buyer's money; ORGANIZER means the platform absorbs it out of its own commission.
     gstRate: Number(process.env.TAX_GST_RATE) || 0,
+  },
+  platform: {
+    // Default commission applied when an organizer has NO negotiated rate of their own
+    // (organizers.commission_rate IS NULL). An explicit value on the organizer row — including
+    // an explicit 0 for a commission-free partner — always wins, which is why that column is
+    // nullable rather than defaulting to 0: "never set" and "negotiated at zero" have to be
+    // distinguishable or the platform default can never apply.
+    commissionPercent: Number(process.env.PLATFORM_COMMISSION_PERCENT) || 5,
+
+    // Flat fee charged per free-event booking. Free events collect nothing from the attendee,
+    // so unlike every other fee this one is NOT netted out of a payment — it accrues against
+    // the organizer as a platform receivable (ORGANIZER_PAYABLE goes negative by this amount).
+    // The attendee still books at ₹0 with no gateway involved.
+    //
+    // NOTE: nothing currently COLLECTS that receivable. It is recorded, not invoiced — see
+    // the free-event section in PAYMENT_MODEL.md before treating it as revenue.
+    freeEventFee: Number(process.env.PLATFORM_FREE_EVENT_FEE ?? 12.5),
   },
   gatewayFee: {
     // Blended default approximating Razorpay/PayU's published rates (2% + flat ₹3/txn).

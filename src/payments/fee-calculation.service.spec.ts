@@ -33,18 +33,28 @@ describe('FeeCalculationService', () => {
     await build();
   });
 
-  it('applies no fees to free events', () => {
+  // A free event charges the ATTENDEE nothing but still costs the ORGANIZER a flat platform
+  // fee. buyerPrice staying 0 is what keeps EventsService.enroll()'s instant-confirm path for
+  // free bookings intact — the fee is a receivable, not something to collect at checkout.
+  it('charges the organizer a flat fee on a free event while the buyer pays nothing', () => {
     const result = service.calculate(0, { commissionRate: 10, commissionFlatFee: 5 }, FeePayer.ORGANIZER);
     expect(result).toEqual({
       ticketPrice: 0,
       feePayer: FeePayer.ORGANIZER,
-      platformCommissionAmount: 0,
-      gatewayFeeAmount: 0,
-      gstAmount: 0,
+      platformCommissionAmount: 12.5,
+      gatewayFeeAmount: 0, // no payment is processed, so no gateway takes a cut
+      gstAmount: 0, // GST disabled in this block; see the 18% block below
       subtotalBeforeTax: 0,
       buyerPrice: 0,
       organizerPayout: 0,
     });
+  });
+
+  it('ignores the organizer commission rate on a free event — the flat fee replaces it', () => {
+    const tenPercent = service.calculate(0, { commissionRate: 10, commissionFlatFee: 0 }, FeePayer.ORGANIZER);
+    const zeroPercent = service.calculate(0, { commissionRate: 0, commissionFlatFee: 0 }, FeePayer.ORGANIZER);
+    expect(tenPercent.platformCommissionAmount).toBe(12.5);
+    expect(zeroPercent.platformCommissionAmount).toBe(12.5);
   });
 
   it('buyer pays exactly ticket price when organizer absorbs fees (settled default)', () => {
@@ -89,10 +99,36 @@ describe('FeeCalculationService', () => {
     expect(result.organizerPayout).toBe(0);
   });
 
-  it('treats a missing/undefined commission config as zero fees beyond the gateway fee', () => {
+  it('honours an explicit 0% as a negotiated rate, not as "unset"', () => {
     const result = service.calculate(200, { commissionRate: 0, commissionFlatFee: 0 }, FeePayer.ORGANIZER);
     expect(result.platformCommissionAmount).toBe(0);
     expect(result.gatewayFeeAmount).toBe(7); // 200 * 2% + 3
+  });
+
+  // The distinction the nullable commission columns exist for: null means "no negotiated
+  // rate", which must fall through to the platform default rather than being read as 0%.
+  describe('platform default commission', () => {
+    it.each([
+      ['null', null],
+      ['undefined', undefined],
+      ['absent config object', 'absent' as const],
+    ])('applies the 5%% platform default when the rate is %s', (_label, rate) => {
+      const config = rate === 'absent' ? {} : { commissionRate: rate, commissionFlatFee: null };
+      const result = service.calculate(1000, config, FeePayer.PARTICIPANT);
+      expect(result.platformCommissionAmount).toBe(50); // 1000 * 5%
+    });
+
+    it('lets an explicit rate override the platform default in both directions', () => {
+      expect(service.calculate(1000, { commissionRate: 12 }, FeePayer.PARTICIPANT).platformCommissionAmount).toBe(120);
+      expect(service.calculate(1000, { commissionRate: 0 }, FeePayer.PARTICIPANT).platformCommissionAmount).toBe(0);
+    });
+
+    it('round-trips through the inverse using the same default', () => {
+      const forward = service.calculate(1000, { commissionRate: null }, FeePayer.PARTICIPANT);
+      const back = service.calculateFromChargedAmount(forward.buyerPrice, { commissionRate: null }, FeePayer.PARTICIPANT);
+      expect(back.organizerPayout).toBe(1000);
+      expect(back.platformCommissionAmount).toBe(50);
+    });
   });
 
   it('charges no GST at the default rate, so an unregistered deployment never collects tax', () => {
@@ -138,9 +174,12 @@ describe('FeeCalculationService', () => {
       expect(result.gstAmount).toBe(0);
     });
 
-    it('keeps GST at 0 for free events', () => {
+    it('charges GST on the free-event fee, still with nothing owed by the buyer', () => {
       const result = service.calculate(0, { commissionRate: 10, commissionFlatFee: 5 }, FeePayer.PARTICIPANT);
-      expect(result.gstAmount).toBe(0);
+      expect(result.platformCommissionAmount).toBe(12.5);
+      expect(result.gstAmount).toBe(2.25); // 18% of 12.50
+      // The buyer is charged nothing regardless of feePayer — the fee and its GST are the
+      // organizer's, funded out of the platform fee rather than collected at checkout.
       expect(result.buyerPrice).toBe(0);
     });
   });

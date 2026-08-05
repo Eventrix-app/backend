@@ -73,8 +73,17 @@ export interface OrganizerRecord {
   verifiedAt?: Date;
   verificationLevel: VerificationLevel;
   autoApproveEvents: boolean;
-  commissionRate: number;
-  commissionFlatFee: number;
+  // null means "no negotiated rate — the platform default applies" (config
+  // platform.commissionPercent). Deliberately NOT flattened to 0: an admin UI that showed 0%
+  // for a defaulted organizer would misreport what they are charged, and saving that value
+  // back would turn it into a real negotiated 0% and silently opt them out of the fee.
+  commissionRate: number | null;
+  commissionFlatFee: number | null;
+  // Deliberately NOT on OrganizerPublicProfile above. It is printed on invoices issued to
+  // this organizer's own attendees, but that is a document handed to a counterparty in a
+  // transaction — not something to hand any stranger browsing the app, where it would just
+  // be a free registry of organizers' tax numbers to scrape.
+  gstin?: string;
   isActive: boolean;
   isBanned: boolean;
   bannedReason?: string;
@@ -124,8 +133,9 @@ export class OrganizerService {
       verifiedAt: organizer.verifiedAt || undefined,
       verificationLevel: organizer.verificationLevel,
       autoApproveEvents: organizer.autoApproveEvents,
-      commissionRate: Number(organizer.commissionRate),
-      commissionFlatFee: Number(organizer.commissionFlatFee),
+      commissionRate: organizer.commissionRate == null ? null : Number(organizer.commissionRate),
+      commissionFlatFee: organizer.commissionFlatFee == null ? null : Number(organizer.commissionFlatFee),
+      gstin: organizer.gstin || undefined,
       isActive: !user.deletedAt,
       isBanned: user.isBanned,
       bannedReason: user.bannedReason || undefined,
@@ -213,6 +223,10 @@ export class OrganizerService {
       }
       organizer.companyLogoUrl = dto.companyLogoUrl;
     }
+    // An empty string is the explicit "I am no longer registered" signal and must clear the
+    // column, not store '' — a blank GSTIN would otherwise print as a present-but-empty field
+    // on every invoice.
+    if (dto.gstin !== undefined) organizer.gstin = dto.gstin || undefined;
     if (dto.commissionRate !== undefined) organizer.commissionRate = dto.commissionRate;
     if (dto.commissionFlatFee !== undefined) organizer.commissionFlatFee = dto.commissionFlatFee;
     if (dto.verificationLevel !== undefined) {
