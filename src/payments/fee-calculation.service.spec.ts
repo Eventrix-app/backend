@@ -33,28 +33,32 @@ describe('FeeCalculationService', () => {
     await build();
   });
 
-  // A free event charges the ATTENDEE nothing but still costs the ORGANIZER a flat platform
-  // fee. buyerPrice staying 0 is what keeps EventsService.enroll()'s instant-confirm path for
-  // free bookings intact — the fee is a receivable, not something to collect at checkout.
-  it('charges the organizer a flat fee on a free event while the buyer pays nothing', () => {
+  // A free event costs the ORGANIZER nothing to publish; the PARTICIPANT pays a flat
+  // registration fee instead. feePayer is forced to PARTICIPANT because there is no ticket
+  // revenue for an organizer to absorb anything out of.
+  it('charges the participant a flat registration fee on a free event', () => {
     const result = service.calculate(0, { commissionRate: 10, commissionFlatFee: 5 }, FeePayer.ORGANIZER);
     expect(result).toEqual({
       ticketPrice: 0,
-      feePayer: FeePayer.ORGANIZER,
+      feePayer: FeePayer.PARTICIPANT, // forced, regardless of the event's own setting
       platformCommissionAmount: 12.5,
-      gatewayFeeAmount: 0, // no payment is processed, so no gateway takes a cut
-      gstAmount: 0, // GST disabled in this block; see the 18% block below
-      subtotalBeforeTax: 0,
-      buyerPrice: 0,
-      organizerPayout: 0,
+      gatewayFeeAmount: 0, // real gateway cost is absorbed by the platform, not billed on
+      gstAmount: 0,
+      subtotalBeforeTax: 12.5,
+      buyerPrice: 12.5,
+      organizerPayout: 0, // the organizer earns nothing from a free registration
+      // The organizer's percentage rate does not participate in a free event's split at all,
+      // so there is no rate to freeze onto the booking — the whole charge is the flat fee.
+      commissionRateApplied: null,
+      commissionFlatFeeApplied: 12.5,
     });
   });
 
   it('ignores the organizer commission rate on a free event — the flat fee replaces it', () => {
     const tenPercent = service.calculate(0, { commissionRate: 10, commissionFlatFee: 0 }, FeePayer.ORGANIZER);
-    const zeroPercent = service.calculate(0, { commissionRate: 0, commissionFlatFee: 0 }, FeePayer.ORGANIZER);
-    expect(tenPercent.platformCommissionAmount).toBe(12.5);
-    expect(zeroPercent.platformCommissionAmount).toBe(12.5);
+    const zeroPercent = service.calculate(0, { commissionRate: 0, commissionFlatFee: 0 }, FeePayer.PARTICIPANT);
+    expect(tenPercent.buyerPrice).toBe(12.5);
+    expect(zeroPercent.buyerPrice).toBe(12.5);
   });
 
   it('buyer pays exactly ticket price when organizer absorbs fees (settled default)', () => {
@@ -174,13 +178,11 @@ describe('FeeCalculationService', () => {
       expect(result.gstAmount).toBe(0);
     });
 
-    it('charges GST on the free-event fee, still with nothing owed by the buyer', () => {
+    it('charges no GST on the free-event registration fee', () => {
       const result = service.calculate(0, { commissionRate: 10, commissionFlatFee: 5 }, FeePayer.PARTICIPANT);
-      expect(result.platformCommissionAmount).toBe(12.5);
-      expect(result.gstAmount).toBe(2.25); // 18% of 12.50
-      // The buyer is charged nothing regardless of feePayer — the fee and its GST are the
-      // organizer's, funded out of the platform fee rather than collected at checkout.
-      expect(result.buyerPrice).toBe(0);
+      // Product decision: the participant pays exactly the flat fee, with nothing added on.
+      expect(result.gstAmount).toBe(0);
+      expect(result.buyerPrice).toBe(12.5);
     });
   });
 
@@ -249,10 +251,17 @@ describe('FeeCalculationService', () => {
       },
     );
 
-    it('handles free bookings', () => {
-      const result = service.calculateFromChargedAmount(0, org, FeePayer.PARTICIPANT);
-      expect(result.buyerPrice).toBe(0);
-      expect(result.organizerPayout).toBe(0);
+    it('splits a free booking as pure platform revenue, not as a ticket', () => {
+      // 12.50 charged for a free event is a registration fee, not a 12.50 ticket. Without
+      // the isFreeEvent flag the inverse would treat it as a ticket price and pay the
+      // organizer most of the platform's own fee.
+      const asFree = service.calculateFromChargedAmount(12.5, org, FeePayer.PARTICIPANT, true);
+      expect(asFree.organizerPayout).toBe(0);
+      expect(asFree.platformCommissionAmount).toBe(12.5);
+      expect(asFree.buyerPrice).toBe(12.5);
+
+      const asTicket = service.calculateFromChargedAmount(12.5, org, FeePayer.PARTICIPANT, false);
+      expect(asTicket.organizerPayout).toBeGreaterThan(0);
     });
 
     it('never claims a total the buyer was not charged when rates changed since booking', async () => {

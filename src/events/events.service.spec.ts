@@ -145,7 +145,10 @@ describe('EventsService - Fixed Issues', () => {
     // (no payment exists to net it out of) — see EventsService.enroll().
     mockLedgerService = { recordFreeBookingLedger: jest.fn().mockResolvedValue([]) };
     mockFeeCalculationService = {
-      calculate: jest.fn(),
+      // enroll() now calls calculate() for EVERY event, free included — a free booking owes
+      // the flat registration fee, so there is no zero-cost short circuit to skip it.
+      // Individual tests override this with the breakdown they care about.
+      calculate: jest.fn((price: number) => ({ buyerPrice: price, platformCommissionAmount: 0 })),
     };
 
     const module: TestingModule = await Test.createTestingModule({

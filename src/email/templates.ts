@@ -436,15 +436,18 @@ export function payoutProcessedEmail(
     (gatewayFee > 0 ? amountRow('Payment processing fee', gatewayFee, { negative: true }) : '') +
     amountRow('Your payout', payoutAmount, { emphasis: true });
   return {
-    subject: `Payout processed: ${subjectSafe(eventTitle)}`,
+    subject: `Payout confirmed: ${subjectSafe(eventTitle)}`,
     html: wrapEmail(
-      'Payout processed 💸',
+      'Payout confirmed 💸',
       `
-      <p>Your payout for <strong>${safeTitle}</strong> has been settled.</p>
+      <p>Your payout for <strong>${safeTitle}</strong> has been calculated and is queued for transfer.</p>
       ${amountTable(rows)}
-      <p>Funds are transferred to your registered bank account separately — if anything looks wrong, reply to this email before the transfer is made.</p>
+      <p>The amount will be transferred to your registered bank account separately. Until that
+      transfer confirms, this payout shows as <strong>pending</strong> — this email is
+      confirmation of the amount owed, not of money already sent. If anything looks wrong,
+      reply before the transfer is made.</p>
       `,
-      `Payout of ₹${payoutAmount.toFixed(2)} settled for ${eventTitle}.`,
+      `Payout of ₹${payoutAmount.toFixed(2)} calculated for ${eventTitle} — transfer to follow.`,
     ),
   };
 }

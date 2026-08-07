@@ -1,10 +1,10 @@
 import { BadRequestException, ConflictException, ForbiddenException, Injectable, Logger, NotFoundException } from '@nestjs/common';
 import { InjectRepository } from '@nestjs/typeorm';
-import { DataSource, In, Repository } from 'typeorm';
+import { DataSource, EntityManager, In, Repository } from 'typeorm';
 import { ConfigService } from '@nestjs/config';
 import { Cron, CronExpression } from '@nestjs/schedule';
 
-import { Event, FeePayer } from '../entities/event.entity';
+import { Event, EventStatus, FeePayer } from '../entities/event.entity';
 import { Enrollment } from '../entities/enrollment.entity';
 import { Organizer } from '../entities/organizer.entity';
 import { User } from '../entities/user.entity';
@@ -13,7 +13,14 @@ import { Commission } from '../entities/commission.entity';
 import { Refund, RefundStatus } from '../entities/refund.entity';
 import { Payout, PayoutStatus } from '../entities/payout.entity';
 import { TicketType } from '../entities/ticket-type.entity';
-import { FeeCalculationService, FeeBreakdown, OrganizerCommissionConfig, toCommissionConfig } from './fee-calculation.service';
+import {
+  FeeCalculationService,
+  FeeBreakdown,
+  OrganizerCommissionConfig,
+  toCommissionConfig,
+  toFrozenFeeColumns,
+  readFrozenBreakdown,
+} from './fee-calculation.service';
 import type { InvoiceEmailLine } from '../email/templates';
 import { RazorpayService } from './razorpay.service';
 import { PayUService } from './payu.service';
@@ -438,12 +445,17 @@ export class PaymentsService {
       feePayer,
     );
 
+    const isFreeEvent = subtotal <= 0;
     const lines: { label: string; amount: number }[] = [];
-    // `buyerPrice > 0` is not redundant with the feePayer check. On a FREE event the
-    // platform still charges a flat fee, but it accrues against the organizer and the buyer
-    // pays nothing — so platformCommissionAmount is non-zero while buyerPrice is 0. Without
-    // this guard a free event would render "Platform fee ₹12.50" above a "Total ₹0".
-    if (feePayer === FeePayer.PARTICIPANT && breakdown.buyerPrice > 0) {
+
+    // A free event is its own case: the buyer pays exactly the flat registration fee, with
+    // no ticket, gateway or GST line. calculate() forces feePayer to PARTICIPANT there, so
+    // this is checked first rather than being folded into the branch below.
+    if (isFreeEvent) {
+      if (breakdown.buyerPrice > 0) {
+        lines.push({ label: 'Platform fee', amount: breakdown.buyerPrice });
+      }
+    } else if (feePayer === FeePayer.PARTICIPANT && breakdown.buyerPrice > 0) {
       if (breakdown.platformCommissionAmount > 0) {
         lines.push({ label: 'Platform fee', amount: breakdown.platformCommissionAmount });
       }
@@ -465,6 +477,10 @@ export class PaymentsService {
       quantity: dto.quantity,
       subtotal,
       feePayer,
+      // Lets the app render the "free event, registration fee applies" explanation without
+      // re-deriving it from prices — the buyer is paying something for a ticket priced at 0,
+      // which needs saying plainly rather than looking like a bug.
+      isFreeEvent,
       currency: ticketType.currency || ticketType.event.currency || 'INR',
       lines,
       // What enroll() will persist as enrollment.totalAmount and what PayU will be asked to
@@ -740,21 +756,24 @@ export class PaymentsService {
           );
         }
 
-        // Reversing the fee legs needs the same split the payment booked, so the breakdown is
-        // recomputed from the charged amount rather than only the gross being reversed.
-        // Recomputed (not read back from the Commission row) because that row has no GST
-        // column — mixing a stored commission with a recomputed GST would be inconsistent,
-        // and the codebase already accepts recompute-from-current-config as the model here.
-        // The caveat is the known one: if rates changed between payment and refund, the
-        // reversal won't exactly cancel the original legs.
+        // Reversing the fee legs needs the SAME split the payment booked — a reversal is only
+        // a reversal if it cancels leg for leg. Reading the frozen columns is what makes that
+        // exact: it was previously recomputed from live config, so a commission or GST rate
+        // changed between payment and refund produced reversal legs of a different size than
+        // the originals, permanently unbalancing every account they touched.
+        //
+        // Pre-freeze bookings still fall back to recomputation and still carry that caveat;
+        // there is nothing better available for them.
         const refundOrganizer = enrollment?.event
           ? await manager.findOne(Organizer, { where: { id: enrollment.event.organizerId } })
           : null;
-        const refundBreakdown = this.feeCalculationService.calculateFromChargedAmount(
-          Number(enrollment?.totalAmount || 0),
-          toCommissionConfig(refundOrganizer),
-          enrollment?.event?.feePayer ?? FeePayer.ORGANIZER,
-        );
+        const refundBreakdown = enrollment
+          ? this.resolveBreakdown(
+              enrollment,
+              enrollment.event ?? { feePayer: FeePayer.ORGANIZER, isPaid: true },
+              toCommissionConfig(refundOrganizer),
+            )
+          : this.feeCalculationService.calculateFromChargedAmount(0, toCommissionConfig(null), FeePayer.ORGANIZER);
         await this.ledgerService.recordRefundLedger(
           manager,
           refund.id,
@@ -920,6 +939,9 @@ export class PaymentsService {
           dto.amount,
           toCommissionConfig(organizer),
           enrollment.event.feePayer,
+          // A free event's charge is the flat registration fee, not a ticket price — see
+          // calculateFromChargedAmount's isFreeEvent parameter.
+          !enrollment.event.isPaid,
         );
 
         await manager.save(
@@ -941,6 +963,10 @@ export class PaymentsService {
 
         enrollment.status = 'confirmed';
         enrollment.paymentStatus = 'paid';
+        // Freeze the split onto the booking, in the same transaction that wrote the ledger
+        // legs it must agree with. From here on payout, invoicing and refund reversal read
+        // these columns instead of re-deriving from live config — see resolveBreakdown().
+        Object.assign(enrollment, toFrozenFeeColumns(breakdown));
         await manager.save(Enrollment, enrollment);
 
         confirmedBooking = {
@@ -1040,6 +1066,16 @@ export class PaymentsService {
       .where('enrollment.status = :status', { status: 'confirmed' })
       .andWhere('enrollment.paymentStatus = :paymentStatus', { paymentStatus: 'paid' })
       .andWhere('enrollment.payoutId IS NULL')
+      // A cancelled event must never be swept. Its enrollments can legitimately still read
+      // status=confirmed/paymentStatus=paid for a window (or permanently, if refunds were
+      // issued out-of-band rather than through processGatewayRefund), so filtering on the
+      // enrollment alone is not enough — the sweep would hand the organizer the full gross
+      // for an event whose attendees have already been given their money back, and the
+      // platform eats both sides.
+      //
+      // Re-checked authoritatively inside settleEventPayout's transaction; this predicate is
+      // the cheap pre-filter.
+      .andWhere('event.status != :cancelledEvent', { cancelledEvent: EventStatus.CANCELLED })
       .andWhere(
         // Must mirror getEventEndDateTime() exactly, or this pre-filter silently disagrees
         // with the authoritative JS check below:
@@ -1098,8 +1134,123 @@ export class PaymentsService {
     return { eventsProcessed: eligibleEvents.length, payoutsCreated };
   }
 
+  // THE reader for "how was this booking split". Every path that needs a settled booking's
+  // fee breakdown — payout, invoice, refund reversal — must come through here rather than
+  // calling the calculator directly.
+  //
+  // Frozen columns win when present. They are the record of what actually happened: the
+  // amounts the buyer was billed, the ledger recorded, and the invoice was issued against.
+  // Recomputation is a FALLBACK for pre-freeze bookings only, and it is lossy — it inverts
+  // today's commission/gateway/GST config, so a rate changed since the payment yields a
+  // different answer than the buyer was charged.
+  //
+  // The fallback is kept (rather than throwing) because rows booked before the freeze
+  // shipped are real, payable, and invoiceable; refusing to split them would strand them.
+  // It is logged at debug so the shrinking population of unfrozen rows stays visible.
+  private resolveBreakdown(
+    enrollment: Enrollment,
+    event: Pick<Event, 'feePayer' | 'isPaid'>,
+    organizer: OrganizerCommissionConfig,
+  ): FeeBreakdown {
+    const frozen = readFrozenBreakdown(enrollment);
+    if (frozen) return frozen;
+
+    this.logger.debug(
+      `Enrollment ${enrollment.id} has no frozen fee split (booked before the freeze); recomputing from current rates`,
+    );
+    return this.feeCalculationService.calculateFromChargedAmount(
+      Number(enrollment.totalAmount),
+      organizer,
+      event.feePayer,
+      !event.isPaid,
+    );
+  }
+
+  // Compares the payout derived from bookings against the one derived from the ledger.
+  //
+  // Reconciles PER BOOKING rather than only on the grand total, because two equal-and-
+  // opposite per-booking errors sum to a matching total while both bookings are individually
+  // wrong — and the per-booking detail is what makes a divergence diagnosable at all.
+  //
+  // Bookings with no ledger entries are pre-ledger rows (see AddLedgerEntries). They are
+  // excluded from both sides of the comparison and reported separately: treating a missing
+  // ledger as a ledger balance of 0 would block payout on every legacy booking forever.
+  private async reconcilePayoutAgainstLedger(
+    manager: EntityManager,
+    // Already-resolved per-booking payouts, NOT the enrollments to re-resolve. Re-deriving
+    // them here would compare the ledger against a second, subtly different computation:
+    // the fallback path for pre-freeze bookings depends on the organizer's commission
+    // config, so a reconciler that resolved them independently would disagree with the
+    // payout for every organizer on a negotiated rate — blocking legitimate payouts and
+    // reporting a divergence that exists only between two lines of this file.
+    expectedByEnrollment: { enrollmentId: string; expected: number }[],
+    bookingTotal: number,
+  ): Promise<{
+    matches: boolean;
+    ledgerTotal: number;
+    reconciledCount: number;
+    unledgeredCount: number;
+    divergences: { enrollmentId: string; expected: number; actual: number }[];
+  }> {
+    const ledgerByEnrollment = await this.ledgerService.getOrganizerPayableByEnrollment(
+      manager,
+      expectedByEnrollment.map((e) => e.enrollmentId),
+    );
+
+    let ledgerTotal = 0;
+    let unledgeredTotal = 0;
+    let unledgeredCount = 0;
+    const divergences: { enrollmentId: string; expected: number; actual: number }[] = [];
+
+    for (const { enrollmentId, expected } of expectedByEnrollment) {
+      if (!ledgerByEnrollment.has(enrollmentId)) {
+        unledgeredCount++;
+        unledgeredTotal = round2(unledgeredTotal + expected);
+        continue;
+      }
+
+      const actual = ledgerByEnrollment.get(enrollmentId)!;
+      ledgerTotal = round2(ledgerTotal + actual);
+      // Exact equality in paise. These are two computations of the same rupee figure, both
+      // already rounded to 2dp — a tolerance here would just be a place for real divergences
+      // to hide.
+      if (Math.round(expected * 100) !== Math.round(actual * 100)) {
+        divergences.push({ enrollmentId, expected, actual });
+      }
+    }
+
+    // The ledger side is only responsible for the reconcilable bookings, so the booking side
+    // is compared net of the unledgered ones it cannot speak to.
+    const comparableBookingTotal = round2(bookingTotal - unledgeredTotal);
+    const matches =
+      divergences.length === 0 && Math.round(comparableBookingTotal * 100) === Math.round(ledgerTotal * 100);
+
+    return {
+      matches,
+      ledgerTotal,
+      reconciledCount: expectedByEnrollment.length - unledgeredCount,
+      unledgeredCount,
+      divergences,
+    };
+  }
+
   private async settleEventPayout(event: Event): Promise<SettledPayout | null> {
     return this.dataSource.transaction(async (manager) => {
+      // Re-read the event's status INSIDE the transaction rather than trusting the copy the
+      // sweep loaded. The SQL pre-filter and the JS eligibility check both ran before this
+      // point; an organizer cancelling in that window would otherwise still be paid, and a
+      // cancellation is exactly the moment a payout must not happen.
+      const currentStatus = await manager.findOne(Event, {
+        where: { id: event.id },
+        select: { id: true, status: true },
+      });
+      if (!currentStatus || currentStatus.status === EventStatus.CANCELLED) {
+        this.logger.warn(
+          `Skipping payout for event ${event.id}: event is ${currentStatus?.status ?? 'missing'} at settlement time`,
+        );
+        return null;
+      }
+
       // Row-lock candidate enrollments so a concurrent sweep run can't double-pay. A
       // NOT EXISTS subquery (rather than a LEFT JOIN) keeps this a lockable single-table
       // scan — Postgres refuses FOR UPDATE across the nullable side of an outer join.
@@ -1147,28 +1298,58 @@ export class PaymentsService {
 
       // Totals are accumulated per-fee (not just the payout) so the organizer's settlement
       // email can show the same breakdown the payout was actually derived from, rather than
-      // recomputing it from a rounded aggregate afterwards.
-      const totals = payableEnrollments.reduce(
-        (acc, enrollment) => {
-          // enrollment.totalAmount is what the buyer was charged, not the bare ticket price —
-          // under feePayer=PARTICIPANT it already includes the fees. calculate() would treat
-          // it as a base price and return organizerPayout === totalAmount, paying the
-          // organizer the platform's own commission and the gateway fee along with it.
-          const breakdown = this.feeCalculationService.calculateFromChargedAmount(
-            Number(enrollment.totalAmount),
-            commissionConfig,
-            event.feePayer,
-          );
-          return {
-            payout: acc.payout + breakdown.organizerPayout,
-            gross: acc.gross + breakdown.buyerPrice,
-            platformFee: acc.platformFee + breakdown.platformCommissionAmount,
-            gatewayFee: acc.gatewayFee + breakdown.gatewayFeeAmount,
-          };
-        },
-        { payout: 0, gross: 0, platformFee: 0, gatewayFee: 0 },
-      );
-      const totalPayout = totals.payout;
+      // recomputing it from a rounded aggregate afterwards. The per-booking payouts are kept
+      // alongside them so the reconciliation below compares against THESE figures rather than
+      // resolving each breakdown a second time.
+      const totals = { payout: 0, gross: 0, platformFee: 0, gatewayFee: 0 };
+      const expectedByEnrollment: { enrollmentId: string; expected: number }[] = [];
+      for (const enrollment of payableEnrollments) {
+        // Frozen-first. The organizer is paid what was computed AT PAYMENT TIME, so an admin
+        // editing their commission rate between booking and T+3 cannot change the amount owed
+        // for tickets already sold. Falls back to inverting the charged amount for pre-freeze
+        // bookings — see resolveBreakdown().
+        const breakdown = this.resolveBreakdown(enrollment, event, commissionConfig);
+        totals.payout += breakdown.organizerPayout;
+        totals.gross += breakdown.buyerPrice;
+        totals.platformFee += breakdown.platformCommissionAmount;
+        totals.gatewayFee += breakdown.gatewayFeeAmount;
+        expectedByEnrollment.push({ enrollmentId: enrollment.id, expected: round2(breakdown.organizerPayout) });
+      }
+      const totalPayout = round2(totals.payout);
+
+      // Dual reconciliation: the ledger must independently agree on what is owed before any
+      // money is declared payable. The figure above comes from the bookings; the figure below
+      // comes from the double-entry records written when each payment settled. They are two
+      // separate accounts of the same event, and until this check existed nothing compared
+      // them — the ledger was written on every payment and never read, so a divergence could
+      // persist indefinitely and only surface at audit as an unexplained balance.
+      //
+      // A mismatch means one of the two is wrong and there is no way to tell which from here.
+      // Aborting is the only safe response: a payout is irreversible once transferred, an
+      // unpaid payout is not. The event stays eligible and will be retried by the next sweep,
+      // so a fixed divergence heals without intervention.
+      const reconciliation = await this.reconcilePayoutAgainstLedger(manager, expectedByEnrollment, totalPayout);
+      if (!reconciliation.matches) {
+        this.logger.error(
+          `PAYOUT BLOCKED — ledger disagreement for event ${event.id} (organizer ${event.organizerId}): ` +
+            `bookings say ${totalPayout}, ledger says ${reconciliation.ledgerTotal} ` +
+            `(difference ${round2(totalPayout - reconciliation.ledgerTotal)}) across ` +
+            `${reconciliation.reconciledCount} reconcilable booking(s). ` +
+            `Per-booking divergences: ${reconciliation.divergences
+              .map((d) => `${d.enrollmentId} booked=${d.expected} ledger=${d.actual}`)
+              .join('; ')}. ` +
+            `No payout row was created; this event will be retried on the next sweep.`,
+        );
+        return null;
+      }
+      if (reconciliation.unledgeredCount) {
+        // Not a failure: bookings that predate the ledger have nothing to reconcile against.
+        // Logged so the size of that population is visible rather than silently trusted.
+        this.logger.warn(
+          `Event ${event.id}: ${reconciliation.unledgeredCount} of ${payableEnrollments.length} booking(s) ` +
+            `have no ledger entries (pre-ledger bookings) and were paid out unreconciled`,
+        );
+      }
 
       const payout = manager.create(Payout, {
         organizerId: event.organizerId,
@@ -1176,8 +1357,10 @@ export class PaymentsService {
         ticketCount: payableEnrollments.length,
         amount: Math.round(totalPayout * 100) / 100,
         currency: event.currency,
-        status: PayoutStatus.PAID,
-        paidAt: new Date(),
+        // PENDING + processedAt, never PAID. The sweep computes an obligation; no transfer
+        // has happened. markPayoutPaid() is the only thing that may set PAID.
+        status: PayoutStatus.PENDING,
+        processedAt: new Date(),
       });
       const savedPayout = await manager.save(Payout, payout);
 
@@ -1213,6 +1396,31 @@ export class PaymentsService {
         payoutAmount: savedPayout.amount,
       };
     });
+  }
+
+  // The ONLY thing permitted to move a payout to PAID. Deliberately not called anywhere
+  // yet: there is no bank-transfer integration in this codebase, so nothing can honestly
+  // claim money has moved. Whatever disbursement provider is wired up later (PayU Payouts,
+  // RazorpayX, or a manual bank-transfer confirmation screen) must call this on a confirmed
+  // transfer — that is the moment `paid_at` becomes true, and not before.
+  //
+  // Idempotent: an already-PAID payout is returned untouched rather than re-stamped, so a
+  // duplicate provider webhook cannot rewrite the settlement timestamp.
+  async markPayoutPaid(payoutId: string, transferReference?: string): Promise<Payout> {
+    const payout = await this.payoutsRepository.findOne({ where: { id: payoutId } });
+    if (!payout) throw new NotFoundException(`Payout ${payoutId} not found`);
+    if (payout.status === PayoutStatus.PAID) return payout;
+    if (payout.status !== PayoutStatus.PENDING) {
+      throw new BadRequestException(`Payout ${payoutId} is ${payout.status} and cannot be marked paid`);
+    }
+
+    payout.status = PayoutStatus.PAID;
+    payout.paidAt = new Date();
+    const saved = await this.payoutsRepository.save(payout);
+    this.logger.log(
+      `Payout ${payoutId} marked PAID${transferReference ? ` (transfer ${transferReference})` : ''}`,
+    );
+    return saved;
   }
 
   // The single invoice view: a flat, GST-invoice-shaped projection of a settled booking.
@@ -1281,10 +1489,13 @@ export class PaymentsService {
       where: { enrollmentId: enrollment.id, status: PaymentStatus.SUCCESS },
     });
 
-    const breakdown = this.feeCalculationService.calculateFromChargedAmount(
-      Number(enrollment.totalAmount),
+    // Frozen-first: an invoice must reproduce the numbers the buyer was billed, forever. A
+    // commission change after the fact used to silently reissue this document with different
+    // figures than the payment it describes.
+    const breakdown = this.resolveBreakdown(
+      enrollment,
+      enrollment.event,
       toCommissionConfig(enrollment.event.organizer),
-      enrollment.event.feePayer,
     );
 
     return { enrollment, payment, breakdown };

@@ -47,14 +47,28 @@ export class Payout {
   @Column({ type: 'varchar', length: 10, default: 'INR' })
   currency!: string;
 
+  // PENDING, not PAID. The sweep only ever computes an obligation — there is no bank
+  // transfer integration in this codebase, so a row created by settleEventPayout() means
+  // "this is owed", never "this has been sent". Defaulting to PAID made every payout claim
+  // money had moved when none had, which is wrong in the reconciliation direction that
+  // matters: it overstates what has been settled.
+  //
+  // PAID is set only by markPayoutPaid(), which a real disbursement integration must call
+  // once a transfer actually confirms.
   @Column({
     type: 'varchar',
     length: 20,
     enum: PayoutStatus,
-    default: PayoutStatus.PAID,
+    default: PayoutStatus.PENDING,
   })
   status!: PayoutStatus;
 
+  // When the sweep computed the obligation. Always set on creation.
+  @Column({ name: 'processed_at', type: 'timestamp', nullable: true })
+  processedAt?: Date;
+
+  // When money actually reached the organizer's bank. Stays NULL until a transfer confirms
+  // — deliberately distinct from processedAt so "computed" and "sent" can never be conflated.
   @Column({ name: 'paid_at', type: 'timestamp', nullable: true })
   paidAt?: Date;
 

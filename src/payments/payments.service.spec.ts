@@ -81,6 +81,11 @@ describe('PaymentsService — paymentStatus enforcement', () => {
       recordPaymentLedger: jest.fn(),
       recordPayoutLedger: jest.fn(),
       recordRefundLedger: jest.fn(),
+      // Empty map = "these bookings have no ledger entries", which settleEventPayout treats
+      // as unreconcilable-but-payable (pre-ledger rows) rather than as a mismatch. That keeps
+      // every pre-existing payout test exercising what it was written to exercise; the
+      // reconciliation behaviour itself has its own describe block below.
+      getOrganizerPayableByEnrollment: jest.fn().mockResolvedValue(new Map()),
     };
 
     service = new PaymentsService(
@@ -462,6 +467,78 @@ describe('PaymentsService — paymentStatus enforcement', () => {
         'participant',
       );
       expect(result.total).toBe(513);
+    });
+  });
+
+  // A payout row is an OBLIGATION, not evidence money moved — nothing in this codebase
+  // transfers funds. Defaulting to PAID overstated settlement on every single payout.
+  describe('payout settlement honesty', () => {
+    it('creates payouts as PENDING with processedAt, never PAID', async () => {
+      const qb: any = {};
+      qb.setLock = jest.fn().mockReturnValue(qb);
+      qb.where = jest.fn().mockReturnValue(qb);
+      qb.andWhere = jest.fn().mockReturnValue(qb);
+      qb.getMany = jest.fn().mockResolvedValue([{ id: 'enr-1', totalAmount: '100', payoutId: null }]);
+      let savedPayout: any;
+      const manager = {
+        createQueryBuilder: jest.fn().mockReturnValue(qb),
+        find: jest.fn().mockResolvedValue([]),
+        // settleEventPayout re-reads the event's status inside the transaction before doing
+        // anything else (a cancelled event must never be swept), so the mock has to answer
+        // per-entity rather than returning the organizer for every lookup.
+        findOne: jest.fn((entity: any) =>
+          Promise.resolve(
+            entity?.name === 'Event'
+              ? { id: 'event-1', status: 'completed' }
+              : { id: 'org-1', userId: 'u-1', commissionRate: null, commissionFlatFee: null },
+          ),
+        ),
+        create: jest.fn((entity: any, data: any) => data),
+        save: jest.fn((entity: any, data: any) => {
+          if (data && data.ticketCount !== undefined) savedPayout = data;
+          return Promise.resolve({ id: 'payout-1', ...data });
+        }),
+        update: jest.fn(),
+      };
+      mockDataSource.transaction.mockImplementation((cb: any) => cb(manager));
+      mockFeeCalculationService.calculateFromChargedAmount.mockReturnValue({
+        organizerPayout: 100, buyerPrice: 100, platformCommissionAmount: 5, gatewayFeeAmount: 5,
+      });
+
+      await (service as any).settleEventPayout({
+        id: 'event-1', organizerId: 'org-1', currency: 'INR', feePayer: 'organizer', title: 'E',
+      });
+
+      expect(savedPayout.status).toBe('pending');
+      expect(savedPayout.processedAt).toBeInstanceOf(Date);
+      // paidAt must stay unset — no transfer has happened.
+      expect(savedPayout.paidAt).toBeUndefined();
+    });
+
+    it('markPayoutPaid is the only path to PAID, and stamps paidAt', async () => {
+      mockPayoutsRepo.findOne = jest.fn().mockResolvedValue({ id: 'p-1', status: 'pending' });
+      mockPayoutsRepo.save = jest.fn((d: any) => Promise.resolve(d));
+
+      const result = await service.markPayoutPaid('p-1', 'utr-123');
+
+      expect(result.status).toBe('paid');
+      expect(result.paidAt).toBeInstanceOf(Date);
+    });
+
+    it('markPayoutPaid is idempotent — a duplicate confirmation cannot rewrite paidAt', async () => {
+      const already = { id: 'p-1', status: 'paid', paidAt: new Date('2020-01-01') };
+      mockPayoutsRepo.findOne = jest.fn().mockResolvedValue(already);
+      mockPayoutsRepo.save = jest.fn();
+
+      const result = await service.markPayoutPaid('p-1');
+
+      expect(result.paidAt).toEqual(new Date('2020-01-01'));
+      expect(mockPayoutsRepo.save).not.toHaveBeenCalled();
+    });
+
+    it('refuses to mark a failed payout as paid', async () => {
+      mockPayoutsRepo.findOne = jest.fn().mockResolvedValue({ id: 'p-1', status: 'failed' });
+      await expect(service.markPayoutPaid('p-1')).rejects.toThrow(BadRequestException);
     });
   });
 
@@ -1011,6 +1088,27 @@ describe('PaymentsService — paymentStatus enforcement', () => {
       expect(predicate).toContain(':now::timestamptz');
     });
 
+    // A cancelled event's enrollments can legitimately still read confirmed/paid — refunds
+    // may have been issued out of band, or not yet processed. Filtering on the enrollment
+    // alone therefore paid the organizer the full gross for an event whose attendees had
+    // already been given their money back, and the platform ate both sides.
+    it('excludes cancelled events from the candidate query', async () => {
+      const qb: any = {};
+      qb.select = jest.fn().mockReturnValue(qb);
+      qb.distinct = jest.fn().mockReturnValue(qb);
+      qb.innerJoin = jest.fn().mockReturnValue(qb);
+      qb.where = jest.fn().mockReturnValue(qb);
+      qb.andWhere = jest.fn().mockReturnValue(qb);
+      qb.getRawMany = jest.fn().mockResolvedValue([]);
+      mockEnrollmentsRepo.createQueryBuilder.mockReturnValue(qb);
+
+      await service.runPayoutSweep();
+
+      expect(qb.andWhere).toHaveBeenCalledWith('event.status != :cancelledEvent', {
+        cancelledEvent: 'cancelled',
+      });
+    });
+
     it('filters to events already past their payout delay in SQL, not in JS', async () => {
       const qb: any = {};
       qb.select = jest.fn().mockReturnValue(qb);
@@ -1092,7 +1190,13 @@ describe('PaymentsService — paymentStatus enforcement', () => {
       const manager = {
         createQueryBuilder: jest.fn().mockReturnValue(qb),
         find: jest.fn().mockResolvedValue([{ enrollmentId: 'enr-disputed' }]),
-        findOne: jest.fn().mockResolvedValue({ commissionRate: 0, commissionFlatFee: 0 }),
+        findOne: jest.fn((entity: any) =>
+          Promise.resolve(
+            entity?.name === 'Event'
+              ? { id: 'event-1', status: 'completed' }
+              : { commissionRate: 0, commissionFlatFee: 0 },
+          ),
+        ),
         create: jest.fn((entity: any, data: any) => data),
         save: jest.fn((entity: any, data: any) => Promise.resolve({ id: 'payout-1', ...data })),
         update: jest.fn(),
@@ -1125,6 +1229,7 @@ describe('PaymentsService — paymentStatus enforcement', () => {
       const manager = {
         createQueryBuilder: jest.fn().mockReturnValue(qb),
         find: jest.fn().mockResolvedValue([{ enrollmentId: 'enr-disputed' }]),
+        findOne: jest.fn().mockResolvedValue({ id: 'event-1', status: 'completed' }),
         save: jest.fn(),
         update: jest.fn(),
       };
@@ -1135,6 +1240,231 @@ describe('PaymentsService — paymentStatus enforcement', () => {
 
       expect(created).toBeNull();
       expect(manager.save).not.toHaveBeenCalled();
+    });
+  });
+
+  // Builds the manager mock every settleEventPayout test needs, so each test below can state
+  // only the thing it is actually about.
+  const settlementManager = (opts: {
+    enrollments: any[];
+    eventStatus?: string;
+    openRefunds?: { enrollmentId: string }[];
+  }) => {
+    const qb: any = {};
+    qb.setLock = jest.fn().mockReturnValue(qb);
+    qb.where = jest.fn().mockReturnValue(qb);
+    qb.andWhere = jest.fn().mockReturnValue(qb);
+    qb.getMany = jest.fn().mockResolvedValue(opts.enrollments);
+    return {
+      createQueryBuilder: jest.fn().mockReturnValue(qb),
+      find: jest.fn().mockResolvedValue(opts.openRefunds ?? []),
+      findOne: jest.fn((entity: any) =>
+        Promise.resolve(
+          entity?.name === 'Event'
+            ? { id: 'event-1', status: opts.eventStatus ?? 'completed' }
+            : { id: 'org-1', userId: 'u-1', commissionRate: null, commissionFlatFee: null },
+        ),
+      ),
+      create: jest.fn((_entity: any, data: any) => data),
+      save: jest.fn((_entity: any, data: any) => Promise.resolve({ id: 'payout-1', ...data })),
+      update: jest.fn(),
+    };
+  };
+
+  const eventUnderSettlement = {
+    id: 'event-1',
+    organizerId: 'org-1',
+    currency: 'INR',
+    feePayer: 'organizer',
+    title: 'E',
+    isPaid: true,
+  };
+
+  describe('settleEventPayout — cancelled event guard', () => {
+    // The SQL pre-filter excludes cancelled events, but it runs before the loop and before
+    // this transaction opens. An organizer cancelling inside that window would still have
+    // been paid, which is exactly the moment a payout must not happen.
+    it('refuses to settle an event that was cancelled after the sweep selected it', async () => {
+      const manager = settlementManager({
+        enrollments: [{ id: 'enr-1', totalAmount: '1000', payoutId: null }],
+        eventStatus: 'cancelled',
+      });
+      mockDataSource.transaction.mockImplementation((cb: any) => cb(manager));
+
+      const created = await (service as any).settleEventPayout(eventUnderSettlement);
+
+      expect(created).toBeNull();
+      expect(manager.save).not.toHaveBeenCalled();
+      // Bailed before even locking the enrollments.
+      expect(manager.createQueryBuilder).not.toHaveBeenCalled();
+    });
+
+    it('refuses to settle an event that has disappeared entirely', async () => {
+      const manager = settlementManager({ enrollments: [{ id: 'enr-1', totalAmount: '1000' }] });
+      manager.findOne = jest.fn((entity: any) =>
+        Promise.resolve(entity?.name === 'Event' ? null : { id: 'org-1', userId: 'u-1' }),
+      ) as any;
+      mockDataSource.transaction.mockImplementation((cb: any) => cb(manager));
+
+      expect(await (service as any).settleEventPayout(eventUnderSettlement)).toBeNull();
+      expect(manager.save).not.toHaveBeenCalled();
+    });
+  });
+
+  // The whole point of freezing: an admin editing an organizer's commission rate must not
+  // change what is owed for tickets that were already sold and already invoiced.
+  describe('settleEventPayout — frozen fee split', () => {
+    const frozenEnrollment = {
+      id: 'enr-frozen',
+      totalAmount: '1000',
+      payoutId: null,
+      feesFrozenAt: new Date('2026-01-01'),
+      feePayerApplied: 'organizer',
+      commissionRateApplied: '0.00',
+      commissionFlatFeeApplied: '0.00',
+      ticketBaseAmount: '1000.00',
+      platformFeeAmount: '0.00',
+      gatewayFeeAmount: '0.00',
+      gstAmount: '0.00',
+      // Booked at a negotiated 0% — the organizer keeps the whole ticket price.
+      organizerPayoutAmount: '1000.00',
+    };
+
+    it('pays the rate frozen at payment time, not the organizer’s current rate', async () => {
+      const manager = settlementManager({ enrollments: [frozenEnrollment] });
+      mockDataSource.transaction.mockImplementation((cb: any) => cb(manager));
+      // The organizer has since been moved to a rate that would take ₹73 off this booking.
+      // If it were consulted, the payout would come out at 927 instead of 1000.
+      mockFeeCalculationService.calculateFromChargedAmount.mockReturnValue({
+        organizerPayout: 927, buyerPrice: 1000, platformCommissionAmount: 50, gatewayFeeAmount: 23, gstAmount: 0,
+      });
+
+      const created = await (service as any).settleEventPayout(eventUnderSettlement);
+
+      expect(created!.payoutAmount).toBe(1000);
+      // Not consulted at all — the frozen columns answered the question outright.
+      expect(mockFeeCalculationService.calculateFromChargedAmount).not.toHaveBeenCalled();
+    });
+
+    // feesFrozenAt is the presence flag precisely so that a frozen split whose amounts are
+    // all zero is still recognised as frozen. Testing an amount column instead would treat a
+    // commission-free partner as unfrozen and silently fall back to live rates.
+    it('treats an all-zero frozen split as frozen, not as absent', async () => {
+      const manager = settlementManager({
+        enrollments: [
+          { ...frozenEnrollment, id: 'enr-zero', totalAmount: '12.50', platformFeeAmount: '12.50', ticketBaseAmount: '0.00', organizerPayoutAmount: '0.00' },
+        ],
+      });
+      mockDataSource.transaction.mockImplementation((cb: any) => cb(manager));
+      mockFeeCalculationService.calculateFromChargedAmount.mockReturnValue({
+        organizerPayout: 999, buyerPrice: 999, platformCommissionAmount: 0, gatewayFeeAmount: 0, gstAmount: 0,
+      });
+
+      const created = await (service as any).settleEventPayout(eventUnderSettlement);
+
+      expect(created!.payoutAmount).toBe(0);
+      expect(mockFeeCalculationService.calculateFromChargedAmount).not.toHaveBeenCalled();
+    });
+
+    it('falls back to recomputation for a booking made before the freeze existed', async () => {
+      const manager = settlementManager({
+        enrollments: [{ id: 'enr-legacy', totalAmount: '1000', payoutId: null, feesFrozenAt: null }],
+      });
+      mockDataSource.transaction.mockImplementation((cb: any) => cb(manager));
+      mockFeeCalculationService.calculateFromChargedAmount.mockReturnValue({
+        organizerPayout: 927, buyerPrice: 1000, platformCommissionAmount: 50, gatewayFeeAmount: 23, gstAmount: 0,
+      });
+
+      const created = await (service as any).settleEventPayout(eventUnderSettlement);
+
+      expect(created!.payoutAmount).toBe(927);
+      expect(mockFeeCalculationService.calculateFromChargedAmount).toHaveBeenCalled();
+    });
+  });
+
+  // Before this, the ledger was write-only: entries were recorded on every payment and never
+  // read back, so the bookings and the ledger could disagree about what an organizer was owed
+  // indefinitely, with nothing to notice and no way to reconstruct which was right.
+  describe('settleEventPayout — ledger reconciliation', () => {
+    const ledgeredEnrollment = (id: string, payout: number) => ({
+      id,
+      totalAmount: String(payout),
+      payoutId: null,
+      feesFrozenAt: new Date('2026-01-01'),
+      feePayerApplied: 'organizer',
+      ticketBaseAmount: String(payout),
+      platformFeeAmount: '0.00',
+      gatewayFeeAmount: '0.00',
+      gstAmount: '0.00',
+      organizerPayoutAmount: payout.toFixed(2),
+    });
+
+    it('creates the payout when the ledger agrees', async () => {
+      const manager = settlementManager({ enrollments: [ledgeredEnrollment('enr-1', 1000)] });
+      mockDataSource.transaction.mockImplementation((cb: any) => cb(manager));
+      mockLedgerService.getOrganizerPayableByEnrollment.mockResolvedValue(new Map([['enr-1', 1000]]));
+
+      const created = await (service as any).settleEventPayout(eventUnderSettlement);
+
+      expect(created).toEqual(expect.objectContaining({ payoutId: 'payout-1', payoutAmount: 1000 }));
+    });
+
+    // Blocking is the only safe response to a disagreement: a transferred payout is
+    // irreversible, an unmade one is not. The event stays eligible, so a corrected
+    // divergence heals on the next sweep without intervention.
+    it('blocks the payout when the ledger disagrees, leaving the event eligible for retry', async () => {
+      const manager = settlementManager({ enrollments: [ledgeredEnrollment('enr-1', 1000)] });
+      mockDataSource.transaction.mockImplementation((cb: any) => cb(manager));
+      mockLedgerService.getOrganizerPayableByEnrollment.mockResolvedValue(new Map([['enr-1', 900]]));
+
+      const created = await (service as any).settleEventPayout(eventUnderSettlement);
+
+      expect(created).toBeNull();
+      // Critically: no payout row, and no enrollment stamped with a payoutId — so nothing
+      // marks these bookings as settled and the next sweep will pick them up again.
+      expect(manager.update).not.toHaveBeenCalled();
+      expect(mockLedgerService.recordPayoutLedger).not.toHaveBeenCalled();
+    });
+
+    // Reconciling only on the grand total would pass this: +100 and -100 sum to zero while
+    // both bookings are individually wrong.
+    it('catches two equal-and-opposite per-booking errors that cancel in the total', async () => {
+      const manager = settlementManager({
+        enrollments: [ledgeredEnrollment('enr-1', 1000), ledgeredEnrollment('enr-2', 1000)],
+      });
+      mockDataSource.transaction.mockImplementation((cb: any) => cb(manager));
+      mockLedgerService.getOrganizerPayableByEnrollment.mockResolvedValue(
+        new Map([['enr-1', 1100], ['enr-2', 900]]),
+      );
+
+      expect(await (service as any).settleEventPayout(eventUnderSettlement)).toBeNull();
+      expect(manager.update).not.toHaveBeenCalled();
+    });
+
+    // Bookings that predate the ledger have nothing to reconcile against. Treating a missing
+    // ledger as a balance of 0 would block them from ever being paid.
+    it('pays out bookings with no ledger entries rather than blocking on them', async () => {
+      const manager = settlementManager({
+        enrollments: [ledgeredEnrollment('enr-ledgered', 1000), ledgeredEnrollment('enr-legacy', 500)],
+      });
+      mockDataSource.transaction.mockImplementation((cb: any) => cb(manager));
+      // Only one of the two has ledger entries.
+      mockLedgerService.getOrganizerPayableByEnrollment.mockResolvedValue(new Map([['enr-ledgered', 1000]]));
+
+      const created = await (service as any).settleEventPayout(eventUnderSettlement);
+
+      // Both are paid; the ledgered one still had to reconcile to get there.
+      expect(created!.payoutAmount).toBe(1500);
+    });
+
+    it('still blocks when a ledgered booking diverges alongside an unledgered one', async () => {
+      const manager = settlementManager({
+        enrollments: [ledgeredEnrollment('enr-ledgered', 1000), ledgeredEnrollment('enr-legacy', 500)],
+      });
+      mockDataSource.transaction.mockImplementation((cb: any) => cb(manager));
+      mockLedgerService.getOrganizerPayableByEnrollment.mockResolvedValue(new Map([['enr-ledgered', 950]]));
+
+      expect(await (service as any).settleEventPayout(eventUnderSettlement)).toBeNull();
     });
   });
 });

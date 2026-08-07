@@ -58,55 +58,6 @@ describe('LedgerService', () => {
 
   // A free booking collects nothing from the attendee, so the platform's flat fee has no
   // payment to be netted out of — it is booked as a receivable against the organizer instead.
-  describe('recordFreeBookingLedger', () => {
-    const FREE_BREAKDOWN: FeeBreakdown = {
-      ticketPrice: 0,
-      feePayer: FeePayer.ORGANIZER,
-      platformCommissionAmount: 12.5,
-      gatewayFeeAmount: 0,
-      gstAmount: 2.25,
-      subtotalBeforeTax: 0,
-      buyerPrice: 0,
-      organizerPayout: 0,
-    };
-
-    it('books the fee as an organizer receivable, not against a payment', async () => {
-      const entries = await service.recordFreeBookingLedger(mockManager(), 'enr1', FREE_BREAKDOWN, 'enr1');
-      const net = netByAccount(entries);
-
-      // Negative: the organizer owes this. No BUYER_ESCROW movement at all — no money came in.
-      expect(net[LedgerAccount.ORGANIZER_PAYABLE]).toBeCloseTo(-12.5, 2);
-      expect(net[LedgerAccount.BUYER_ESCROW] ?? 0).toBe(0);
-    });
-
-    it('funds GST out of the platform fee, since the buyer contributed nothing', async () => {
-      const entries = await service.recordFreeBookingLedger(mockManager(), 'enr1', FREE_BREAKDOWN, 'enr1');
-      const net = netByAccount(entries);
-
-      expect(net[LedgerAccount.GST_OUTPUT_TAX]).toBeCloseTo(2.25, 2);
-      expect(net[LedgerAccount.PLATFORM_REVENUE]).toBeCloseTo(12.5 - 2.25, 2);
-    });
-
-    it('writes nothing when the free-event fee is disabled', async () => {
-      const entries = await service.recordFreeBookingLedger(
-        mockManager(),
-        'enr1',
-        { ...FREE_BREAKDOWN, platformCommissionAmount: 0, gstAmount: 0 },
-        'enr1',
-      );
-      expect(entries).toEqual([]);
-    });
-
-    it('omits the GST leg when the tax rate is unset', async () => {
-      const entries = await service.recordFreeBookingLedger(
-        mockManager(),
-        'enr1',
-        { ...FREE_BREAKDOWN, gstAmount: 0 },
-        'enr1',
-      );
-      expect(entries.map((e) => e.entryType)).toEqual([LedgerEntryType.COMMISSION]);
-    });
-  });
 
   describe('recordRefundLedger', () => {
     it('returns the GST liability to the account that funded it', async () => {

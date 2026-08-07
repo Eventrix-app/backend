@@ -55,6 +55,59 @@ export class Enrollment {
   @Column({ name: 'total_price', type: 'decimal', precision: 10, scale: 2, default: 0 })
   totalAmount!: number;
 
+  // --- Frozen fee split, stamped once by handleWebhook() when the payment succeeds ---
+  //
+  // Everything below is a SNAPSHOT of what was actually charged and how it was actually
+  // split, written inside the settlement transaction and never rewritten afterwards.
+  //
+  // Before this existed, payout, invoicing and refund reversal all re-derived the split from
+  // enrollment.totalAmount against the organizer's CURRENT commissionRate. That made the
+  // rate retroactive: an admin editing an organizer from 0% to 5% silently restated every
+  // past event's payout and reissued every past invoice at a different total than the buyer
+  // was billed and the ledger recorded. The same applies to the platform-wide defaults
+  // (PLATFORM_COMMISSION_PERCENT, GATEWAY_FEE_*, TAX_GST_RATE) — an env change moved money
+  // that had already been accounted for.
+  //
+  // NULL on every row booked before this shipped. Readers MUST fall back to
+  // calculateFromChargedAmount() for those rather than treating NULL as zero — a frozen 0
+  // (negotiated commission-free partner) and "never frozen" are different facts, which is
+  // why these are nullable rather than `default: 0`. See PaymentsService.resolveBreakdown().
+  @Column({ name: 'fee_payer_applied', type: 'varchar', length: 20, nullable: true })
+  feePayerApplied?: string | null;
+
+  // The commission inputs in force at settlement, kept alongside the resulting amounts so a
+  // dispute can be answered with "you were on 5% + ₹0 on that date", not just a total.
+  @Column({ name: 'commission_rate_applied', type: 'decimal', precision: 5, scale: 2, nullable: true })
+  commissionRateApplied?: number | null;
+
+  @Column({ name: 'commission_flat_fee_applied', type: 'decimal', precision: 10, scale: 2, nullable: true })
+  commissionFlatFeeApplied?: number | null;
+
+  // The base the split was computed from, across the whole order. Under feePayer=PARTICIPANT
+  // this is strictly less than totalAmount (which carries the fees on top); under ORGANIZER
+  // the two are equal; for a free event it is 0 while totalAmount is the ₹12.50 fee.
+  @Column({ name: 'ticket_base_amount', type: 'decimal', precision: 10, scale: 2, nullable: true })
+  ticketBaseAmount?: number | null;
+
+  @Column({ name: 'platform_fee_amount', type: 'decimal', precision: 10, scale: 2, nullable: true })
+  platformFeeAmount?: number | null;
+
+  @Column({ name: 'gateway_fee_amount', type: 'decimal', precision: 10, scale: 2, nullable: true })
+  gatewayFeeAmount?: number | null;
+
+  @Column({ name: 'gst_amount', type: 'decimal', precision: 10, scale: 2, nullable: true })
+  gstAmount?: number | null;
+
+  // What the organizer is owed for this booking. THE figure the payout sweep sums — no
+  // longer recomputed from live config at sweep time.
+  @Column({ name: 'organizer_payout_amount', type: 'decimal', precision: 10, scale: 2, nullable: true })
+  organizerPayoutAmount?: number | null;
+
+  // Set together with the columns above. Distinguishes "frozen, and every amount happened to
+  // be 0" from "never frozen" without having to test each column for NULL.
+  @Column({ name: 'fees_frozen_at', type: 'timestamp', nullable: true })
+  feesFrozenAt?: Date | null;
+
   @Column({ name: 'booking_status', type: 'varchar', default: 'confirmed' })
   status!: string;
 

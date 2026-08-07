@@ -32,6 +32,7 @@ import { DeviceToken } from './entities/device-token.entity';
 import { Report } from './entities/report.entity';
 import { Block } from './entities/block.entity';
 import { LedgerEntry } from './entities/ledger-entry.entity';
+import { OrganizerBankAccount } from './entities/organizer-bank-account.entity';
 
 const entities = [
   User,
@@ -66,6 +67,7 @@ const entities = [
   Report,
   Block,
   LedgerEntry,
+  OrganizerBankAccount,
 ];
 
 // MIGRATION_DATABASE_URL takes precedence so migrations can run over a *direct* connection

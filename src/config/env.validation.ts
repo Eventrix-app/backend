@@ -2,6 +2,9 @@ import * as Joi from 'joi';
 
 export const validateEnv = (config: Record<string, unknown>) => {
   const schema = Joi.object({
+    // Declared (not just allowed through by .unknown) because CRON_SECRET's conditional
+    // requirement below references it — Joi resolves sibling refs against schema keys.
+    NODE_ENV: Joi.string().optional(),
     PORT: Joi.number().optional(),
     DATABASE_URL: Joi.string().optional(),
     DATABASE_URL_POOLER: Joi.string().optional(),
@@ -69,7 +72,26 @@ export const validateEnv = (config: Record<string, unknown>) => {
     PAYOUT_DELAY_DAYS: Joi.number().optional(),
     SUPABASE_URL: Joi.string().optional(),
     SUPABASE_SERVICE_ROLE_KEY: Joi.string().optional(),
-    CRON_SECRET: Joi.string().optional(),
+    // Required in production, optional elsewhere. This is the ONLY thing that makes the
+    // payout sweep runnable on Vercel: @Cron() never fires in a serverless model, so
+    // GET /payments/payout-sweep (guarded by this secret) is the real trigger, and Vercel
+    // only attaches `Authorization: Bearer <CRON_SECRET>` when the var is set on the project.
+    //
+    // Unset in production used to mean: the daily cron fires, the controller 401s, Vercel
+    // records a failed invocation nobody reads, and organizers silently go unpaid for as
+    // long as it takes someone to notice. Failing at boot is loud and immediate instead —
+    // the deploy breaks rather than the money flow.
+    CRON_SECRET: Joi.string().when('NODE_ENV', {
+      is: 'production',
+      then: Joi.string()
+        .required()
+        .messages({
+          'any.required':
+            'CRON_SECRET is required in production — without it the T+3 payout sweep can never run and organizers are never paid. ' +
+            'Set it in the Vercel project environment (Vercel attaches it as `Authorization: Bearer <CRON_SECRET>` on cron invocations).',
+        }),
+      otherwise: Joi.string().optional(),
+    }),
     // Optional — see configuration.ts's `admin.bootstrapSecret` comment. Unset means the
     // bootstrap-the-first-admin endpoint always rejects rather than falling back to
     // "any unauthenticated caller may create an admin whenever the admin count is 0".
@@ -97,6 +119,20 @@ export const validateEnv = (config: Record<string, unknown>) => {
     // Optional — error/crash reporting (see config/sentry.ts). Unset means Sentry's SDK
     // simply never sends anything, the same graceful-degradation pattern as every other
     // optional integration in this app (EmailService, UploadsService, PushService).
+    // AES-256-GCM key for the encrypted organizer bank-account columns (base64 of 32 random
+    // bytes). Optional at boot on purpose: the app runs fine without it, and only the bank
+    // account endpoints 503. Making it required would take the whole API down over a feature
+    // most deploys are not using yet.
+    //
+    // Deliberately its own key, not derived from JWT_SECRET or PASSWORD_PEPPER: rotating a
+    // signing key must never make bank details undecryptable, and a leak of one must not
+    // expose the other. Generate with:
+    //   node -e "console.log(require('crypto').randomBytes(32).toString('base64'))"
+    //
+    // Once accounts exist this value can never change without a re-encryption pass — the
+    // ciphertext carries a `v1:` prefix so such a rotation is possible, but nothing
+    // implements it yet.
+    BANK_ENCRYPTION_KEY: Joi.string().base64().optional(),
     SENTRY_DSN: Joi.string().optional(),
     SENTRY_ENVIRONMENT: Joi.string().optional(),
   }).unknown(true);

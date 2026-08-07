@@ -1,6 +1,6 @@
 import { Injectable, NotFoundException, ForbiddenException, Logger, ConflictException, BadRequestException } from '@nestjs/common';
 import { InjectRepository } from '@nestjs/typeorm';
-import { Repository, DataSource, ILike, In, Between, MoreThanOrEqual, LessThanOrEqual, Not } from 'typeorm';
+import { Between, DataSource, EntityManager, ILike, In, IsNull, LessThanOrEqual, MoreThanOrEqual, Not, Repository } from 'typeorm';
 import { JwtService } from '@nestjs/jwt';
 import { Event, EventApprovalStatus, EventStatus, FeePayer } from '../entities/event.entity';
 import { Enrollment } from '../entities/enrollment.entity';
@@ -193,6 +193,7 @@ export class EventsService {
       });
 
       const savedEvent = await manager.save(Event, event);
+
 
       if (autoApprovedByOrganizer) {
         this.logger.log(
@@ -1189,16 +1190,19 @@ export class EventsService {
       // amount actually charged (and later confirmed by handleWebhook) must include that
       // markup — otherwise the platform collects it on paper (Commission rows) without
       // ever actually billing the buyer for it. See fee-calculation.service.ts.
-      let totalAmount = baseAmount;
-      if (baseAmount > 0 && event.feePayer === FeePayer.PARTICIPANT) {
-        const organizer = await manager.findOne(Organizer, { where: { id: event.organizerId } });
-        const breakdown = this.feeCalculationService.calculate(
-          baseAmount,
-          toCommissionConfig(organizer),
-          event.feePayer,
-        );
-        totalAmount = breakdown.buyerPrice;
-      }
+      // Always run the fee calculation, for every event. It is the single place that knows
+      // what a buyer owes, and there are now three distinct answers: a free event charges a
+      // flat registration fee, a PARTICIPANT-pays event adds fees on top, and an
+      // ORGANIZER-pays event charges the bare ticket price. Short-circuiting the free case
+      // to zero (as this used to) would let a free booking confirm without ever collecting
+      // the registration fee.
+      const feeOrganizer = await manager.findOne(Organizer, { where: { id: event.organizerId } });
+      const breakdown = this.feeCalculationService.calculate(
+        baseAmount,
+        toCommissionConfig(feeOrganizer),
+        event.feePayer,
+      );
+      const totalAmount = breakdown.buyerPrice;
 
       const enrollment = manager.create(Enrollment, {
         userId,
@@ -1227,26 +1231,6 @@ export class EventsService {
           throw new ConflictException('User already enrolled in this event');
         }
         throw err;
-      }
-
-      // Free bookings never reach handleWebhook (there is no payment to confirm), so the
-      // platform's flat free-event fee has to be booked here or it would be computed by
-      // FeeCalculationService and then recorded precisely nowhere. Inside this transaction
-      // deliberately: the receivable and the booking that created it commit together.
-      if (baseAmount <= 0) {
-        const freeOrganizer = await manager.findOne(Organizer, { where: { id: event.organizerId } });
-        const freeBreakdown = this.feeCalculationService.calculate(
-          0,
-          toCommissionConfig(freeOrganizer),
-          event.feePayer,
-        );
-        await this.ledgerService.recordFreeBookingLedger(
-          manager,
-          saved.id,
-          freeBreakdown,
-          saved.id,
-          event.currency || 'INR',
-        );
       }
 
       // Section 5b: generate signed ticket_code for confirmed events (enclosing enrollmentId and eventId)
