@@ -452,6 +452,45 @@ export function payoutProcessedEmail(
   };
 }
 
+// The follow-up to payoutProcessedEmail above, sent when the transfer actually confirms.
+// That email is careful to say the money has NOT moved yet; this is the one that says it
+// has, which is why it leads with the bank reference — that string is what the organizer
+// quotes to their bank when a credit is missing or disputed.
+export function payoutPaidEmail(
+  eventTitle: string,
+  payoutAmount: number,
+  transferReference?: string,
+): RenderedEmail {
+  const safeTitle = escapeHtml(eventTitle);
+  const rows =
+    amountRow('Amount transferred', payoutAmount, { emphasis: true }) +
+    (transferReference
+      ? `
+    <tr>
+      <td style="border-top:1px solid ${BORDER_LIGHT};padding:10px 0;font-size:14px;color:${TEXT_SECONDARY};">Reference</td>
+      <td style="border-top:1px solid ${BORDER_LIGHT};padding:10px 0;font-size:14px;color:${TEXT_SECONDARY};text-align:right;white-space:nowrap;">${escapeHtml(transferReference)}</td>
+    </tr>
+  `
+      : '');
+  return {
+    subject: `Payout sent: ${subjectSafe(eventTitle)}`,
+    html: wrapEmail(
+      'Your payout is on its way 🏦',
+      `
+      <p>The payout for <strong>${safeTitle}</strong> has been transferred to your registered
+      bank account.</p>
+      ${amountTable(rows)}
+      <p>Bank transfers usually credit within one to two working days. ${
+        transferReference
+          ? 'Quote the reference above if you need to trace it with your bank.'
+          : ''
+      } If it has not arrived after that, reply to this email and we will trace it.</p>
+      `,
+      `₹${payoutAmount.toFixed(2)} transferred for ${eventTitle}.`,
+    ),
+  };
+}
+
 export function eventApprovedEmail(eventTitle: string, eventId?: string): RenderedEmail {
   const safeTitle = escapeHtml(eventTitle);
   const link = eventId ? appLink(`event/${encodeURIComponent(eventId)}`) : undefined;

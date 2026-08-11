@@ -60,6 +60,9 @@ describe('PaymentsService — paymentStatus enforcement', () => {
       // both fired after their transaction commits, so both must exist on the mock.
       notifyInvoiceIssued: jest.fn(),
       notifyPayoutProcessed: jest.fn(),
+      // Fired by markPayoutPaid() once a transfer confirms — distinct from the settlement
+      // summary above, which only says what is owed.
+      notifyPayoutPaid: jest.fn(),
     };
     mockCacheService = { del: jest.fn(), bumpVersion: jest.fn() };
     mockRazorpayService = {
@@ -539,6 +542,137 @@ describe('PaymentsService — paymentStatus enforcement', () => {
     it('refuses to mark a failed payout as paid', async () => {
       mockPayoutsRepo.findOne = jest.fn().mockResolvedValue({ id: 'p-1', status: 'failed' });
       await expect(service.markPayoutPaid('p-1')).rejects.toThrow(BadRequestException);
+    });
+
+    // The reference is the organizer's only proof the transfer happened — it used to be
+    // logged and discarded, which left a PAID row with nothing to reconcile against.
+    it('persists the transfer reference and notes onto the payout row', async () => {
+      mockPayoutsRepo.findOne = jest.fn().mockResolvedValue({
+        id: 'p-1', status: 'pending', amount: 900, eventId: 'event-1',
+        organizer: { userId: 'user-1' }, event: { title: 'Launch Night' },
+      });
+      mockPayoutsRepo.save = jest.fn((d: any) => Promise.resolve(d));
+
+      const result = await service.markPayoutPaid('p-1', 'UTR-99887766', 'paid manually via NEFT');
+
+      expect(result.transferReference).toBe('UTR-99887766');
+      expect(result.notes).toBe('paid manually via NEFT');
+    });
+
+    it('notifies the organizer that money was actually sent, with the reference', async () => {
+      mockPayoutsRepo.findOne = jest.fn().mockResolvedValue({
+        id: 'p-1', status: 'pending', amount: 900, eventId: 'event-1',
+        organizer: { userId: 'user-1' }, event: { title: 'Launch Night' },
+      });
+      mockPayoutsRepo.save = jest.fn((d: any) => Promise.resolve(d));
+      mockNotificationService.notifyPayoutPaid = jest.fn().mockResolvedValue(undefined);
+
+      await service.markPayoutPaid('p-1', 'UTR-99887766');
+
+      expect(mockNotificationService.notifyPayoutPaid).toHaveBeenCalledWith('user-1', {
+        payoutId: 'p-1',
+        eventId: 'event-1',
+        eventTitle: 'Launch Night',
+        payoutAmount: 900,
+        transferReference: 'UTR-99887766',
+      });
+    });
+
+    // A duplicate provider webhook must not tell the organizer twice that they were paid.
+    it('does not re-notify when confirming an already-paid payout', async () => {
+      mockPayoutsRepo.findOne = jest.fn().mockResolvedValue({
+        id: 'p-1', status: 'paid', paidAt: new Date('2020-01-01'), organizer: { userId: 'user-1' },
+      });
+      mockPayoutsRepo.save = jest.fn();
+      mockNotificationService.notifyPayoutPaid = jest.fn();
+
+      await service.markPayoutPaid('p-1', 'UTR-99887766');
+
+      expect(mockNotificationService.notifyPayoutPaid).not.toHaveBeenCalled();
+    });
+
+    // The transfer has already happened at the bank by this point; a notification failure
+    // must not turn it back into an unpaid payout.
+    it('still marks the payout paid when the notification fails', async () => {
+      mockPayoutsRepo.findOne = jest.fn().mockResolvedValue({
+        id: 'p-1', status: 'pending', amount: 900, eventId: 'event-1',
+        organizer: { userId: 'user-1' }, event: { title: 'Launch Night' },
+      });
+      mockPayoutsRepo.save = jest.fn((d: any) => Promise.resolve(d));
+      mockNotificationService.notifyPayoutPaid = jest.fn().mockRejectedValue(new Error('smtp down'));
+
+      const result = await service.markPayoutPaid('p-1', 'UTR-99887766');
+
+      expect(result.status).toBe('paid');
+    });
+  });
+
+  describe('findMyPayouts', () => {
+    // The whole point of this route: it takes no organizerId, so there is no parameter to
+    // tamper with. Scoping is derived from the session's user id.
+    it('scopes the query to the caller\'s own organizer row', async () => {
+      mockOrganizersRepo.findOne = jest.fn().mockResolvedValue({ id: 'org-1', userId: 'user-1' });
+      mockPayoutsRepo.findAndCount = jest.fn().mockResolvedValue([[], 0]);
+
+      await service.findMyPayouts('user-1');
+
+      expect(mockOrganizersRepo.findOne).toHaveBeenCalledWith({ where: { userId: 'user-1' } });
+      expect(mockPayoutsRepo.findAndCount).toHaveBeenCalledWith(
+        expect.objectContaining({ where: { organizerId: 'org-1' } }),
+      );
+    });
+
+    // A user who has never hosted anything has no organizer row. That is a normal state for
+    // a participant, not an error, and must render the empty screen rather than a failure.
+    it('returns an empty page for a user with no organizer profile', async () => {
+      mockOrganizersRepo.findOne = jest.fn().mockResolvedValue(null);
+      mockPayoutsRepo.findAndCount = jest.fn();
+
+      const result = await service.findMyPayouts('user-nobody');
+
+      expect(result).toEqual({ payouts: [], total: 0, page: 1, totalPages: 0 });
+      expect(mockPayoutsRepo.findAndCount).not.toHaveBeenCalled();
+    });
+
+    it('projects the fields an organizer needs and drops the admin-only notes', async () => {
+      mockOrganizersRepo.findOne = jest.fn().mockResolvedValue({ id: 'org-1', userId: 'user-1' });
+      mockPayoutsRepo.findAndCount = jest.fn().mockResolvedValue([
+        [
+          {
+            id: 'p-1', eventId: 'event-1', ticketCount: 10, amount: '4750.00', currency: 'INR',
+            status: 'paid', paidAt: new Date('2026-08-10T00:00:00Z'), processedAt: new Date('2026-08-09T00:00:00Z'),
+            transferReference: 'UTR-1', notes: 'internal only — never leaves the admin console',
+            event: { id: 'event-1', title: 'Tech Meetup', eventDate: '2026-08-05' },
+          },
+        ],
+        1,
+      ]);
+
+      const { payouts } = await service.findMyPayouts('user-1');
+
+      expect(payouts[0].transferReference).toBe('UTR-1');
+      expect(payouts[0].eventTitle).toBe('Tech Meetup');
+      // pg returns decimals as strings; the app must not hand a string to a currency format.
+      expect(payouts[0].amount).toBe(4750);
+      expect(payouts[0]).not.toHaveProperty('notes');
+    });
+
+    // An estimated arrival date on a payout nobody has sent yet would read as a promise.
+    it('offers an arrival estimate only once a transfer has actually been sent', async () => {
+      mockOrganizersRepo.findOne = jest.fn().mockResolvedValue({ id: 'org-1', userId: 'user-1' });
+      mockPayoutsRepo.findAndCount = jest.fn().mockResolvedValue([
+        [
+          { id: 'p-1', eventId: 'e1', ticketCount: 1, amount: 100, currency: 'INR', status: 'pending', event: { title: 'A' } },
+          // Friday → skips the weekend, lands Tuesday.
+          { id: 'p-2', eventId: 'e2', ticketCount: 1, amount: 100, currency: 'INR', status: 'paid', paidAt: new Date('2026-08-07T00:00:00Z'), event: { title: 'B' } },
+        ],
+        2,
+      ]);
+
+      const { payouts } = await service.findMyPayouts('user-1');
+
+      expect(payouts[0].estimatedArrivalDate).toBeUndefined();
+      expect(payouts[1].estimatedArrivalDate?.getDay()).toBe(2);
     });
   });
 

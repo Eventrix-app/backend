@@ -17,6 +17,7 @@ import { VerifyPaymentDto } from './dto/verify-payment.dto';
 import { InitiatePayUOrderDto } from './dto/initiate-payu-order.dto';
 import { PayUReturnDto } from './dto/payu-return.dto';
 import { SignPayUHashDto } from './dto/sign-payu-hash.dto';
+import { MarkPayoutPaidDto } from './dto/mark-payout-paid.dto';
 import { JwtPayload } from '../auth/jwt.util';
 import { Public } from '../common/decorators/public.decorator';
 import { AuditAction } from '../common/decorators/audit-action.decorator';
@@ -209,6 +210,23 @@ export class PaymentsController {
     });
   }
 
+  // An organizer's own settlement history. Scoped by the session's user id inside the
+  // service — no organizerId parameter exists on this route, so it cannot be pointed at
+  // another organizer's earnings. Admins may call it too, but it returns THEIR payouts;
+  // admin/payouts below is the route for looking at everyone's.
+  @Roles('organizer', 'admin')
+  @Get('my-payouts')
+  async findMyPayouts(
+    @Request() req: Request & { user: JwtPayload },
+    @Query('page') page?: string,
+    @Query('limit') limit?: string,
+  ) {
+    return await this.paymentsService.findMyPayouts(req.user.id, {
+      page: page ? Number(page) : undefined,
+      limit: limit ? Number(limit) : undefined,
+    });
+  }
+
   // Admin listing over the payout ledger the T+3 cron sweep populates (see
   // runPayoutSweep) — a distinct static path from 'admin' above, no route-ordering concern.
   @Roles('admin')
@@ -228,6 +246,22 @@ export class PaymentsController {
       page: page ? Number(page) : undefined,
       limit: limit ? Number(limit) : undefined,
     });
+  }
+
+  // Confirms that a transfer for this payout has actually settled at the bank. This is the
+  // only route into PayoutStatus.PAID, and it is admin-only and audited: it is an assertion
+  // that money left the platform, made by a human, on evidence that lives outside this
+  // system (a bank statement, a UTR).
+  //
+  // Manual by design for now — there is no disbursement API wired up. When one is, its
+  // webhook calls the same PaymentsService.markPayoutPaid() rather than getting its own
+  // path to PAID, and this endpoint stays as the fallback for transfers made out of band.
+  @Roles('admin')
+  @AuditAction('payout.mark_paid', 'payout')
+  @Post('admin/payouts/:id/mark-paid')
+  @HttpCode(HttpStatus.OK)
+  async markPayoutPaid(@Param('id', ParseUUIDPipe) id: string, @Body() dto: MarkPayoutPaidDto) {
+    return await this.paymentsService.markPayoutPaid(id, dto.transferReference, dto.notes);
   }
 
   @AuditAction('refund.approve', 'refund')

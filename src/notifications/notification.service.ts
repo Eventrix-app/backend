@@ -19,6 +19,7 @@ import {
   eventRejectedEmail,
   invoiceEmail,
   payoutProcessedEmail,
+  payoutPaidEmail,
   organizerFollowedEmail,
   organizerVerificationApprovedEmail,
   organizerVerificationNewSubmissionEmail,
@@ -392,6 +393,21 @@ export class NotificationService {
     await this.enqueue(organizerUserId, NotificationType.PAYOUT_PROCESSED, { ...payload });
   }
 
+  // Sent when a transfer confirms, not when the sweep computes the obligation — see
+  // NotificationType.PAYOUT_PAID.
+  async notifyPayoutPaid(
+    organizerUserId: string,
+    payload: {
+      payoutId: string;
+      eventId: string;
+      eventTitle: string;
+      payoutAmount: number;
+      transferReference?: string;
+    },
+  ): Promise<void> {
+    await this.enqueue(organizerUserId, NotificationType.PAYOUT_PAID, { ...payload });
+  }
+
   // ---------------------------------------------------------------------
   // Read-side for NotificationsScreen — lists the same jobs enqueue() persists,
   // rendered with a human-readable title/body derived from type + payload.
@@ -579,6 +595,11 @@ export class NotificationService {
         const amount = Number(payload['payoutAmount'] ?? 0);
         return { title: 'Payout processed', body: `₹${amount.toFixed(2)} settled for ${eventTitle}.` };
       }
+      case NotificationType.PAYOUT_PAID: {
+        const eventTitle = sanitize(String(payload['eventTitle'] ?? 'your event'));
+        const amount = Number(payload['payoutAmount'] ?? 0);
+        return { title: 'Payout sent', body: `₹${amount.toFixed(2)} transferred to your bank for ${eventTitle}.` };
+      }
       default:
         return { title: 'Notification', body: '' };
     }
@@ -678,6 +699,12 @@ export class NotificationService {
           Number(payload['platformFee'] ?? 0),
           Number(payload['gatewayFee'] ?? 0),
           Number(payload['payoutAmount'] ?? 0),
+        );
+      case NotificationType.PAYOUT_PAID:
+        return payoutPaidEmail(
+          String(payload['eventTitle'] ?? 'your event'),
+          Number(payload['payoutAmount'] ?? 0),
+          payload['transferReference'] ? String(payload['transferReference']) : undefined,
         );
       default: {
         const { title, body } = this.describe(type, payload);

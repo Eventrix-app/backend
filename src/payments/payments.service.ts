@@ -716,6 +716,60 @@ export class PaymentsService {
     return { payouts, total, page, totalPages: Math.ceil(total / limit) };
   }
 
+  // Organizer-facing counterpart to findAllPayoutsForAdmin above. Scoped by the CALLER's
+  // own user id — it resolves the organizer from the session rather than accepting an
+  // organizerId parameter, so there is no way to ask for someone else's settlement history.
+  //
+  // Returns a lean projection instead of the Payout entity: an organizer needs to know what
+  // they were paid, for which event, when, and against which bank reference. Anything else
+  // on the row (the internal `notes` an admin left, the organizer relation) is not theirs to
+  // read and is dropped here rather than relying on a serializer downstream to remember.
+  async findMyPayouts(
+    userId: string,
+    filters: { page?: number; limit?: number } = {},
+  ): Promise<{ payouts: OrganizerPayoutView[]; total: number; page: number; totalPages: number }> {
+    const { page = 1, limit = 20 } = filters;
+
+    const organizer = await this.organizersRepository.findOne({ where: { userId } });
+    // Not an error: a user who has never hosted an event has no organizer row and therefore
+    // no payouts. An empty page is the honest answer, and it lets the screen render its
+    // "no payouts yet" state rather than an error toast.
+    if (!organizer) return { payouts: [], total: 0, page, totalPages: 0 };
+
+    const [payouts, total] = await this.payoutsRepository.findAndCount({
+      where: { organizerId: organizer.id },
+      relations: ['event'],
+      select: { event: { id: true, title: true, eventDate: true, coverImageUrl: true } },
+      // Newest first: the payout an organizer is looking for is nearly always the most
+      // recent one. id as a tiebreaker keeps pagination deterministic when the sweep creates
+      // several rows in the same transaction.
+      order: { createdAt: 'DESC', id: 'DESC' },
+      skip: (page - 1) * limit,
+      take: limit,
+    });
+
+    return {
+      payouts: payouts.map((p) => ({
+        id: p.id,
+        eventId: p.eventId,
+        eventTitle: p.event?.title ?? 'Event',
+        eventDate: p.event?.eventDate,
+        eventCoverImageUrl: p.event?.coverImageUrl,
+        ticketCount: p.ticketCount,
+        amount: Number(p.amount),
+        currency: p.currency,
+        status: p.status,
+        processedAt: p.processedAt,
+        paidAt: p.paidAt,
+        transferReference: p.transferReference,
+        estimatedArrivalDate: estimateArrivalDate(p.paidAt),
+      })),
+      total,
+      page,
+      totalPages: Math.ceil(total / limit),
+    };
+  }
+
   private async processGatewayRefund(refund: Refund): Promise<Refund> {
     try {
       // The real gateway call happens before the transaction opens — a slow/hung external
@@ -1398,16 +1452,21 @@ export class PaymentsService {
     });
   }
 
-  // The ONLY thing permitted to move a payout to PAID. Deliberately not called anywhere
-  // yet: there is no bank-transfer integration in this codebase, so nothing can honestly
-  // claim money has moved. Whatever disbursement provider is wired up later (PayU Payouts,
-  // RazorpayX, or a manual bank-transfer confirmation screen) must call this on a confirmed
-  // transfer — that is the moment `paid_at` becomes true, and not before.
+  // The ONLY thing permitted to move a payout to PAID. Every disbursement path must come
+  // through here on a CONFIRMED transfer — an admin confirming a manual bank transfer today,
+  // a PayU Payouts / RazorpayX webhook later — because this is the moment `paid_at` becomes
+  // true, and it must not become true a moment earlier.
   //
   // Idempotent: an already-PAID payout is returned untouched rather than re-stamped, so a
-  // duplicate provider webhook cannot rewrite the settlement timestamp.
-  async markPayoutPaid(payoutId: string, transferReference?: string): Promise<Payout> {
-    const payout = await this.payoutsRepository.findOne({ where: { id: payoutId } });
+  // duplicate provider webhook cannot rewrite the settlement timestamp or re-notify the
+  // organizer.
+  async markPayoutPaid(payoutId: string, transferReference?: string, notes?: string): Promise<Payout> {
+    // Relations loaded for the notification below — the organizer's user id is what a
+    // notification addresses, and the event title is what makes the email legible.
+    const payout = await this.payoutsRepository.findOne({
+      where: { id: payoutId },
+      relations: ['organizer', 'event'],
+    });
     if (!payout) throw new NotFoundException(`Payout ${payoutId} not found`);
     if (payout.status === PayoutStatus.PAID) return payout;
     if (payout.status !== PayoutStatus.PENDING) {
@@ -1416,10 +1475,38 @@ export class PaymentsService {
 
     payout.status = PayoutStatus.PAID;
     payout.paidAt = new Date();
+    if (transferReference) payout.transferReference = transferReference;
+    if (notes) payout.notes = notes;
     const saved = await this.payoutsRepository.save(payout);
     this.logger.log(
       `Payout ${payoutId} marked PAID${transferReference ? ` (transfer ${transferReference})` : ''}`,
     );
+
+    // Fire-and-forget, and after the write: a failing notification must not roll back or
+    // throw out of a settlement that has already happened at the bank. Same posture as the
+    // sweep's own post-commit notify.
+    if (payout.organizer?.userId) {
+      // try/catch, not a bare .catch() on the promise: a synchronous throw inside the
+      // notifier would escape a .catch() entirely and propagate out of a settlement that has
+      // already been written and already happened at the bank. Same guard as the refund
+      // notify path above.
+      try {
+        await this.notificationService.notifyPayoutPaid(payout.organizer.userId, {
+          payoutId: saved.id,
+          eventId: saved.eventId,
+          eventTitle: payout.event?.title ?? 'your event',
+          payoutAmount: Number(saved.amount),
+          transferReference: saved.transferReference,
+        });
+      } catch (err) {
+        this.logger.warn(
+          `Failed to notify organizer of paid payout ${payoutId}: ${err instanceof Error ? err.message : String(err)}`,
+        );
+      }
+    } else {
+      this.logger.warn(`Payout ${payoutId} marked PAID but organizer relation was missing; no notification sent`);
+    }
+
     return saved;
   }
 
@@ -1515,6 +1602,46 @@ interface SettledPayout {
   platformFee: number;
   gatewayFee: number;
   payoutAmount: number;
+}
+
+// One row of an organizer's own settlement history (GET /payments/my-payouts).
+export interface OrganizerPayoutView {
+  id: string;
+  eventId: string;
+  eventTitle: string;
+  eventDate?: string;
+  eventCoverImageUrl?: string;
+  ticketCount: number;
+  amount: number;
+  currency: string;
+  status: PayoutStatus;
+  // When the sweep computed the obligation.
+  processedAt?: Date;
+  // When a transfer was confirmed. Null on everything that has not actually been sent.
+  paidAt?: Date;
+  transferReference?: string;
+  estimatedArrivalDate?: Date;
+}
+
+// An ESTIMATE, and only ever offered for a payout that has actually been sent — the point
+// at which a bank transfer starts moving. Deliberately not produced for a PENDING payout:
+// nothing has been submitted to a bank, so any date shown there would be a guess about when
+// a human or a not-yet-built disbursement job gets to it, and an organizer would reasonably
+// read it as a promise.
+//
+// Two working days is the slow end of the NEFT window. Weekends are skipped because banks
+// do not settle on them; public holidays are not modelled, which is why this is an estimate
+// and is labelled as one everywhere it is displayed.
+function estimateArrivalDate(paidAt?: Date): Date | undefined {
+  if (!paidAt) return undefined;
+  const date = new Date(paidAt);
+  let added = 0;
+  while (added < 2) {
+    date.setDate(date.getDate() + 1);
+    const day = date.getDay();
+    if (day !== 0 && day !== 6) added++;
+  }
+  return date;
 }
 
 function round2(value: number): number {
