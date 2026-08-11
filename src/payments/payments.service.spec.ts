@@ -1,5 +1,5 @@
 import { BadRequestException, ConflictException, NotFoundException } from '@nestjs/common';
-import { PaymentsService } from './payments.service';
+import { PaymentsService, toPayuPhone } from './payments.service';
 import { RefundStatus } from '../entities/refund.entity';
 
 // Regression tests for the logs.md finding: a refund was requested, approved, and
@@ -604,6 +604,36 @@ describe('PaymentsService — paymentStatus enforcement', () => {
       const result = await service.markPayoutPaid('p-1', 'UTR-99887766');
 
       expect(result.status).toBe('paid');
+    });
+  });
+
+  // PayU's SDK rejects anything that is not exactly 10 digits, from inside native code, so a
+  // bad value here surfaces as an unexplained popup on the checkout screen rather than
+  // anything traceable. These are the shapes Edit Profile actually accepts today — it
+  // applies no format validation at all.
+  describe('toPayuPhone', () => {
+    it.each([
+      ['a plain 10-digit number', '9876543210'],
+      ['a +91 country code with spaces', '+91 98765 43210'],
+      ['a 0091 international prefix', '00919876543210'],
+      ['a leading trunk zero', '09876543210'],
+      ['hyphenated input', '98765-43210'],
+      ['bracketed country code', '(+91) 9876543210'],
+    ])('accepts %s', (_label, input) => {
+      expect(toPayuPhone(input)).toBe('9876543210');
+    });
+
+    // The original bug: phoneNumber is nullable and never collected at signup, so every
+    // account that had not visited Edit Profile sent '' straight to PayU.
+    it.each([
+      ['null', null],
+      ['undefined', undefined],
+      ['an empty string', ''],
+      ['too few digits', '98765'],
+      ['letters only', 'not a phone'],
+    ])('rejects %s with an actionable message', (_label, input) => {
+      expect(() => toPayuPhone(input)).toThrow(BadRequestException);
+      expect(() => toPayuPhone(input)).toThrow(/10-digit mobile number/);
     });
   });
 

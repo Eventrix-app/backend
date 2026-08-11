@@ -190,7 +190,7 @@ export class PaymentsService {
       productinfo,
       firstname,
       email,
-      phone: user.phoneNumber || '',
+      phone: toPayuPhone(user.phoneNumber),
       key: this.payuService.merchantKey,
       hash,
       actionUrl: this.payuService.actionUrl,
@@ -216,7 +216,7 @@ export class PaymentsService {
       productInfo: productinfo,
       firstName: firstname,
       email,
-      phone: user.phoneNumber || '',
+      phone: toPayuPhone(user.phoneNumber),
       // "1" = test mode, "0" = production, per PayUBizConstants.ENVIRONMENT — a string, not a
       // boolean, matching the SDK's own native constant type.
       environment: this.payuService.isTestMode ? '1' : '0',
@@ -1642,6 +1642,37 @@ function estimateArrivalDate(paidAt?: Date): Date | undefined {
     if (day !== 0 && day !== 6) added++;
   }
   return date;
+}
+
+// PayU's SDK requires exactly 10 digits and rejects anything else with "Phone number should
+// be of 10 digits" — an error raised inside the native SDK, so it surfaces as an opaque
+// popup on the checkout screen with nothing in our logs pointing at the cause.
+//
+// Both PayU paths used to send `user.phoneNumber || ''`. User.phoneNumber is nullable and is
+// never collected at signup, so for any account that has not filled in Edit Profile that sent
+// an empty string — a guaranteed rejection, at the last possible moment, after the enrollment
+// row had already been created.
+//
+// Normalising rather than passing the column through verbatim matters just as much: Edit
+// Profile applies no format validation, so "+91 98765 43210", "098765 43210" and
+// "98765-43210" are all real stored values that fail PayU's check while looking perfectly
+// valid to the person who typed them.
+//
+// Safe to rewrite: phone is NOT part of PayU's request hash
+// (key|txnid|amount|productinfo|firstname|email|…|salt — see PayUService.generateRequestHash),
+// so changing it cannot invalidate the signature.
+export function toPayuPhone(raw: string | null | undefined): string {
+  const digits = (raw ?? '').replace(/\D/g, '');
+  // Trailing 10 covers the country code and trunk-prefix forms above (+91…, 0091…, 0…)
+  // without hardcoding a country: PayU wants the subscriber number either way.
+  const subscriber = digits.length > 10 ? digits.slice(-10) : digits;
+
+  if (subscriber.length !== 10) {
+    throw new BadRequestException(
+      'A 10-digit mobile number is required to pay. Add one to your profile and try again.',
+    );
+  }
+  return subscriber;
 }
 
 function round2(value: number): number {
