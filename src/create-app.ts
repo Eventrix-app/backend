@@ -78,7 +78,12 @@ export async function createApp(): Promise<NestExpressApplication> {
       if (!origin || (allowLocalhostCors && isLocalhostOrigin(origin)) || origin === process.env.FRONTEND_URL) {
         callback(null, true);
       } else {
-        callback(new Error(`Origin ${origin} not allowed by CORS`), false);
+        // Decline the headers rather than erroring. CORS is enforced by the browser when it
+        // reads a response; throwing here turned every cross-origin request into a 500,
+        // including PayU's form POST to surl, which is a top-level navigation that never
+        // reads the response. That 500 replaced the page whose whole job is closing the
+        // checkout WebView, so a completed payment looked like a blank screen.
+        callback(null, false);
       }
     },
     credentials: true,
