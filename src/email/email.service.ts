@@ -52,6 +52,16 @@ export class EmailService {
             auth: { user: smtpUser, pass: smtpPass },
           })
         : null;
+
+    // No transport = every email silently no-ops while callers report success.
+    // Logged, not thrown: a mail-less dev setup is valid and no request depends on this.
+    if (!this.isConfigured) {
+      this.logger.error(
+        'No email transport configured (neither RESEND_API_KEY nor SMTP_HOST/USER/PASS are set). ' +
+          'Every email this service is asked to send will be silently dropped — including booking ' +
+          'confirmations, OTPs and payout notifications.',
+      );
+    }
   }
 
   get isConfigured(): boolean {
