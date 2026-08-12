@@ -44,9 +44,8 @@ export interface NotificationRecord {
 const PUSH_ONLY_TYPES: ReadonlySet<NotificationType> = new Set([
   NotificationType.SHORT_LIKED,
   NotificationType.SHORT_COMMENTED,
-  // A block is a routine, private user action (mute someone in chat), not a moderation
-  // decision an admin has to make — it belongs in the dashboard's notification list as
-  // context, but an email per block would bury the reports and refunds that do need action.
+  // A block is a private user action, not a moderation decision — it belongs in the list as
+  // context, but an email per block would bury the reports that need action.
   NotificationType.USER_BLOCKED,
 ]);
 
@@ -65,13 +64,8 @@ export class NotificationService {
     private readonly pushService: PushService,
   ) {}
 
-  // Every job fires both an email and a push using the same title/body this generates
-  // for the in-app notifications list — the persist-then-mark-sent shape above stays the
-  // audit trail regardless of whether either transport actually reaches the user. Both
-  // sends are fire-and-forget on purpose: neither EmailService.send() nor PushService.send()
-  // ever throws, but even a hypothetical failure here must never fail the job itself,
-  // since callers (e.g. PaymentsService.approveRefund) await enqueue() as part of a larger
-  // state transition that has already committed.
+  // Both sends are fire-and-forget: callers await enqueue() as part of a state transition
+  // that has already committed, so neither transport may fail the job.
   async enqueue(userId: string, type: NotificationType, payload: Record<string, unknown>): Promise<NotificationJob | undefined> {
     try {
       const job = this.notificationJobsRepository.create({ userId, type, payload, status: NotificationJobStatus.PENDING });
@@ -91,10 +85,8 @@ export class NotificationService {
 
       return saved;
     } catch (err) {
-      // Must never fail the caller's already-committed operation (event approval, booking
-      // confirmation, etc.) — a DB hiccup while queuing a notification should be logged and
-      // swallowed here, not left to reject and potentially crash the process via an
-      // unhandled rejection at a `void enqueue(...)` call site.
+      // Must never fail the caller's already-committed operation — an unhandled rejection at
+      // a `void enqueue(...)` call site would crash the process.
       this.logger.error(`Failed to enqueue notification [${type}] for user ${userId}: ${err instanceof Error ? err.message : String(err)}`);
       return undefined;
     }
@@ -103,11 +95,8 @@ export class NotificationService {
   private async sendEmailForJob(user: User | null, type: NotificationType, payload: Record<string, unknown>): Promise<void> {
     try {
       if (!user?.email || user.emailEnabled === false) return;
-      // describeEmail() falls through to a generic template for any type without a bespoke
-      // one, so a new type is emailed by default. That is right for the low-frequency,
-      // consequential events here (a booking, a cancellation, a refund) and wrong for social
-      // signals: one email per like on a reel is spam, and the surest way to get a sending
-      // domain marked as such. Those reach the user in-app and by push instead.
+      // New types are emailed by default via the generic template. Right for bookings and
+      // refunds, wrong for social signals — one email per reel like gets a domain flagged.
       if (PUSH_ONLY_TYPES.has(type)) return;
       const { subject, html } = this.describeEmail(type, payload);
       const attachments = await this.buildEmailAttachments(type, payload);
@@ -139,29 +128,22 @@ export class NotificationService {
       const devices = await this.deviceTokenRepository.find({ where: { userId: user.id } });
       if (devices.length === 0) return;
       const { title, body } = this.describe(type, payload);
-      // type is included alongside the raw payload so the app's notification-tap handler
-      // can deep-link (EventDetails/Bookings/TicketDetails) without re-deriving it from
-      // title/body text. Fanned out to every registered device (not just one) — a user
-      // signed in on two phones expects a push on both, not just whichever logged in most
-      // recently. PushService.send() never rejects (it catches internally), so one dead/
-      // uninstalled device's token can't suppress delivery to the rest.
+      // type rides along so the tap handler can deep-link without parsing title/body. Fanned
+      // out to every device, and one dead token can't suppress the rest.
       await Promise.all(devices.map((d) => this.pushService.send(d.token, title, body, { type, ...payload })));
     } catch (err) {
       this.logger.warn(`Failed to push notification [${type}] to user ${user?.id}: ${err instanceof Error ? err.message : String(err)}`);
     }
   }
 
-  // shortId rides along so tapping the push can open the reel itself. likerName is
-  // denormalised into the payload rather than looked up at render time: a notification is a
-  // record of something that happened, and it should still read correctly later even if the
-  // liker changes their display name or deletes their account.
+  // likerName is denormalised rather than looked up at render time: a notification records
+  // what happened and must still read correctly if the liker later renames.
   async notifyShortLiked(ownerUserId: string, shortId: string, likerName: string): Promise<void> {
     await this.enqueue(ownerUserId, NotificationType.SHORT_LIKED, { shortId, likerName });
   }
 
-  // The comment body rides along so the notification can show what was said rather than
-  // only that something was said — the difference between a useful alert and one that
-  // forces you to open the app to find out.
+  // Carries the comment body so the notification shows what was said, not just that
+  // something was.
   async notifyShortCommented(
     ownerUserId: string,
     shortId: string,
@@ -185,9 +167,8 @@ export class NotificationService {
     await this.enqueue(userId, NotificationType.WAITLIST_PROMOTED, { eventId, enrollmentId });
   }
 
-  // enrollmentId rides along so the frontend's push-tap handler can deep-link straight to
-  // TicketDetailsScreen (which needs a bookingId/enrollmentId, not a refundId) instead of
-  // only being able to fall back to the general Bookings list.
+  // enrollmentId rides along so a push tap can deep-link to TicketDetails, which needs it
+  // rather than a refundId.
   async notifyRefundStatus(userId: string, refundId: string, status: string, enrollmentId: string): Promise<void> {
     await this.enqueue(userId, NotificationType.REFUND_STATUS, { refundId, status, enrollmentId });
   }
@@ -224,13 +205,8 @@ export class NotificationService {
     await this.enqueue(userId, NotificationType.ORGANIZER_VERIFICATION_SUBMITTED, {});
   }
 
-  // ---------------------------------------------------------------------
-  // Admin queue alerts — everything below fans out to every admin account rather than to
-  // one owner, so the dashboard bell (TopBar.tsx polls GET /notifications) shows the work
-  // waiting on review. Resolving the recipients here rather than at each call site keeps
-  // callers (OrganizerService, EventsService, PaymentsService, ReportsService,
-  // BlocksService) from each re-deriving "who is an admin".
-  // ---------------------------------------------------------------------
+  // Admin queue alerts fan out to every admin. Resolving recipients here keeps each caller
+  // from re-deriving "who is an admin".
 
   // roles is a jsonb array column on users; @> is the containment operator, which uses the
   // GIN index on it rather than scanning every row.
@@ -242,9 +218,8 @@ export class NotificationService {
     return admins.map((a) => a.id);
   }
 
-  // Never rethrows: every caller is a user-facing action that has already committed (an
-  // event created, a refund requested, a report filed) — failing to alert admins must not
-  // fail it, exactly as enqueue() itself is non-throwing.
+  // Never rethrows: every caller has already committed a user-facing action, so failing to
+  // alert admins must not fail it.
   private async enqueueForAdmins(type: NotificationType, payload: Record<string, unknown>): Promise<void> {
     try {
       const adminUserIds = await this.findAdminUserIds();
@@ -264,16 +239,14 @@ export class NotificationService {
     await this.enqueueForAdmins(NotificationType.ORGANIZER_VERIFICATION_NEW_SUBMISSION, { applicantName, companyName });
   }
 
-  // Fired whenever an event lands in the admin review queue — on creation of a paid event
-  // by a non-auto-approve organizer, and again when an already-approved event is edited
-  // back into review (content change or free→paid switch).
+  // Fires on creation of a paid event by a non-auto-approve organizer, and again when an
+  // approved event is edited back into review.
   async notifyAdminsEventPendingApproval(eventId: string, eventTitle: string, organizerName: string): Promise<void> {
     await this.enqueueForAdmins(NotificationType.EVENT_PENDING_APPROVAL, { eventId, eventTitle, organizerName });
   }
 
-  // Distinct from notifyRefundStatus(REQUESTED), which acknowledges the request to the
-  // participant who made it — this is the other half: the review item for whoever has to
-  // approve or reject it.
+  // The review item for whoever approves it — distinct from notifyRefundStatus(REQUESTED),
+  // which acknowledges the request to the participant.
   async notifyAdminsRefundRequested(
     refundId: string,
     enrollmentId: string,
@@ -315,14 +288,8 @@ export class NotificationService {
     await this.enqueueForAdmins(NotificationType.USER_BLOCKED, { blockerId, blockerName, blockedId, blockedName });
   }
 
-  // Fired once a booking is actually paid-and-confirmed — immediately for free events
-  // (EventsService.enroll(), paymentStatus is 'paid' right away), or from the payment
-  // webhook for paid events (PaymentsService.handleWebhook(), on gateway success). Never
-  // fired for a paid enrollment still awaiting payment — that would tell someone they're
-  // "confirmed" for a booking they haven't actually paid for yet.
-  // Fired for every active (confirmed/pending) attendee when an organizer/admin cancels an
-  // event outright — distinct from notifyEventChanged, which is for logistics edits
-  // (date/time/venue) to an event that's still happening.
+  // Fires only once a booking is paid-and-confirmed: immediately for free events, from the
+  // webhook for paid ones. Never while payment is still pending.
   async notifyEventCancelled(userIds: string[], eventId: string, eventTitle: string, reason?: string): Promise<void> {
     await Promise.all(
       userIds.map((userId) => this.enqueue(userId, NotificationType.EVENT_CANCELLED, { eventId, eventTitle, reason })),

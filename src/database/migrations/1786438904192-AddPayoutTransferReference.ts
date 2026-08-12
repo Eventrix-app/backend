@@ -1,10 +1,7 @@
 import { MigrationInterface, QueryRunner } from 'typeorm';
 
-// Adds the settlement-evidence columns to `payouts`.
-//
-// Hand-written rather than generated: `migration:generate` diffs the whole schema against
-// the entities and would fold unrelated drift into this file (the one existing migration is
-// a full generated baseline). Two additive, nullable columns need two statements.
+// Hand-written, not generated: migration:generate diffs the whole schema and would fold
+// unrelated drift into this file.
 export class AddPayoutTransferReference1786438904192 implements MigrationInterface {
   name = 'AddPayoutTransferReference1786438904192';
 

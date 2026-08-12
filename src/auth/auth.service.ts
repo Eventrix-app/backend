@@ -44,16 +44,12 @@ export interface SessionRecord {
   isCurrent: boolean;
 }
 
-// Precomputed bcrypt hash of a value no real password will ever equal — used to burn the
-// same ~ms of CPU time login() spends on a real bcrypt.compare() when the email doesn't
-// exist at all, so response time can't be used to distinguish "no such account" from
-// "wrong password" (a login-page email-enumeration side channel).
+// Burns the same CPU as a real bcrypt.compare when the email doesn't exist, so response
+// time can't distinguish "no such account" from "wrong password".
 const DUMMY_BCRYPT_HASH = '$2b$10$lrr0hTvMFpwzRSS1y5HAROh7xVeVje9kZFZQf58/Ea5GUWl8iIa5m';
 
-// crypto.timingSafeEqual throws on unequal-length buffers rather than just returning
-// false, so a naive early-return on length mismatch would itself reintroduce a (smaller,
-// length-only) timing signal. Comparing the shorter buffer against itself keeps the
-// unequal-length path costing roughly the same as an equal-length mismatch.
+// timingSafeEqual throws on unequal lengths, so an early return would leak a length signal.
+// Comparing the shorter buffer against itself keeps both paths costing the same.
 function timingSafeStringEqual(a: string, b: string): boolean {
   const bufA = Buffer.from(a, 'utf8');
   const bufB = Buffer.from(b, 'utf8');
@@ -88,9 +84,8 @@ export class AuthService {
     private readonly cache: CacheService,
   ) {}
 
-  // One row per login/register/social-login — its id becomes the token's `jti` claim, so
-  // this specific session (and only this one) can later be revoked from Settings → Active
-  // Sessions without invalidating the user's other logged-in devices.
+  // One row per login — its id becomes the token's `jti`, so this session alone can be
+  // revoked from Active Sessions without logging out the user's other devices.
   private async createSession(userId: string, deviceLabel?: string, userAgent?: string): Promise<string> {
     const session = this.sessionsRepository.create({
       userId,
@@ -102,12 +97,8 @@ export class AuthService {
     return saved.id;
   }
 
-  // Called on both password-change paths (self-service and forgot-password/OTP) — a
-  // password change is exactly the moment a leaked/stolen session should stop working
-  // everywhere, not just on whichever device made the change. This keeps Settings → Active
-  // Sessions truthful with what JwtAuthGuard's own passwordChangedAt check already does
-  // (silently reject every pre-existing token) — without it, a revoked-in-spirit session
-  // would still show up as "active" in that list until its token separately expired.
+  // A password change must kill sessions everywhere, not just on the device that made it.
+  // Keeps Active Sessions truthful with JwtAuthGuard's passwordChangedAt check.
   private async revokeAllSessions(userId: string): Promise<void> {
     await this.sessionsRepository.update({ userId, revokedAt: IsNull() }, { revokedAt: new Date() });
   }
@@ -117,10 +108,8 @@ export class AuthService {
 
     const user = await this.usersRepository.findOne({ where: { email } });
     if (!user) {
-      // Still run a bcrypt.compare so this path takes roughly the same time as a real
-      // wrong-password rejection below — otherwise "no such account" returns near-instantly
-      // while a real account's wrong password waits on bcrypt, letting an attacker enumerate
-      // registered emails purely from response latency despite the identical error text.
+      // Run bcrypt anyway so this costs the same as a real wrong-password rejection —
+      // otherwise response latency enumerates registered emails despite identical text.
       await burnPasswordCompare(password, DUMMY_BCRYPT_HASH);
       this.logger.warn(`Login failed: user not found for email ${email}`);
       throw new UnauthorizedException('Invalid email or password');
@@ -138,12 +127,8 @@ export class AuthService {
 
     let passwordMatches = false;
     if (isLegacyPlaintext) {
-      // Legacy rows from the previous (unhashed) AuthService: compare plaintext and re-hash on success.
-      // `===` on strings short-circuits at the first differing character, so its timing
-      // leaks how many leading characters of a guess were correct — bcrypt.compare() below
-      // doesn't have this problem, but these old plaintext rows predate it. Vanishingly few
-      // (if any) such rows should still exist, but the comparison itself costs nothing to
-      // harden properly.
+      // Legacy unhashed rows: `===` short-circuits and leaks how many leading characters
+      // matched, so compare in constant time even though these rows are near-extinct.
       passwordMatches = timingSafeStringEqual(stored, password);
     } else {
       passwordMatches = await verifyPassword(password, stored, user.passwordHashVersion);
@@ -154,12 +139,8 @@ export class AuthService {
       throw new UnauthorizedException('Invalid email or password');
     }
 
-    // Transparent upgrade to the current hashing scheme. Login is the only place this can
-    // happen — re-hashing needs the plaintext, and this is the one moment the server holds
-    // it. Covers both the ancient unhashed rows above and v1 (unpeppered bcrypt) rows.
-    //
-    // Best-effort on purpose: a failure here means the account stays on the older scheme and
-    // gets another chance next login. It must never turn a valid login into a failed one.
+    // Login is the only place re-hashing can happen — it needs the plaintext. Best-effort:
+    // a failure leaves the older scheme in place and must never fail a valid login.
     if (isLegacyPlaintext || needsRehash(user.passwordHashVersion)) {
       try {
         const upgraded = await hashPassword(password);
@@ -223,10 +204,8 @@ export class AuthService {
       roles: ['user'],
       bio: JSON.stringify({ username }),
       isEmailVerified: false,
-      // Registration now happens before the onboarding chain (carousel + interests +
-      // location + notification prefs), not after — so a fresh account has not completed
-      // it yet. Defaults to false via the entity/column default; PATCH
-      // users/me/complete-onboarding flips it once the chain actually finishes.
+      // Registration now precedes onboarding, so a fresh account has not completed it.
+      // PATCH users/me/complete-onboarding flips this once the chain finishes.
     });
 
     const saved = await this.usersRepository.save(user);
@@ -259,18 +238,8 @@ export class AuthService {
     };
   }
 
-  // Re-issues a token with a fresh SESSION_TOKEN_TTL_SECONDS expiry for a user who already
-  // holds a currently-valid one — JwtAuthGuard (which runs before this on every non-@Public()
-  // route) has already verified the token's signature/expiry and that the account isn't
-  // banned/deleted, so no password check is needed here. Re-reads the user row (rather than
-  // trusting the old token's payload) so roles/name changes since the last login are picked
-  // up on refresh instead of persisting stale claims for another 2 days.
-  //
-  // Reuses the SAME session (jti) rather than creating a new one — this is a sliding-TTL
-  // renewal of an existing session (called on every app foreground/launch), not a new
-  // login, so it must not spawn a fresh "device" entry in Settings → Active Sessions every
-  // time. sessionId is undefined only for a pre-jti token (see JwtPayload.jti); such a
-  // token refreshes untracked, same graceful-degradation as the guard's own check.
+  // Sliding-TTL renewal for an already-valid token, so it reuses the SAME jti rather than
+  // spawning a new Active Sessions entry. Re-reads the user so role changes aren't stale.
   async refresh(userId: string, sessionId?: string): Promise<AuthResponseDto> {
     const user = await this.usersRepository.findOne({ where: { id: userId } });
     if (!user) {
@@ -308,9 +277,8 @@ export class AuthService {
     deviceLabel?: string,
     userAgent?: string,
   ): Promise<AuthResponseDto> {
-    // Verify the token with the provider and extract the user's profile. Each branch
-    // cryptographically verifies the token against the provider itself (signature/audience/
-    // issuer/expiry as applicable) rather than trusting whatever the client asserts.
+    // Each branch verifies the token against the provider itself (signature/audience/issuer)
+    // rather than trusting what the client asserts.
     const { providerUserId, email, fullName, pictureUrl } = await this.verifyProviderToken(provider, token);
 
     // Find existing identity or create a new user
@@ -343,10 +311,8 @@ export class AuthService {
       try {
         await this.authIdentityRepository.save(identity);
       } catch (err: any) {
-        // Lost a concurrent double-tap/two-device race on the same (provider,
-        // providerUserId) pair — AuthIdentity's unique constraint rejected the second
-        // insert. The identity now exists (written by the other request), so re-fetch it
-        // and continue logging in instead of surfacing a raw 500 to the loser.
+        // Lost a double-tap race on the same (provider, providerUserId) — the identity now
+        // exists, so re-fetch and continue instead of surfacing a 500 to the loser.
         if (err?.code !== '23505') throw err;
         const existing = await this.authIdentityRepository.findOne({
           where: { provider: provider as AuthProvider, providerUserId },
@@ -358,9 +324,8 @@ export class AuthService {
       }
     }
 
-    // Backfill the provider's avatar for an account that doesn't have one yet (e.g. an
-    // existing email/password account linking a social identity for the first time, or one
-    // created before this field was captured) — never overwrite a photo the user already set.
+    // Backfill the provider avatar only when the account has none — never overwrite a photo
+    // the user set themselves.
     if (!user.profilePictureUrl && pictureUrl) {
       user.profilePictureUrl = pictureUrl;
       user = await this.usersRepository.save(user);
@@ -393,19 +358,14 @@ export class AuthService {
     return { providerUserId, email, fullName, pictureUrl };
   }
 
-  // Public wrapper around verifyGoogleToken below — used by socialLogin() and, separately,
-  // by UsersService.eraseMyData() to re-verify a social-only account's identity (no password
-  // to check) before honoring a data-erasure request.
+  // Public wrapper used by socialLogin() and by UsersService.eraseMyData() to re-verify a
+  // social-only account before honoring erasure.
   async verifyProviderToken(provider: 'google', token: string) {
     return this.verifyGoogleToken(token);
   }
 
-  // Verifies a Google token — accepts both ID tokens (JWT, 3 dot-separated segments) and
-  // access tokens (opaque ya29.xxx strings). ID tokens are verified cryptographically via
-  // Google's JWKS and have their `aud` claim checked against our configured client IDs.
-  // Access tokens (which expo-auth-session/providers/google returns when idToken is absent
-  // in the native Android OAuth response) are verified by calling Google's userinfo
-  // endpoint — Google only returns a valid profile if the token is genuine and unexpired.
+  // Accepts ID tokens (verified via Google's JWKS with an `aud` check) and opaque access
+  // tokens (verified via userinfo), since native Android OAuth omits the idToken.
   private async verifyGoogleToken(token: string) {
     const audience = [
       this.configService.get<string>('GOOGLE_CLIENT_ID_IOS'),
@@ -464,9 +424,8 @@ export class AuthService {
       return;
     }
 
-    // crypto.randomInt is uniform over [100000, 999999] and, unlike Math.random(), isn't
-    // predictable from observing prior outputs — worth the negligible extra cost for
-    // something that gates an account takeover.
+    // crypto.randomInt is uniform and unpredictable from prior outputs, unlike Math.random()
+    // — worth it for something that gates account takeover.
     const otp = randomInt(100000, 1000000).toString();
 
     // One pending OTP per email — a fresh request supersedes whatever was issued before,
@@ -483,13 +442,8 @@ export class AuthService {
     const otpEmail = passwordResetOtpEmail(otp, OTP_TTL_MINUTES);
     await this.emailService.send(email, otpEmail.subject, otpEmail.html);
 
-    // Local-dev convenience only, and only when no real send was attempted — once email is
-    // configured, the code must never also land in a log, or "send it privately" is moot.
-    // Also requires the same explicit ALLOW_DEV_OTP_BYPASS opt-in as the bypass below —
-    // email being unconfigured is not, by itself, proof this is a local dev environment;
-    // env.validation.ts makes RESEND_API_KEY/SMTP_* all optional, so a production
-    // deployment that simply forgot to set them would otherwise silently leak
-    // account-takeover-capable OTPs to its logs.
+    // Requires the same explicit opt-in as the bypass below: email being unconfigured does
+    // not prove local dev, so a prod deploy missing SMTP would leak OTPs to its logs.
     const allowDevOtpLogging = this.configService.get<string>('ALLOW_DEV_OTP_BYPASS') === 'true';
     if (!this.emailService.isConfigured && allowDevOtpLogging) {
       this.logger.log(`*************************************************`);
@@ -505,14 +459,8 @@ export class AuthService {
       order: { createdAt: 'DESC' },
     });
 
-    // Dev-only testing fallback (matches whichever OTP was most recently issued, for
-    // whichever email that was) — exists so a local tester without email configured can
-    // drive the reset flow without tailing server logs. Fails CLOSED: requires an explicit
-    // opt-in env var, rather than inferring "not production" from NODE_ENV — NODE_ENV isn't
-    // required/validated anywhere in this app (env.validation.ts), so gating on `!==
-    // 'production'` meant this account-takeover-shaped bypass would be silently *live* on
-    // any deployment (VM, Docker, etc.) that simply never set NODE_ENV, not just genuine
-    // local dev. An unset/misconfigured env now leaves this off by default instead of on.
+    // Dev-only reset bypass. Fails CLOSED behind an explicit env var rather than NODE_ENV,
+    // which is never validated here — gating on it would leave this live wherever it is unset.
     const allowDevOtpBypass = this.configService.get<string>('ALLOW_DEV_OTP_BYPASS') === 'true';
     if (!match && token === '123456' && allowDevOtpBypass) {
       match = await this.otpRepository.findOne({
@@ -541,9 +489,8 @@ export class AuthService {
     await this.sendPasswordResetEmail(match.email);
   }
 
-  // Self-service, logged-in only (Settings/Profile "Verify email" action) — unlike
-  // forgot-password, there's no unauthenticated path here, so no email-enumeration concern
-  // and no need to silently no-op on a missing account the way forgotPassword does.
+  // Logged-in only, so unlike forgot-password there is no enumeration concern and no need
+  // to silently no-op on a missing account.
   async sendEmailVerificationOtp(userId: string): Promise<void> {
     const user = await this.usersRepository.findOne({ where: { id: userId } });
     if (!user) {
@@ -602,10 +549,8 @@ export class AuthService {
     }
 
     if (!match) {
-      // Deliberately 400, not 401: this endpoint is already authenticated (JwtAuthGuard),
-      // so a wrong/expired OTP is a bad-input error, not a session problem. The frontend's
-      // authErrorMiddleware force-logs-out on any 401 from any endpoint — a 401 here would
-      // kick the user back to the splash screen instead of showing the error on this screen.
+      // 400, not 401: the endpoint is already authenticated, and the frontend force-logs-out
+      // on any 401 — which would bounce the user to splash instead of showing the error.
       throw new BadRequestException('Invalid or expired verification code');
     }
 
@@ -618,9 +563,8 @@ export class AuthService {
     this.logger.log(`Email verified for user: ${user.email}`);
   }
 
-  // Logged-in password change (vs. resetPassword's forgot-password/OTP flow) — requires
-  // proving the current password rather than a code, so it uses UnauthorizedException the
-  // same way login does for a bad credential.
+  // Logged-in change requires the current password rather than a code, so it uses
+  // UnauthorizedException the same way login does.
   async changePassword(userId: string, currentPassword: string, newPassword: string): Promise<void> {
     const user = await this.usersRepository.findOne({ where: { id: userId } });
     if (!user) {
@@ -649,10 +593,8 @@ export class AuthService {
     await this.emailService.send(email, changed.subject, changed.html);
   }
 
-  // Forgot-password/OTP flow — doesn't require proving the current password, so this is
-  // the higher-suspicion path (anyone who intercepted the OTP could trigger it). Worded
-  // and flagged distinctly from sendPasswordChangedEmail so a recipient who didn't request
-  // a reset immediately recognizes this as the more serious of the two notices.
+  // Forgot-password path proves no current password, so it is the higher-suspicion one —
+  // worded distinctly so a recipient who didn't request it recognises the severity.
   private async sendPasswordResetEmail(email: string): Promise<void> {
     const resetConfirmation = passwordResetConfirmationEmail();
     await this.emailService.send(email, resetConfirmation.subject, resetConfirmation.html);
@@ -675,19 +617,14 @@ export class AuthService {
     }));
   }
 
-  // Deliberately silent (no error) if the session doesn't exist or was already revoked —
-  // "log out this device" reaching the same end state either way isn't worth surfacing as
-  // a failure to the caller. The `userId` scoping in the WHERE is what actually matters:
-  // it's what stops one account from revoking another's session by guessing an id.
+  // Silent when already revoked — same end state either way. The userId scoping in the
+  // WHERE is what stops one account revoking another's session by guessing an id.
   async revokeSession(userId: string, sessionId: string): Promise<void> {
     await this.sessionsRepository.update({ id: sessionId, userId, revokedAt: IsNull() }, { revokedAt: new Date() });
   }
 
-  // "Log out other devices" — revokes every one of this user's active sessions except the
-  // one making the request. If the caller's own token predates the jti field (see
-  // JwtPayload.jti), there's no "current" session id to protect, so every session is
-  // revoked, including — on its next request — the caller's own; that's the correct
-  // outcome for a token this app can't otherwise distinguish from any other device's.
+  // Revokes every session except the caller's. A pre-jti token has no id to protect, so it
+  // revokes its own too — correct for a token this app can't distinguish from any other.
   async revokeOtherSessions(userId: string, currentSessionId?: string): Promise<number> {
     const result = await this.sessionsRepository.update(
       { userId, revokedAt: IsNull(), id: Not(currentSessionId ?? '') },

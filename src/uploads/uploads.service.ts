@@ -13,30 +13,12 @@ import { randomUUID } from 'crypto';
 import { AllowedUploadContentType, CreateSignedUrlDto, UploadPurpose } from './dto/create-signed-url.dto';
 
 const MAX_PHOTO_BYTES = 10 * 1024 * 1024; // 10MB — plenty for a photo or ID-document scan
-// `event-images` also carries reel videos (UploadPurpose.REEL_VIDEO) and event gallery
-// clips, which the 10MB photo limit rejected outright — no reel could ever be uploaded.
-//
-// 50MB, not more: a Supabase project has its own global file size limit that a bucket
-// cannot exceed, and this project's is 50MB. Asking for anything above it makes
-// updateBucket fail outright, which would leave the bucket on its previous (10MB) limit —
-// so a larger number here does not mean larger uploads, it means no change at all.
-//
-// The client is held to the same ceiling from two directions so a user never records or
-// picks a file that is guaranteed to be rejected: RecordReelScreen caps the recording with
-// maxFileSize, and reelUploadManager checks the file before spending any upload bandwidth.
-// If the project limit is ever raised, all three move together.
+// 50MB, not more: the Supabase project's own global limit is 50MB, and asking for above it
+// makes updateBucket fail silently, leaving the bucket on its old (10MB) limit.
 const MAX_VIDEO_BYTES = 50 * 1024 * 1024;
 
-// Per-bucket allow-list enforced by Supabase Storage itself on every upload through a
-// signed URL, not just the DTO's client-declared contentType (which only ever chose a
-// file extension for the object key — nothing previously stopped a client from PUTting
-// arbitrary bytes, e.g. HTML/SVG with a mismatched Content-Type, to a "png" path). Only
-// `event-images` needs video: it's shared by both EVENT_IMAGE (gallery items, which can be
-// short video clips — see EventMedia.type) and EVENT_COVER (image-only in practice).
-// Every other bucket here is inherently photo-only (profile pictures, logos, KYC document
-// scans) and has no legitimate reason to accept video.
-// The size limit is per-bucket rather than one global constant: only `event-images` accepts
-// video, and holding it to the photo-sized limit silently broke every video upload.
+// Enforced by Supabase Storage on every signed upload, not just the client-declared
+// contentType — nothing else stopped a client PUTting arbitrary bytes to a "png" path.
 const BUCKET_CONSTRAINTS: Record<string, { public: boolean; allowedMimeTypes: string[]; maxBytes: number }> = {
   'profile-pictures': { public: true, allowedMimeTypes: ['image/png', 'image/jpeg', 'image/jpg', 'image/heic', 'image/webp'], maxBytes: MAX_PHOTO_BYTES },
   'event-images': { public: true, allowedMimeTypes: ['image/png', 'image/jpeg', 'image/jpg', 'image/heic', 'image/webp', 'video/mp4', 'video/quicktime'], maxBytes: MAX_VIDEO_BYTES },
@@ -51,28 +33,21 @@ interface PurposeConfig {
   // null = any authenticated user may request this purpose; otherwise the caller
   // must hold at least one of these roles. See multipart.md §3.2.
   allowedRoles: string[] | null;
-  // true for KYC documents (identity/address proof, PAN/Aadhaar) — sensitive PII, not a
-  // routinely-displayed public asset. createSignedUrl() skips getPublicUrl() for these and
-  // returns the raw storage path instead; viewing one later requires a fresh short-lived
-  // signed read URL (see createSignedReadUrl()), not a permanent public link.
+  // KYC documents are sensitive PII, so these skip getPublicUrl() and return a raw storage
+  // path; viewing one needs a fresh short-lived signed read URL.
   isPrivate?: boolean;
-  // true rejects video/* content types even though the underlying bucket allows them —
-  // `event-images` allows video because EVENT_IMAGE/REEL_VIDEO need it, but that bucket-
-  // level allow-list is shared by every purpose stored there, so EVENT_COVER and
-  // CATEGORY_ICON (image-only in practice) need their own, narrower check here.
+  // Rejects video even though the bucket allows it — the bucket-level allow-list is shared
+  // by every purpose stored there, so image-only purposes need their own check.
   imageOnly?: boolean;
-  // Purpose-specific ceiling, tighter than the bucket's own fileSizeLimit — only enforced
-  // when the client sends CreateSignedUrlDto.fileSize (a UX-level guard, since the bucket's
-  // own limit is what Storage actually enforces on the upload itself).
+  // Tighter than the bucket's own limit, and only a UX guard: Storage's limit is what
+  // actually enforces the upload.
   maxBytes?: number;
 }
 
 const CATEGORY_ICON_MAX_BYTES = 2 * 1024 * 1024; // 2MB — matches the admin dashboard's own check
 
-// Every purpose except the KYC ones below is a public bucket — low-sensitivity,
-// routinely-displayed assets, so public buckets get the best CDN cache hit rate with no
-// signed-URL complexity on the read side (multipart.md §3.3). Buckets are provisioned in
-// Supabase out-of-band; this map only decides which bucket+prefix a purpose lands in.
+  // Public buckets everywhere except KYC: routinely-displayed assets get the best CDN hit
+  // rate with no signed-URL complexity on reads.
 const PURPOSE_CONFIG: Record<UploadPurpose, PurposeConfig> = {
   [UploadPurpose.PROFILE_PICTURE]: { bucket: 'profile-pictures', pathPrefix: 'users', allowedRoles: null },
   [UploadPurpose.EVENT_IMAGE]: { bucket: 'event-images', pathPrefix: 'events', allowedRoles: ['organizer', 'admin'] },
@@ -82,9 +57,8 @@ const PURPOSE_CONFIG: Record<UploadPurpose, PurposeConfig> = {
   [UploadPurpose.IDENTITY_PROOF]: { bucket: 'organizer-kyc-docs', pathPrefix: 'identity-proof', allowedRoles: null, isPrivate: true },
   [UploadPurpose.ADDRESS_PROOF]: { bucket: 'organizer-kyc-docs', pathPrefix: 'address-proof', allowedRoles: null, isPrivate: true },
   [UploadPurpose.PAN_OR_AADHAAR]: { bucket: 'organizer-kyc-docs', pathPrefix: 'pan-or-aadhaar', allowedRoles: null, isPrivate: true },
-  // Reuses event-images (already public, already allows video/mp4 + video/quicktime) —
-  // no new bucket to provision. allowedRoles: null since reel uploaders are attendees,
-  // not organizers, unlike EVENT_IMAGE/EVENT_COVER above.
+  // Reuses event-images (already public, already allows video). allowedRoles is null since
+  // reel uploaders are attendees, not organizers.
   [UploadPurpose.REEL_VIDEO]: { bucket: 'event-images', pathPrefix: 'reels', allowedRoles: null },
   // Reuses event-images too — a category icon is just another admin-managed image, not
   // worth its own bucket.
@@ -108,12 +82,8 @@ export class UploadsService implements OnModuleInit {
 
   constructor(private readonly configService: ConfigService) {}
 
-  // Self-healing, idempotent bucket-constraint sync — same spirit as CategoryService's
-  // OnModuleInit seeding. Buckets themselves are still provisioned out-of-band in Supabase,
-  // but their MIME/size limits are enforced from this map on every boot rather than only
-  // living as a manually-set dashboard setting someone could forget to configure (or
-  // accidentally loosen) on a new environment. Must never fail app startup — a missing
-  // Supabase config or a not-yet-created bucket just logs a warning and skips.
+  // Idempotent bucket-constraint sync on boot, so limits live here rather than in a
+  // dashboard setting someone can forget. Must never fail startup — warn and skip.
   async onModuleInit(): Promise<void> {
     const supabaseUrl = this.configService.get<string>('SUPABASE_URL');
     const supabaseKey = this.configService.get<string>('SUPABASE_SERVICE_ROLE_KEY');
@@ -130,10 +100,8 @@ export class UploadsService implements OnModuleInit {
         allowedMimeTypes: constraints.allowedMimeTypes,
       });
       if (error) {
-        // Raised from warn to error: when this fails the bucket silently keeps whatever
-        // limits it was provisioned with, and the only symptom is uploads being rejected by
-        // Storage with a 400 that never mentions the bucket. That is far too quiet for a
-        // misconfiguration that breaks a whole feature.
+        // error, not warn: on failure the bucket keeps its old limits and the only symptom is
+        // a Storage 400 that never mentions the bucket.
         this.logger.error(
           `Could not sync upload constraints for bucket "${bucket}": ${error.message}. ` +
             `Uploads to this bucket will be rejected by Storage if its existing limits are narrower than expected.`,
@@ -149,10 +117,8 @@ export class UploadsService implements OnModuleInit {
     }
   }
 
-  // Issues a signed PUT URL scoped to the correct bucket/path for the declared
-  // purpose. Bytes never transit this server — the client PUTs directly to Supabase
-  // Storage, then sends the returned publicUrl as a normal string field on the
-  // existing participant/event/organizer create-or-update calls. See multipart.md §2-3.
+  // Bytes never transit this server — the client PUTs straight to Supabase Storage and sends
+  // the returned publicUrl as a normal field on the existing create/update calls.
   async createSignedUrl(
     dto: CreateSignedUrlDto,
     userId: string,
@@ -172,17 +138,13 @@ export class UploadsService implements OnModuleInit {
       throw new BadRequestException(`File exceeds the ${Math.round(config.maxBytes / (1024 * 1024))}MB limit for purpose "${dto.purpose}"`);
     }
 
-    // Path-per-upload (UUID, never overwrite-in-place) so replacing an image sidesteps
-    // CDN/browser cache staleness entirely instead of relying on invalidation delay.
-    // contentType is guaranteed to be a key of this map — CreateSignedUrlDto's @IsIn
-    // validates it on the HTTP path, and the deprecated forwarding route in
-    // EventsController re-checks it explicitly since it bypasses ValidationPipe.
+    // Path-per-upload (UUID, never overwrite) so replacing an image sidesteps CDN staleness
+    // instead of relying on invalidation delay.
     const extension = EXTENSION_BY_CONTENT_TYPE[dto.contentType];
     const path = `${config.pathPrefix}/${userId}/${randomUUID()}.${extension}`;
 
-    // Fail with a clear, actionable message instead of letting supabase-js's
-    // "supabaseKey is required." leak out as an opaque, uncaught 500 — this is a
-    // deployment/config problem (env vars not set locally), not a server bug.
+    // Clear config error instead of supabase-js's opaque "supabaseKey is required." 500 —
+    // this is a deployment problem, not a server bug.
     const supabaseUrl = this.configService.get<string>('SUPABASE_URL');
     const supabaseKey = this.configService.get<string>('SUPABASE_SERVICE_ROLE_KEY');
     if (!supabaseUrl || !supabaseKey) {

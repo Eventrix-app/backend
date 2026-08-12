@@ -26,10 +26,8 @@ import { CacheService } from '../common/cache/cache.service';
 import { FeeCalculationService, toCommissionConfig } from '../payments/fee-calculation.service';
 import { LedgerService } from '../payments/ledger.service';
 
-// Loading the 'organizer.user' relation pulls the full User entity by default, including
-// passwordHash and other PII — there's no @Exclude()/serializer scoping it out anywhere in
-// this app. Every read path that eager-loads it for event responses must scope the columns
-// explicitly, or that hash ends up in a public GET /events response.
+// 'organizer.user' pulls the full User entity including passwordHash, and nothing scopes it
+// out — every read path that eager-loads it must select columns explicitly.
 const SAFE_ORGANIZER_SELECT = {
   organizer: {
     id: true,
@@ -81,10 +79,8 @@ export class EventsService {
     private readonly ledgerService: LedgerService,
   ) {}
 
-  // Public listings are read far more often than events are written, so they're cached for
-  // a short window. The list is parameterized (category/online/page/limit), so instead of
-  // invalidating every possible key combination on a write, a version number is folded into
-  // the key — bumping it makes every previously-cached list entry unreachable at once.
+  // Listings are read far more than written, so they're cached. A version number folded into
+  // the key invalidates every parameterised entry at once instead of enumerating them.
   private static readonly EVENTS_LIST_TTL_SECONDS = 45;
   private static readonly EVENT_DETAIL_TTL_SECONDS = 60;
   // Home screen's featured carousel is a small curated rail, not a paginated list — capped
@@ -141,12 +137,8 @@ export class EventsService {
       const organizer = await manager.findOne(Organizer, { where: { userId } });
       const isAdmin = userRoles.includes('admin');
 
-      // Previously this auto-created an Organizer profile and silently granted the
-      // 'organizer' role to any user on their first event — no identity/KYC check at all.
-      // Per #7, a user must submit and pass admin-reviewed verification (identity proof,
-      // address proof, PAN/Aadhaar, UPI ID — see OrganizerController's verification
-      // endpoints) before they gain authority to organize events. Admins creating on behalf
-      // of an existing organizer (createEventDto.organizerId) are exempt from this gate.
+      // Creating an event used to silently grant the organizer role with no KYC. Organizers
+      // must now pass admin-reviewed verification; admins acting for one are exempt.
       if (!isAdmin && organizer?.verificationLevel !== VerificationLevel.DOCUMENT_VERIFIED) {
         throw new ForbiddenException(
           'You must complete organizer verification before you can create events. Submit your details for review from your profile.',
@@ -158,9 +150,8 @@ export class EventsService {
       } else if (organizer) {
         createEventDto.organizerId = organizer.id;
       } else {
-        // Only reachable for an admin with no organizer profile of their own and no
-        // organizerId in the request — the non-admin path above already guarantees a
-        // verified organizer exists by this point.
+        // Only reachable for an admin with no organizer profile and no organizerId — the
+        // non-admin path above already guarantees a verified organizer.
         throw new BadRequestException('organizerId is required to create an event as an admin.');
       }
 
@@ -172,9 +163,8 @@ export class EventsService {
         ? ticketTypes.every((t) => !t.price || Number(t.price) === 0)
         : !createEventDto.pricePerTicket || Number(createEventDto.pricePerTicket) === 0;
 
-      // Auto-approval branch: organizers at document_verified level with a clean track
-      // record (organizer.autoApproveEvents, set by admin) skip the admin queue even for
-      // paid events. The event is still recorded as auto-approved for audit purposes.
+      // Organizers with autoApproveEvents (admin-set, document_verified) skip the queue even
+      // for paid events. Still recorded as auto-approved for audit.
       const autoApprovedByOrganizer = !isFree && !!organizer?.autoApproveEvents;
       const isAutoApproved = isFree || autoApprovedByOrganizer;
 
@@ -287,11 +277,8 @@ export class EventsService {
     const results: Event[] = [];
     const today = new Date();
 
-    // Computed once, up front, rather than relying on assertFeaturedCapAvailable() inside
-    // the loop — that would throw and abort the whole batch partway through (leaving a
-    // partial seed committed) as soon as the 5th featured event was hit. Precomputing the
-    // remaining headroom lets every event in the batch save cleanly, with at most that many
-    // marked featured.
+    // Headroom computed up front: throwing inside the loop would abort the batch partway and
+    // leave a partial seed committed.
     const currentFeaturedCount = await this.eventsRepository.count({
       where: { featured: true, deletedAt: null as any },
     });
@@ -345,9 +332,8 @@ export class EventsService {
     page?: number;
     limit?: number;
     search?: string;
-    // Filtered against the flat pricePerTicket column — events priced purely via
-    // ticketTypes tiers (no flat price set) won't match a price-range filter. Acceptable v1
-    // scope; revisit if/when tier-based pricing becomes the primary model.
+    // Matches the flat pricePerTicket column only, so tier-priced events with no flat price
+    // won't match a price filter. Accepted v1 scope.
     priceMin?: number;
     priceMax?: number;
     // 'YYYY-MM-DD', matched against Event.eventDate (a date column, not a timestamp).
@@ -359,9 +345,8 @@ export class EventsService {
   }): Promise<{ events: Event[]; total: number; page: number; totalPages: number }> {
     const { categoryId, isOnline, page = 1, limit = 20, search, priceMin, priceMax, dateFrom, dateTo, sortBy = 'eventDate' } = filters;
 
-    // Free-text search bypasses the cache: caching would mean one cache entry per distinct
-    // search string ever typed, most never hit again — unbounded cache growth for near-zero
-    // hit rate, unlike the small, reused categoryId/isOnline/page/limit key space below.
+    // Free-text search bypasses the cache: one entry per distinct search string is unbounded
+    // growth for near-zero hit rate.
     const trimmedSearch = search?.trim();
     const cacheKey = trimmedSearch
       ? null
@@ -372,9 +357,8 @@ export class EventsService {
     }
 
     const skip = (page - 1) * limit;
-    // Cancelling an event only flips `status`, not `approvalStatus` (it was already
-    // approved) — without excluding CANCELLED here too, a cancelled event stayed visible
-    // in every public listing (Home/Search/Explore) since it still passed this filter.
+    // Cancelling flips status, not approvalStatus, so without this a cancelled event stayed
+    // visible in every public listing.
     const base: any = {
       deletedAt: null as any,
       approvalStatus: EventApprovalStatus.APPROVED,
@@ -388,16 +372,14 @@ export class EventsService {
     else if (priceMin !== undefined) base.pricePerTicket = MoreThanOrEqual(priceMin);
     else if (priceMax !== undefined) base.pricePerTicket = LessThanOrEqual(priceMax);
 
-    // Floored at today (IST) so a caller-supplied dateFrom can only push this later, never
-    // earlier — public browse/search never surfaces an event that's already happened, using
-    // the same indexed eventDate comparisons dateFrom/dateTo already relied on.
+    // Floored at today (IST) so a caller's dateFrom can only push later, never earlier —
+    // public browse must never surface a past event.
     const todayKey = todayIstDateKey();
     const effectiveDateFrom = dateFrom && dateFrom > todayKey ? dateFrom : todayKey;
     base.eventDate = dateTo ? Between(effectiveDateFrom, dateTo) : MoreThanOrEqual(effectiveDateFrom);
 
-    // SearchScreen previously only filtered events already paginated into the client — a
-    // real, bookable event several pages deep in the catalog would never surface. Matching
-    // server-side, before pagination, is what makes the full catalog actually searchable.
+    // Matched server-side before pagination — filtering only the current page meant a
+    // bookable event several pages deep could never surface.
     const where: any = trimmedSearch
       ? [
           { ...base, title: ILike(`%${trimmedSearch}%`) },
@@ -409,9 +391,8 @@ export class EventsService {
       where,
       relations: ['organizer', 'organizer.user', 'category', 'ticketTypes'],
       select: SAFE_ORGANIZER_SELECT,
-      // id as a tiebreaker: bulk-seeded/rapidly-created rows can share a createdAt down to
-      // the millisecond, and ORDER BY createdAt DESC alone is then free to return ties in a
-      // different order per request/page — id makes ordering (and pagination) deterministic.
+      // id tiebreaker: rapidly-created rows share a createdAt to the millisecond, so
+      // createdAt alone makes ordering (and pagination) non-deterministic.
       order: sortBy === 'newest' ? { createdAt: 'DESC', id: 'DESC' } : { eventDate: 'ASC', startTime: 'ASC' },
       skip,
       take: limit,
@@ -427,19 +408,8 @@ export class EventsService {
     return result;
   }
 
-  // totalCapacity/availableTickets are deprecated static columns that real (non-seeded)
-  // events never populate — recomputed here, at read time, for list/detail responses only
-  // (never persisted, so it can't clobber those legacy columns for internal write-path
-  // callers that call findOne() directly: update/approve/reject/ticket-type CRUD).
-  // event.capacity (the organizer's explicit event-wide cap, if they set one at
-  // creation/edit) wins when present; otherwise the total falls back to summing every
-  // tier's own quantityTotal, same derivation as before that field existed. Either way,
-  // "sold" is always the live sum across all tiers, so a capacity entered after some
-  // tickets are already sold still nets out correctly.
-  //
-  // isCompleted is likewise never persisted — Event.status only ever advances to CANCELLED
-  // (see cancelEvent below), so a completed event's status stays 'upcoming' forever. Every
-  // screen that needs to know an event is over reads this instead of status.
+  // totalCapacity/availableTickets/isCompleted are recomputed at read time and never
+  // persisted, so they can't clobber the legacy columns for write-path callers.
   private withComputedFields<T extends Event>(event: T): T {
     const tiers = event.ticketTypes;
     const totalSold = tiers?.length ? tiers.reduce((sum, t) => sum + t.quantitySold, 0) : 0;
@@ -469,16 +439,8 @@ export class EventsService {
     return event;
   }
 
-  // Public-facing single-event lookup (the GET /:id route). Non-owners/non-admins may
-  // only see approved events — a pending or rejected event's full details (venue,
-  // organizer contact info, rejection reason) stay invisible to everyone except the
-  // owning organizer or an admin. 404 rather than 403 so existence isn't leaked either.
-  // Internal callers that already do their own authorization (update/remove/ticket-type
-  // CRUD/etc.) should keep calling findOne() directly — this wrapper is only for that
-  // one public route.
-  // Cache-wraps findOne() for the public detail read path only — write paths (update,
-  // approve, reject, remove, ticket-type CRUD) keep calling findOne() directly so they
-  // always mutate a fresh row, never a stale cached copy.
+  // Public GET /:id: non-owners see approved events only, 404 rather than 403 so existence
+  // isn't leaked. Write paths call findOne() directly to avoid a stale cached row.
   private async findOneCached(id: string): Promise<Event> {
     const cacheKey = eventDetailCacheKey(id);
     const cached = await this.cache.get<Event>(cacheKey);
@@ -497,14 +459,8 @@ export class EventsService {
       throw new NotFoundException(`Event with id ${id} not found`);
     }
 
-    // Cancelling only flips `status`, not `approvalStatus` (it was already approved) — so
-    // without this, a cancelled event's detail page stayed fully open to anyone with the
-    // link/id, same bug findAllFiltered/findFromFollowing/findPublicEventsByOrganizer above
-    // already had to fix for listings. Unlike those, this isn't a blanket hide: someone who
-    // actually booked (any enrollment status — even a since-cancelled/refunded one counts as
-    // "had a stake in this") still needs to reach this page for context and the "View Event"
-    // link from their own ticket to keep working. A random non-enrolled viewer gets the same
-    // 404 a pending/rejected event already gives.
+    // Cancelling flips status only, so a cancelled event's page stayed open to anyone with
+    // the link. Anyone who booked still needs access; other viewers get the same 404.
     if (!isOwnerOrAdmin && event.status === EventStatus.CANCELLED) {
       const hasEnrollment = userId ? await this.enrollmentRepository.exist({ where: { eventId: id, userId } }) : false;
       if (!hasEnrollment) {
@@ -550,13 +506,8 @@ export class EventsService {
         throw new ForbiddenException('You can only update your own events');
       }
 
-      // PATCH /events/:id has no @Roles('admin') guard — organizers legitimately use it
-      // for everything else about their event, so the admin-moderation fields have to be
-      // denylisted here instead. Without this, Object.assign(event, updateEventDto) below
-      // would apply a client-supplied approvalStatus/approvedBy/rejectedBy/organizerId/
-      // status verbatim, letting an organizer self-approve their own event, forge an
-      // approvedBy/rejectedBy id, reassign the event to a different organizer, or silently
-      // un-cancel an event outside the dedicated cancel endpoint.
+      // PATCH /events/:id has no admin guard, so moderation fields are denylisted here —
+      // otherwise an organizer could self-approve, reassign, or silently un-cancel.
       if (updateEventDto.organizerId !== undefined && updateEventDto.organizerId !== event.organizerId) {
         throw new ForbiddenException('Only an admin can reassign an event to a different organizer');
       }
@@ -585,10 +536,8 @@ export class EventsService {
       updateEventDto.pricePerTicket !== undefined &&
       Number(updateEventDto.pricePerTicket) > 0 &&
       !event.isPaid;
-    // Editing moderated content (title/description/category/cover image) on an
-    // already-approved event sends it back for review, same as the free-to-paid
-    // loophole above — logistics fields (date/time/venue/capacity) stay in the
-    // "safe" bucket below and apply immediately instead.
+    // Editing moderated content (title/description/category/cover) re-opens review;
+    // logistics fields below apply immediately.
     const CONTENT_FIELDS = ['title', 'description', 'categoryId', 'coverImageUrl', 'imageUrl'] as const;
     const contentChanged = CONTENT_FIELDS.some(
       (field) => updateEventDto[field] !== undefined && updateEventDto[field] !== event[field],
@@ -624,9 +573,8 @@ export class EventsService {
       await this.notifyActiveEnrollees(updatedEvent.id, changes);
     }
 
-    // `wasApproved && (switchingToPaid || contentChanged)` above is the only branch that
-    // pushes a live event back into the queue — an edit to an already-pending event doesn't
-    // re-alert, since it's still sitting in the same review list.
+    // Only a live event returns to the queue — editing an already-pending event doesn't
+    // re-alert, since it is still in the same review list.
     if (wasApproved && updatedEvent.approvalStatus === EventApprovalStatus.PENDING_APPROVAL) {
       void this.notifyAdminsOfPendingApproval(updatedEvent);
     }
@@ -635,9 +583,8 @@ export class EventsService {
     return updatedEvent;
   }
 
-  // Resolves the organizer's display name for the admin alert; the event itself only
-  // carries organizerId. Never throws — it's called fire-and-forget from paths whose
-  // primary write has already committed.
+  // Resolves the organizer's name for the admin alert. Never throws: called fire-and-forget
+  // after the primary write has committed.
   private async notifyAdminsOfPendingApproval(event: Event): Promise<void> {
     try {
       const organizer = event.organizerId
@@ -681,9 +628,8 @@ export class EventsService {
       }
     }
 
-    // An event with unresolved bookings can't just vanish — that either strands a
-    // paying participant with no recourse or lets an organizer dodge a refund. Same
-    // "resolve buyer commitments first" rule as the ticket-type edit-lock below.
+    // An event with unresolved bookings can't vanish — that strands a paying participant or
+    // lets an organizer dodge a refund.
     const activeEnrollments = await this.enrollmentRepository.count({
       where: [
         { eventId: id, status: 'confirmed' },
@@ -701,10 +647,8 @@ export class EventsService {
     await invalidateEventCaches(this.cache, event.id);
   }
 
-  // Soft cancellation (status flip, not a delete) — unlike remove() above, this is allowed
-  // even with active bookings, since cancelling *is* the resolution path for an event that
-  // can no longer happen: attendees are notified and can self-serve a refund via
-  // PaymentsService.requestRefund(), rather than the event just vanishing on them.
+  // Soft cancellation, allowed even with active bookings: cancelling IS the resolution path,
+  // and attendees can then self-serve a refund.
   async cancelEvent(id: string, userId: string, userRoles: string[], reason?: string): Promise<Event> {
     const event = await this.findOne(id);
 
@@ -729,8 +673,7 @@ export class EventsService {
 
     this.logger.log(`Event ${saved.id} (${saved.title}) cancelled by user ${userId}${reason ? `: ${reason}` : ''}`);
 
-    // Fire-and-forget, same reasoning as AnnouncementsService.notifyAttendees — the
-    // cancellation itself is already committed by this point and must not fail because a
+    // Fire-and-forget: the cancellation is already committed and must not fail because a
     // notification hiccuped.
     void this.notifyEventCancelled(saved.id, saved.title, reason);
 
@@ -777,11 +720,8 @@ export class EventsService {
     });
     if (favorites.length === 0) return [];
 
-    // A `select` nested under a relation (favorites.event.organizer.*) without also
-    // listing the base Favorite/Event columns silently matched zero rows — TypeORM needs
-    // the root entity's own columns selected too, not just a deeply-nested sub-selection.
-    // Querying eventsRepository directly, the same select shape findAll/findAllFiltered
-    // already use successfully, sidesteps that entirely.
+    // A select nested under a relation without the root entity's own columns silently
+    // matched zero rows in TypeORM, so query eventsRepository directly instead.
     const events = await this.eventsRepository.find({
       where: { id: In(favorites.map((f) => f.eventId)) },
       relations: ['organizer', 'organizer.user', 'category'],
@@ -793,11 +733,8 @@ export class EventsService {
     return favorites.map((f) => eventById.get(f.eventId)).filter((e): e is Event => !!e);
   }
 
-  // Backs GET /events/from-following. Deliberately not run through the shared
-  // eventsListCacheKey/cache path findAllFiltered uses — that cache is keyed on filter
-  // values that are the same for every requester (categoryId/isOnline/page/limit); this
-  // result is scoped to one user's follow list, so caching it under a shared key would
-  // leak one user's followed events into another user's response.
+  // Not cached: the shared list cache is keyed on filters identical for every requester,
+  // so caching a per-user follow list would leak one user's events into another's response.
   async findFromFollowing(userId: string, page: number = 1, limit: number = 20): Promise<Event[]> {
     const follows = await this.followsRepository.find({ where: { userId } });
     if (follows.length === 0) return [];
@@ -841,10 +778,8 @@ export class EventsService {
     await this.favoritesRepository.delete({ userId, eventId });
   }
 
-  // findByOrganizerId (above) returns every status, including drafts/pending/rejected —
-  // correct for the organizer's own management screen, but exposing it publicly would leak
-  // an organizer's unpublished events to any viewer. This is the public-safe counterpart
-  // backing OrganizerProfileScreen's event list, independent of the viewer's follow status.
+  // Public-safe counterpart to findByOrganizerId, which returns drafts and rejected events
+  // — correct for the organizer's own screen, a leak if exposed publicly.
   async findPublicEventsByOrganizer(organizerId: string, page: number = 1, limit: number = 20): Promise<Event[]> {
     const skip = (page - 1) * limit;
     return await this.eventsRepository.find({
@@ -870,10 +805,8 @@ export class EventsService {
     });
   }
 
-  // Ticket-type nested CRUD (organizer-only, own event; admins may act on any event).
-  // New tiers may be added at any time. Editing/removing a tier is blocked once it has
-  // sales (quantitySold > 0) — that's the "lock" referenced in the phase-1 spec; it
-  // protects buyers, not the organizer's pre-approval workflow.
+  // Ticket-type CRUD (organizer's own event; admins any). Editing or removing a tier is
+  // blocked once it has sales — that protects buyers, not the approval workflow.
   async createTicketType(
     eventId: string,
     dto: CreateTicketTypeDto,
@@ -976,10 +909,8 @@ export class EventsService {
     if (ticketType.quantitySold > 0) {
       throw new ForbiddenException('Cannot remove a ticket tier that already has sales');
     }
-    // quantitySold can still be 0 while people are genuinely queued for this tier — an
-    // event-level aggregate capacity cap (event.capacity) can route a request to the
-    // waitlist even though the tier's own quantitySold has headroom. Deleting the tier
-    // would otherwise cascade-delete those WaitlistEntry rows with no notice to anyone.
+    // quantitySold can be 0 while people are queued via an event-level capacity cap.
+    // Deleting the tier would cascade-delete those waitlist rows with no notice.
     if (await this.waitlistService.hasWaitingEntries(ticketTypeId)) {
       throw new ForbiddenException('Cannot remove a ticket tier that people are currently waitlisted for');
     }
@@ -996,9 +927,8 @@ export class EventsService {
     return ticketType;
   }
 
-  // Gallery media (carousel items shown after the cover image on EventDetailsScreen).
-  // Same visibility rule as ticket types: pricing/media for a not-yet-approved event is
-  // only the organizer's/admin's business until it's actually approved for public viewing.
+  // Same visibility rule as ticket types: media for a not-yet-approved event stays visible
+  // only to the organizer and admins.
   async findMedia(eventId: string, userId?: string, userRoles: string[] = []): Promise<EventMedia[]> {
     const event = await this.findOne(eventId);
     const isOwnerOrAdmin = userId ? await this.isOwnerOrAdmin(event, userId, userRoles) : false;
@@ -1048,20 +978,16 @@ export class EventsService {
     }
   }
 
-  // A rejected event is a dead end — it can't grow new sellable tiers or have existing
-  // ones repriced. Pending-approval events are exempt on purpose: organizers build out
-  // tiers while waiting on admin review, per the original ticket-type CRUD design.
+  // A rejected event is a dead end. Pending events are exempt on purpose — organizers build
+  // out tiers while waiting on review.
   private assertNotRejected(event: Event): void {
     if (event.approvalStatus === EventApprovalStatus.REJECTED) {
       throw new BadRequestException('Cannot modify ticket types on a rejected event');
     }
   }
 
-  // Mirrors update()'s switchingToPaid guard for the legacy flat-price field, but for
-  // the tier-based path: pricing a tier above zero on a currently-free event is the same
-  // "free event skipped admin review, then quietly became paid" gap — nested ticket-type
-  // CRUD is the other place event pricing can change post-creation, so it needs the same
-  // fix: flip isPaid, and if the event was already approved, send it back for review.
+  // Same guard as update()'s switchingToPaid, for the tier path: a free event that quietly
+  // becomes paid skipped admin review, so flip isPaid and re-open review if approved.
   private async syncEventPaidStatusForTierPrice(event: Event, tierPrice: number): Promise<void> {
     if (!(Number(tierPrice) > 0) || event.isPaid) return;
 
@@ -1186,16 +1112,8 @@ export class EventsService {
       const bookingReference = `BK-${Date.now()}-${Math.random().toString(36).slice(2, 7).toUpperCase()}`;
       const baseAmount = Number(ticketType.price) * quantity;
 
-      // When the organizer has passed gateway/commission fees to the participant, the
-      // amount actually charged (and later confirmed by handleWebhook) must include that
-      // markup — otherwise the platform collects it on paper (Commission rows) without
-      // ever actually billing the buyer for it. See fee-calculation.service.ts.
-      // Always run the fee calculation, for every event. It is the single place that knows
-      // what a buyer owes, and there are now three distinct answers: a free event charges a
-      // flat registration fee, a PARTICIPANT-pays event adds fees on top, and an
-      // ORGANIZER-pays event charges the bare ticket price. Short-circuiting the free case
-      // to zero (as this used to) would let a free booking confirm without ever collecting
-      // the registration fee.
+      // Always run the fee calculation: it is the only place that knows what a buyer owes,
+      // and short-circuiting free events would skip the flat registration fee.
       const feeOrganizer = await manager.findOne(Organizer, { where: { id: event.organizerId } });
       const breakdown = this.feeCalculationService.calculate(
         baseAmount,
@@ -1218,11 +1136,8 @@ export class EventsService {
         bookingReference,
       });
 
-      // The `existing` check above is an app-level guard, not a lock — two concurrent
-      // enroll() calls for the same user+event can both pass it before either commits.
-      // The Enrollment table's @Unique(['userId','eventId']) constraint is the real
-      // backstop; translate its violation into the same clean 409 the app-level check
-      // gives, instead of letting a raw Postgres error surface as a 500.
+      // The `existing` check is a guard, not a lock — the @Unique(userId,eventId) constraint
+      // is the real backstop, translated here into the same 409 rather than a raw 500.
       let saved: Enrollment;
       try {
         saved = await manager.save(Enrollment, enrollment);
@@ -1259,14 +1174,12 @@ export class EventsService {
       return this.waitlistService.join(eventId, result.ticketTypeId, userId, quantity);
     }
 
-    // The confirmed enrollment just changed this ticket type's quantitySold, which
-    // availableTickets (withComputedFields) is derived from — invalidate so list/detail
-    // reads don't keep serving the pre-booking count for the rest of the cache TTL.
+    // The booking changed quantitySold, which availableTickets derives from — invalidate so
+    // reads don't serve the pre-booking count for the rest of the TTL.
     await invalidateEventCaches(this.cache, eventId);
 
-    // Only free bookings are actually paid-and-confirmed at this point (paymentStatus is
-    // set to 'paid' immediately for those, above) — a paid booking's confirmation email
-    // fires from PaymentsService.handleWebhook() instead, once payment actually succeeds.
+    // Only free bookings are paid-and-confirmed here; a paid booking's confirmation fires
+    // from PaymentsService.handleWebhook() once payment succeeds.
     if (result.enrollment.paymentStatus === 'paid') {
       void this.notificationService.notifyBookingConfirmed(
         userId,
@@ -1312,9 +1225,8 @@ export class EventsService {
       return savedEnrollment;
     });
 
-    // Frees up a seat, same as enroll() consuming one — invalidate for the same reason.
-    // promoteNext (below) may immediately re-consume it via a promotion; that path
-    // invalidates again itself, so the cache always ends up reflecting the net result.
+    // Frees a seat, same as enroll() consuming one. promoteNext may re-consume it and
+    // invalidates again, so the cache ends up reflecting the net result.
     await invalidateEventCaches(this.cache, enrollment.eventId);
 
     if (enrollment.ticketTypeId) {
@@ -1403,9 +1315,8 @@ export class EventsService {
     };
   }
 
-  // General-purpose admin catalog listing — unlike findPending (hardcoded to the paid-
-  // approval queue) and findAllFiltered (public browse, hardcoded to APPROVED), both
-  // filters here are optional so admins can see draft/rejected/cancelled/ended events too.
+  // Admin catalog listing: both filters are optional, unlike findPending (paid queue) and
+  // findAllFiltered (public, APPROVED only), so drafts and cancelled events are visible.
   async findAllForAdmin(filters: {
     approvalStatus?: EventApprovalStatus;
     status?: EventStatus;
@@ -1489,14 +1400,8 @@ export class EventsService {
       throw new BadRequestException('Cannot check in: payment for this booking is not confirmed');
     }
 
-    // Atomic claim — a plain read-then-write here could let the same ticket be honored
-    // twice if scanned concurrently (a retried request, or the same QR used at two
-    // entrances at once), since two overlapping calls could both read checkedInAt as
-    // null before either write lands. Mirrors the UPDATE ... WHERE ... RETURNING claim
-    // pattern already used for ticket-type capacity in enroll()/tryPromote().
-    //
-    // The claim also stamps *which* scan won, which is what makes the losing branch below
-    // able to distinguish a retry from a genuine second scan.
+    // Atomic claim: a read-then-write would honor the same ticket twice when scanned
+    // concurrently. Stamping which scan won is what lets the branch below spot a retry.
     const claim = await this.enrollmentRepository.query(
       `UPDATE event_bookings SET used_date = now(), check_in_key = $2, checked_in_by = $3
        WHERE id = $1 AND used_date IS NULL
@@ -1518,10 +1423,8 @@ export class EventsService {
       [enrollment.id],
     );
 
-    // Same scan arriving twice — a retry after a dropped response, or an offline queue
-    // replaying a scan that had actually reached us before connectivity died. Nobody got in
-    // twice, so this is a success, not a conflict. Without this branch the client could not
-    // tell it apart from the duplicate case below and had to assume the benign one.
+    // Same scan arriving twice (retry or offline replay) — nobody got in twice, so this is
+    // a success. Without it the client cannot tell this from a genuine duplicate.
     if (idempotencyKey && existing?.check_in_key === idempotencyKey) {
       enrollment.checkedInAt = existing.used_date;
       enrollment.checkInKey = existing.check_in_key;
@@ -1529,9 +1432,8 @@ export class EventsService {
       return enrollment;
     }
 
-    // A different scan claimed it. Offline, two gates genuinely can both admit the same
-    // ticket — that cannot be prevented without a network between them — so the useful
-    // thing is to report it precisely enough for the organizer to act on.
+    // A different scan claimed it. Two offline gates genuinely can both admit one ticket,
+    // so report it precisely enough for the organizer to act.
     throw new ConflictException({
       message: 'Ticket already checked in',
       error: 'Conflict',
@@ -1585,10 +1487,8 @@ export class EventsService {
     });
   }
 
-  // Enforced wherever `featured` can flip false→true (createForUser, update). Not enforced
-  // as a DB constraint — two concurrent requests could both pass this check and briefly
-  // push the count to 6, but this is curation, not a financial/capacity invariant, so a
-  // soft application-level check is an intentional, proportionate tradeoff.
+  // Not a DB constraint: two concurrent requests could briefly push the count to 6, but this
+  // is curation, not a financial invariant, so an app-level check is proportionate.
   private async assertFeaturedCapAvailable(): Promise<void> {
     const currentCount = await this.eventsRepository.count({
       where: { featured: true, deletedAt: null as any },
@@ -1633,10 +1533,8 @@ export class EventsService {
     }
   }
 
-  // A start/end typo (e.g. the two fields swapped) would otherwise silently create a tier
-  // whose sales window can never be open — enroll()'s `now < salesStartAt` and
-  // `now > salesEndAt` checks can't both be false at once — with no error surfaced to the
-  // organizer at creation/edit time.
+  // A swapped start/end would create a tier whose sales window can never be open, with no
+  // error surfaced to the organizer at creation time.
   private assertSalesWindowOrdered(salesStartAt?: Date, salesEndAt?: Date): void {
     if (salesStartAt && salesEndAt && salesStartAt.getTime() >= salesEndAt.getTime()) {
       throw new BadRequestException('salesStartAt must be before salesEndAt');

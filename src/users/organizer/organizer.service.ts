@@ -19,10 +19,8 @@ import { passwordChangedEmail } from '../../email/templates';
 import { SubmitVerificationDto } from './dto/submit-verification.dto';
 
 
-// Deliberately excludes everything OrganizerRecord carries that a stranger browsing the
-// app has no business seeing: email, commissionRate/commissionFlatFee/autoApproveEvents
-// (internal business terms). phone is included only for requesters with a confirmed
-// enrollment in one of this organizer's events — see getPublicProfile below.
+// Excludes email and internal business terms (commission rate, autoApproveEvents).
+// phone is included only for requesters with a confirmed enrollment — see getPublicProfile.
 export interface OrganizerPublicProfile {
   id: string;
   companyName: string;
@@ -73,16 +71,12 @@ export interface OrganizerRecord {
   verifiedAt?: Date;
   verificationLevel: VerificationLevel;
   autoApproveEvents: boolean;
-  // null means "no negotiated rate — the platform default applies" (config
-  // platform.commissionPercent). Deliberately NOT flattened to 0: an admin UI that showed 0%
-  // for a defaulted organizer would misreport what they are charged, and saving that value
-  // back would turn it into a real negotiated 0% and silently opt them out of the fee.
+  // null means "platform default applies", NOT 0 — showing 0% would misreport what they are
+  // charged, and saving it back would opt them out of the fee for real.
   commissionRate: number | null;
   commissionFlatFee: number | null;
-  // Deliberately NOT on OrganizerPublicProfile above. It is printed on invoices issued to
-  // this organizer's own attendees, but that is a document handed to a counterparty in a
-  // transaction — not something to hand any stranger browsing the app, where it would just
-  // be a free registry of organizers' tax numbers to scrape.
+  // Not on the public profile: it belongs on invoices handed to a counterparty, not in a
+  // scrapeable registry of organizers' tax numbers.
   gstin?: string;
   isActive: boolean;
   isBanned: boolean;
@@ -144,10 +138,8 @@ export class OrganizerService {
     };
   }
 
-  // Paginated (admin dashboard's People page listing) — the `user.deletedAt IS NULL`
-  // filter has to be a query-level join condition, not a post-fetch JS filter (as this
-  // used to be), because paginating with skip/take over the unfiltered set would otherwise
-  // both short a page of otherwise-active organizers and make `total` wrong.
+  // The deletedAt filter must be a join condition, not a post-fetch filter — paginating over
+  // the unfiltered set shorts pages and makes `total` wrong.
   async findAll(
     page: number = 1,
     limit: number = 50,
@@ -200,9 +192,8 @@ export class OrganizerService {
     if (dto.phone !== undefined) user.phoneNumber = dto.phone;
     let passwordChanged = false;
     if (dto.password) {
-      // Requires proof of the current password — see the identical check in
-      // ParticipantService.update for why (prevents a stolen-but-valid token from
-      // silently taking over the account via this profile-update endpoint).
+      // Requires the current password, same as ParticipantService.update — stops a stolen
+      // token taking over the account via a profile update.
       if (!dto.currentPassword) {
         throw new UnauthorizedException('Current password is required to set a new password');
       }
@@ -223,19 +214,15 @@ export class OrganizerService {
       }
       organizer.companyLogoUrl = dto.companyLogoUrl;
     }
-    // An empty string is the explicit "I am no longer registered" signal and must clear the
-    // column, not store '' — a blank GSTIN would otherwise print as a present-but-empty field
-    // on every invoice.
+    // Empty string is the explicit "no longer registered" signal and must clear the column;
+    // storing '' would print a blank field on every invoice.
     if (dto.gstin !== undefined) organizer.gstin = dto.gstin || undefined;
     if (dto.commissionRate !== undefined) organizer.commissionRate = dto.commissionRate;
     if (dto.commissionFlatFee !== undefined) organizer.commissionFlatFee = dto.commissionFlatFee;
     if (dto.verificationLevel !== undefined) {
       organizer.verificationLevel = dto.verificationLevel;
-      // Mirrors approveVerification()'s role grant — without this, an admin using this
-      // generic endpoint (instead of the dedicated verification/approve route) could set
-      // verificationLevel to DOCUMENT_VERIFIED while leaving the user without the
-      // 'organizer' role, an inconsistent state the dedicated approve/reject flow is
-      // otherwise careful to prevent.
+      // Mirrors approveVerification's role grant — otherwise this generic endpoint could set
+      // DOCUMENT_VERIFIED while leaving the user without the 'organizer' role.
       if (dto.verificationLevel === VerificationLevel.DOCUMENT_VERIFIED && !user.roles.includes('organizer')) {
         user.roles = [...user.roles, 'organizer'];
       }
@@ -347,21 +334,16 @@ export class OrganizerService {
     await this.cache.del(userMeCacheKey(userId));
   }
 
-  // Batched rather than N calls to getPublicProfile() — that per-organizer path (event
-  // count, follower count, isFollowing, canSeePhone: 4 queries + the organizer lookup
-  // itself) was issuing ~5 queries per followed organizer, so a user following 100
-  // organizers triggered ~500 queries for one screen. Every one of those checks is
-  // groupable across the whole followed set instead.
+  // Batched rather than N getPublicProfile() calls: that path costs ~5 queries per organizer,
+  // so following 100 meant ~500 queries for one screen.
   async getMyFollowing(userId: string): Promise<OrganizerPublicProfile[]> {
     const follows = await this.followsRepository.find({ where: { userId }, order: { createdAt: 'DESC' } });
     if (follows.length === 0) return [];
 
     const organizerIds = follows.map((f) => f.organizerId);
 
-    // A followed organizer's account can be soft-deleted after the follow was created
-    // (Follow rows only cascade-delete on a *hard* delete, which OrganizerService.remove()
-    // never does) — filtering those out here is this method's equivalent of the old
-    // per-item Promise.allSettled dropping a 404'd getPublicProfile() call.
+    // A followed organizer can be soft-deleted after the follow was created, since Follow only
+    // cascades on hard delete — filter those out here.
     const organizers = await this.organizersRepository.find({
       where: { id: In(organizerIds) },
       relations: ['user'],
@@ -447,10 +429,8 @@ export class OrganizerService {
     return { status: 'not_submitted', verificationLevel: organizer.verificationLevel };
   }
 
-  // Creates the Organizer profile on first submission (replacing the old auto-create in
-  // EventsService.createForUser, which granted the role with no check at all) or updates it
-  // on resubmission after a rejection. Never touches verificationLevel or the user's roles
-  // itself — only approveVerification() does that, after an admin actually reviews it.
+  // Creates the profile on first submission or updates it after a rejection. Never touches
+  // verificationLevel or roles — only approveVerification() does, after admin review.
   async submitVerification(userId: string, dto: SubmitVerificationDto): Promise<VerificationStatusRecord> {
     let organizer = await this.organizersRepository.findOne({ where: { userId } });
     if (!organizer) {
@@ -483,9 +463,8 @@ export class OrganizerService {
     return this.getMyVerificationStatus(userId);
   }
 
-  // Capped rather than fully paginated — this is an unbounded admin review queue with no
-  // page/limit params today; a hard cap on the oldest (first-in-line) submissions avoids
-  // changing the admin dashboard's existing plain-array consumption of this endpoint.
+  // Capped rather than paginated: an unbounded admin queue with no page params, and a cap
+  // avoids changing the dashboard's plain-array consumption.
   private static readonly MAX_PENDING_VERIFICATIONS_RETURNED = 200;
 
   async getPendingVerifications(): Promise<PendingVerificationRecord[]> {
@@ -506,9 +485,8 @@ export class OrganizerService {
       }));
   }
 
-  // Mints fresh 5-minute signed read URLs for a submission's three documents — the stored
-  // *Url fields are actually private-bucket storage paths (see UploadsService.isPrivate),
-  // never real public URLs, so an admin needs one of these to actually view them.
+  // The stored *Url fields are private-bucket paths, not public URLs, so an admin needs a
+  // freshly signed 5-minute read URL to view them.
   async getVerificationDocuments(organizerId: string): Promise<Record<string, string>> {
     const organizer = await this.loadActiveOrganizer(organizerId);
     if (!organizer.identityProofUrl || !organizer.addressProofUrl || !organizer.panOrAadhaarUrl) {
@@ -522,11 +500,8 @@ export class OrganizerService {
     return { identityProofUrl, addressProofUrl, panOrAadhaarUrl };
   }
 
-  // Neither loadActiveOrganizer nor either caller previously checked that a submission
-  // was actually pending review — an admin could approve/reject an organizer who never
-  // submitted documents (submittedForReviewAt never set), or act a second time on one
-  // already approved/rejected (re-granting nothing new but re-firing a duplicate
-  // approval/rejection notification each time).
+  // Nothing previously checked a submission was actually pending, so an admin could act on
+  // one never submitted, or act twice and re-fire duplicate notifications.
   private assertPendingReview(organizer: Organizer, action: 'approve' | 'reject'): void {
     const isPending =
       organizer.submittedForReviewAt != null &&
@@ -539,22 +514,12 @@ export class OrganizerService {
     }
   }
 
-  // Both approve and reject take a pessimistic_write lock on the same Organizer row and
-  // re-run assertPendingReview() *after* acquiring it — without this, two admins acting on
-  // the same submission concurrently (one approve, one reject) could both pass the pending
-  // check before either commits, and whichever save() landed last would silently win,
-  // potentially leaving a rejected organizer with the 'organizer' role still granted (or a
-  // duplicate approval notification). The lock serializes the two transactions, so the
-  // second one to run sees the first one's already-applied state and correctly gets
-  // rejected by assertPendingReview instead of racing it.
+  // Both paths lock the Organizer row and re-run assertPendingReview AFTER acquiring it —
+  // two admins acting concurrently could otherwise both pass, and the last save would win.
   async approveVerification(organizerId: string): Promise<OrganizerRecord> {
     const organizer = await this.dataSource.transaction(async (manager) => {
-      // Postgres refuses `FOR UPDATE` on the nullable side of an outer join, and TypeORM's
-      // find()/findOne() `relations` option always generates a LEFT JOIN regardless of the
-      // relation's own nullability — combined with `lock`, that 500s every single time
-      // ("FOR UPDATE cannot be applied to the nullable side of an outer join"). Organizer.user
-      // is a required (non-nullable) relation, so an explicit INNER JOIN via query builder is
-      // both correct and lock-compatible.
+      // TypeORM's `relations` always emits a LEFT JOIN, and Postgres refuses FOR UPDATE on
+      // the nullable side — so an explicit INNER JOIN is what makes the lock work here.
       const organizer = await manager
         .createQueryBuilder(Organizer, 'organizer')
         .innerJoinAndSelect('organizer.user', 'user')
@@ -601,9 +566,8 @@ export class OrganizerService {
 
       organizer.rejectionReason = reason;
       organizer.submittedForReviewAt = null as unknown as Date;
-      // Belt-and-suspenders alongside the row lock above: a rejected organizer must never
-      // be left at DOCUMENT_VERIFIED/verified, so getMyVerificationStatus() can't report
-      // "approved" for a submission an admin just rejected.
+      // Belt-and-braces alongside the row lock: a rejected organizer must never be left at
+      // DOCUMENT_VERIFIED, or getMyVerificationStatus reports "approved".
       organizer.verificationLevel = VerificationLevel.UNVERIFIED;
       organizer.verified = false;
       await manager.save(organizer);
