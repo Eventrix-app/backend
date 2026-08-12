@@ -8,92 +8,54 @@ export default () => ({
     database: process.env.DATABASE_NAME || 'eventrix',
   },
   jwt: {
-    // No fallback here on purpose — env.validation.ts's Joi schema requires JWT_SECRET at
-    // boot, so by the time this runs it's always set. A hardcoded fallback previously sat
-    // here as a landmine for anyone who later reads `jwt.secret` from this nested config
-    // instead of the flat `JWT_SECRET` key everything else reads today.
+    // No fallback: Joi requires JWT_SECRET at boot, and a hardcoded one here would be a
+    // landmine for anyone reading this nested key instead of the flat JWT_SECRET.
     secret: process.env.JWT_SECRET,
     expiresIn: process.env.JWT_EXPIRES_IN || '3600s',
   },
   frontendUrl: process.env.FRONTEND_URL || 'http://localhost:19006',
   googleMaps: {
-    // Server-side only — GeocodeService proxies reverse-geocode requests through this key
-    // rather than shipping it in the app bundle (see geocode.service.ts). A separate,
-    // app-embedded key covers the native Maps SDK tile rendering itself (app.config.js),
-    // which Google's own model requires to be client-side; that one should be restricted
-    // to the app's package name + SHA-1 fingerprint in Google Cloud Console. This one
-    // should be restricted by API (Geocoding API only) and, where possible, server IP.
+    // Server-side only — proxied via GeocodeService rather than shipped in the bundle.
+    // Restrict this one to the Geocoding API; the app-embedded key is a separate one.
     apiKey: process.env.GOOGLE_MAPS_API_KEY,
   },
   razorpay: {
-    // Unset in any environment that hasn't onboarded a real Razorpay account yet —
-    // RazorpayService fails fast with a clear 503 rather than the SDK throwing an opaque
-    // 401 mid-request. keyId is safe to hand back to the client (it's the public half of
-    // the pair); keySecret/webhookSecret never leave the server.
+    // Unset until a real Razorpay account exists, so the service fails fast with a 503.
+    // keyId is the public half; keySecret/webhookSecret never leave the server.
     keyId: process.env.RAZORPAY_KEY_ID,
     keySecret: process.env.RAZORPAY_KEY_SECRET,
     webhookSecret: process.env.RAZORPAY_WEBHOOK_SECRET,
   },
   payu: {
-    // Same fail-fast philosophy as `razorpay` above — PayUService throws a clear 503 if
-    // these are unset rather than letting a hash come out wrong silently. merchantKey is
-    // safe to hand back to the client (it's the public half of the pair, required in the
-    // form PayU's hosted page expects); merchantSalt never leaves the server.
+    // Same fail-fast as razorpay above, so a hash never comes out wrong silently.
+    // merchantKey is the public half; merchantSalt never leaves the server.
     merchantKey: process.env.PAYU_MERCHANT_KEY,
     merchantSalt: process.env.PAYU_MERCHANT_SALT,
-    // Retained as the single test/production switch (PayUService.isTestMode derives from it,
-    // which also sets the native SDK's environment flag). Everything still works with only
-    // this set — the two overrides below exist so an operator never has to infer which host
-    // a deployment will actually talk to.
+    // The single test/production switch. The two overrides below exist so an operator never
+    // has to infer which host a deployment talks to.
     baseUrl: process.env.PAYU_BASE_URL || 'https://test.payu.in',
-    // Checkout and the refund/postservice API live on DIFFERENT production hosts
-    // (secure.payu.in vs info.payu.in) and only coincide in test mode (test.payu.in serves
-    // both), so one value cannot express both. Unset means "derive from baseUrl", which is
-    // the documented default; set them to pin a host explicitly.
-    //
-    // Origins only — the paths (/_payment, /merchant/postservice.php?form=2) stay in
-    // PayUService, since they are protocol details rather than deployment configuration.
+    // Checkout and the refund API live on different production hosts and only coincide in
+    // test mode, so one value cannot express both. Unset means derive from baseUrl.
     checkoutUrl: process.env.PAYU_CHECKOUT_URL,
     apiUrl: process.env.PAYU_API_URL,
   },
   tax: {
-    // GST charged on the PLATFORM'S COMMISSION, not on the ticket price — the platform is
-    // supplying an intermediary service and owes output tax on its own fee; the organizer
-    // remains responsible for any GST on the ticket itself. 18% is the standard Indian rate
-    // for this service category.
-    //
-    // Defaults to 0 (inert) rather than 18 on purpose: a deployment that has not yet
-    // registered for GST must not start collecting it, and FeeCalculationService's
-    // `gstRate / 100` term collapses the whole GST path to zero when unset. Set
-    // TAX_GST_RATE=18 explicitly once the GSTIN is live.
-    //
-    // Who actually funds this depends on event.feePayer, and LedgerService.
-    // recordPaymentLedger() books it from a different account for each case (see its
-    // GST comment): PARTICIPANT means the buyer paid it on top and it is remitted out of
-    // the buyer's money; ORGANIZER means the platform absorbs it out of its own commission.
+    // GST on the platform's COMMISSION, not the ticket price. Defaults to 0 so a deployment
+    // without a GSTIN never starts collecting it; who funds it depends on event.feePayer.
     gstRate: Number(process.env.TAX_GST_RATE) || 0,
   },
   platform: {
-    // Default commission applied when an organizer has NO negotiated rate of their own
-    // (organizers.commission_rate IS NULL). An explicit value on the organizer row — including
-    // an explicit 0 for a commission-free partner — always wins, which is why that column is
-    // nullable rather than defaulting to 0: "never set" and "negotiated at zero" have to be
-    // distinguishable or the platform default can never apply.
+    // Applies only when the organizer has no rate of their own. That column is nullable so
+    // "never set" stays distinguishable from "negotiated at zero".
     commissionPercent: Number(process.env.PLATFORM_COMMISSION_PERCENT) || 5,
 
-    // Flat fee charged per free-event booking. Free events collect nothing from the attendee,
-    // so unlike every other fee this one is NOT netted out of a payment — it accrues against
-    // the organizer as a platform receivable (ORGANIZER_PAYABLE goes negative by this amount).
-    // The attendee still books at ₹0 with no gateway involved.
-    //
-    // NOTE: nothing currently COLLECTS that receivable. It is recorded, not invoiced — see
-    // the free-event section in PAYMENT_MODEL.md before treating it as revenue.
+    // Free-event fee accrues as a platform receivable rather than being netted out of a
+    // payment. NOTE: nothing collects it yet — recorded, not invoiced.
     freeEventFee: Number(process.env.PLATFORM_FREE_EVENT_FEE ?? 12.5),
   },
   gatewayFee: {
-    // Blended default approximating Razorpay/PayU's published rates (2% + flat ₹3/txn).
-    // Organizer-facing "live payout estimate" and actual payment settlement both read
-    // from this single config so the estimate never drifts from what's charged.
+    // Blended default approximating the gateways' published rates. Estimates and settlement
+    // read this same value so they cannot drift.
     percent: Number(process.env.GATEWAY_FEE_PERCENT) || 2,
     flat: Number(process.env.GATEWAY_FEE_FLAT) || 3,
   },
@@ -104,18 +66,13 @@ export default () => ({
     delayDaysAfterEventEnd: Number(process.env.PAYOUT_DELAY_DAYS) || 3,
   },
   admin: {
-    // Defense in depth on top of AdminService.bootstrap()'s "only when zero admins exist"
-    // check: that check alone means the permanently-@Public() bootstrap endpoint would
-    // silently reopen to anyone if every admin account were ever removed post-launch.
-    // Unset means bootstrap() always rejects — must be explicitly configured before the
-    // very first admin can be created, same fail-closed posture as JWT_SECRET/PASSWORD_PEPPER.
+    // Defence in depth over bootstrap()'s zero-admin check, which alone would reopen the
+    // @Public() endpoint if every admin were removed. Unset means always reject.
     bootstrapSecret: process.env.ADMIN_BOOTSTRAP_SECRET,
   },
   cron: {
-    // Verifies Vercel Cron Jobs' `Authorization: Bearer <CRON_SECRET>` header (see
-    // PaymentsController.triggerPayoutSweep + vercel.json's `crons` entry) — the
-    // @Cron() decorator in PaymentsService never fires on Vercel's serverless model,
-    // which has no long-lived process for it to run inside.
+    // Verifies Vercel Cron's bearer header — @Cron() never fires on serverless, which has
+    // no long-lived process to run it.
     secret: process.env.CRON_SECRET,
   },
   email: {
