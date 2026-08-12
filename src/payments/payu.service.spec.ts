@@ -116,6 +116,44 @@ describe('PayUService', () => {
         const expected = crypto.createHash('sha512').update(`${hashString}${MERCHANT_SALT}`).digest('hex');
         expect(service.signHash(hashString)).toBe(expected);
       });
+
+      // Captured verbatim from a device run. This is the SDK's very first request, so
+      // rejecting it strands checkout on a spinner with no terminal event ever firing.
+      it('signs the get_checkout_details request the SDK opens checkout with', () => {
+        const payload = JSON.stringify({
+          requestId: 'ea03e501bd6e44eeamspw05fl1786526924567',
+          transactionDetails: { amount: 1050, txnId: 'ea03e501bd6e44eeamspw05fl', source: 'Android_SDK' },
+          customerDetails: { mobile: '7249210279' },
+          useCase: { getAdditionalCharges: true, getSdkDetails: true },
+          isSITxn: false,
+        });
+        const hashString = `${MERCHANT_KEY}|get_checkout_details|${payload}|`;
+        const expected = crypto.createHash('sha512').update(`${hashString}${MERCHANT_SALT}`).digest('hex');
+
+        expect(service.signHash(hashString)).toBe(expected);
+      });
+    });
+
+    // A key configured with stray whitespace produced a 400 on every hash the SDK asked for,
+    // which surfaced only as a checkout that never opened.
+    describe('merchant key normalisation', () => {
+      it.each([`${MERCHANT_KEY} `, ` ${MERCHANT_KEY}`, `${MERCHANT_KEY}\n`])(
+        'signs normally when the configured key is %j',
+        (configuredKey) => {
+          mockConfigService.get.mockImplementation((k: string) => {
+            if (k === 'payu.merchantKey') return configuredKey;
+            if (k === 'payu.merchantSalt') return MERCHANT_SALT;
+            return undefined;
+          });
+
+          const hashString = `${MERCHANT_KEY}|get_checkout_details|{}|`;
+          expect(() => service.signHash(hashString)).not.toThrow();
+        },
+      );
+
+      it('still rejects a genuinely different key', () => {
+        expect(() => service.signHash('someoneelseskey|get_checkout_details|{}|')).toThrow(BadRequestException);
+      });
     });
   });
 

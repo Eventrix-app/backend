@@ -160,8 +160,12 @@ export class PayUService {
     }
 
     const parts = hashStringWithoutSalt.split('|');
-    if (parts[0] !== key) {
-      this.logger.warn('Rejected sign-hash request whose first field is not the merchant key');
+    // Trimmed: a stray space in the configured key rejects every real hash, because PayU's
+    // SDK normalises the key before echoing it back at the head of the string.
+    if ((parts[0] ?? '').trim() !== key.trim()) {
+      // Both values are public — initiate-native hands the key to the client — so logging
+      // them is what separates a misconfigured env var from an actual attack.
+      this.logger.warn(`Rejected sign-hash: first field "${parts[0]}" != merchant key "${key}"`);
       throw new BadRequestException('Unsupported hash string');
     }
 
