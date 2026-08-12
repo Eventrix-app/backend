@@ -1,5 +1,5 @@
 import { BadRequestException, ConflictException, NotFoundException } from '@nestjs/common';
-import { PaymentsService, toPayuPhone } from './payments.service';
+import { PaymentsService, toPayuPhone, assertValidPayUTxnId } from './payments.service';
 import { RefundStatus } from '../entities/refund.entity';
 
 // Regression tests for the logs.md finding: a refund was requested, approved, and
@@ -611,6 +611,40 @@ describe('PaymentsService — paymentStatus enforcement', () => {
   // bad value here surfaces as an unexplained popup on the checkout screen rather than
   // anything traceable. These are the shapes Edit Profile actually accepts today — it
   // applies no format validation at all.
+  // Mirrors PayuUtils.isValidTxnId, decompiled from in.payu:paymentparamhelper. The real
+  // check runs in native code on the device, so nothing here can catch a violation at
+  // runtime — these assertions are the only place the format is verified before a user hits
+  // "InValid transactionId" with no server-side trace of why.
+  describe('assertValidPayUTxnId', () => {
+    const mint = (enrollmentId: string) =>
+      `${enrollmentId.replace(/-/g, '').slice(0, 17)}${Date.now().toString(36)}`;
+
+    it('accepts the txnid format resolvePendingPayUAttempt actually mints', () => {
+      const txnid = mint('a1b2c3d4-e5f6-0718-293a-bbbbbbbbbbbb');
+      expect(() => assertValidPayUTxnId(txnid)).not.toThrow();
+      expect(txnid.length).toBeLessThanOrEqual(25);
+    });
+
+    // The regression that broke every native checkout: a 20-char prefix plus an 8-char
+    // base36 timestamp is 28 characters, three over PayU's cap.
+    it('rejects the 28-character form that PayU refused', () => {
+      const tooLong = `${'a1b2c3d4e5f60718293a'}${Date.now().toString(36)}`;
+      expect(tooLong.length).toBeGreaterThan(25);
+      expect(() => assertValidPayUTxnId(tooLong)).toThrow(/violates PayU's rule/);
+    });
+
+    it('rejects non-alphanumeric characters', () => {
+      expect(() => assertValidPayUTxnId('abc-123')).toThrow(/violates PayU's rule/);
+      expect(() => assertValidPayUTxnId('abc_123')).toThrow(/violates PayU's rule/);
+      expect(() => assertValidPayUTxnId('')).toThrow(/violates PayU's rule/);
+    });
+
+    it('accepts exactly 25 characters, the documented boundary', () => {
+      expect(() => assertValidPayUTxnId('a'.repeat(25))).not.toThrow();
+      expect(() => assertValidPayUTxnId('a'.repeat(26))).toThrow(/violates PayU's rule/);
+    });
+  });
+
   describe('toPayuPhone', () => {
     it.each([
       ['a plain 10-digit number', '9876543210'],
@@ -732,8 +766,9 @@ describe('PaymentsService — paymentStatus enforcement', () => {
     // charged, booking never confirmed. The txnid embeds the enrollment id, so it is still
     // recoverable without any extra column.
     describe('superseded txnid recovery', () => {
-      // <20 hex chars of the enrollment uuid><base36 timestamp>, per resolvePendingPayUAttempt.
-      const supersededDto = { ...dto, txnid: 'a1b2c3d4e5f60718293a' + 'k9xz12' };
+      // <17 hex chars of the enrollment uuid><base36 timestamp>, per resolvePendingPayUAttempt.
+      // 17, not 20: PayU caps txnid at 25 characters (see assertValidPayUTxnId).
+      const supersededDto = { ...dto, txnid: 'a1b2c3d4e5f607182' + 'k9xz12' };
       const enrollmentId = 'a1b2c3d4-e5f6-0718-293a-bbbbbbbbbbbb';
 
       const mockPrefixLookup = (matches: unknown[]) => {
@@ -750,7 +785,7 @@ describe('PaymentsService — paymentStatus enforcement', () => {
       it('resolves the enrollment from the id embedded in a superseded txnid', async () => {
         mockEnrollmentsRepo.findOne.mockResolvedValue(null); // current payuTxnId is the newer attempt
         mockPrefixLookup([
-          { id: enrollmentId, payuTxnId: 'a1b2c3d4e5f60718293a' + 'zz9999', totalAmount: '199.50', event: futureEvent },
+          { id: enrollmentId, payuTxnId: 'a1b2c3d4e5f607182' + 'zz9999', totalAmount: '199.50', event: futureEvent },
         ]);
         mockPayUService.verifyReverseHash.mockReturnValue(true);
         const handleWebhookSpy = jest.spyOn(service, 'handleWebhook').mockResolvedValue({ id: 'payment-1' } as any);

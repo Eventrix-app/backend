@@ -39,10 +39,8 @@ import { getEventStartDateTime, getEventEndDateTime } from '../events/utils/even
 import { invalidateEventCaches } from '../events/utils/event-cache.util';
 import { CacheService } from '../common/cache/cache.service';
 
-// Same leak EventsService's SAFE_ENROLLMENT_USER_SELECT guards against — Enrollment.user is a
-// plain ManyToOne to the full User entity (passwordHash included), so the organizer refund
-// queue must scope it too. Event/user context is eager-loaded (rather than left for the client
-// to separately look up) so the approval screen can show what it's approving.
+// Enrollment.user is the full User entity (passwordHash included), so the refund queue
+// must scope its select. Event/user context eager-loaded for the approval screen.
 const REFUND_SAFE_ENROLLMENT_SELECT = {
   id: true,
   bookingReference: true,
@@ -86,14 +84,8 @@ export class PaymentsService {
     private readonly ledgerService: LedgerService,
   ) {}
 
-  // ---------------------------------------------------------------------
-  // Real-money checkout: create-order (before the gateway sheet opens) ->
-  // client-side verify (right after it reports success) -> handleWebhook.
-  // verifyPayment and the async gateway webhook both funnel into the exact
-  // same handleWebhook() below, keyed off the same gatewayEventId (the
-  // Razorpay payment id), so whichever arrives first confirms the booking
-  // and the other is a no-op idempotent duplicate.
-  // ---------------------------------------------------------------------
+  // Razorpay checkout: create-order -> client verify -> handleWebhook.
+  // Verify and webhook share a gatewayEventId, so whichever lands first wins.
   async createOrder(userId: string, dto: CreateOrderDto) {
     const enrollment = await this.enrollmentsRepository.findOne({
       where: { id: dto.enrollmentId },
@@ -141,12 +133,8 @@ export class PaymentsService {
       throw new BadRequestException('Payment signature verification failed');
     }
 
-    // The signature only proves (orderId, paymentId) is a genuine Razorpay pair — it says
-    // nothing about which enrollment that order was created for. Without this check, a user
-    // could pay a trivial order for an enrollment they own, then replay the resulting valid
-    // signed triple against a different (more expensive) enrollment of theirs. notes.
-    // enrollmentId and amount are both set server-side at createOrder() time and never
-    // client-controlled, so cross-checking against them closes that gap.
+    // The signature proves the (orderId, paymentId) pair is genuine, not which enrollment
+    // it was for — without this a valid triple could be replayed against a pricier booking.
     const order = await this.razorpayService.fetchOrder(dto.razorpayOrderId);
     const orderEnrollmentId = (order.notes as Record<string, unknown> | undefined)?.enrollmentId;
     if (orderEnrollmentId !== enrollment.id) {
@@ -167,15 +155,8 @@ export class PaymentsService {
     });
   }
 
-  // ---------------------------------------------------------------------
-  // PayU checkout — the active gateway (Razorpay above is kept working but
-  // dormant). Structurally different from Razorpay's API-order + client-SDK
-  // flow: our server mints a txnid + hash, the client POSTs a hidden form
-  // straight to PayU's hosted page, and PayU redirects that same
-  // browser/WebView session to whichever of surl/furl matches the outcome —
-  // handled by handlePayUReturn below, which funnels into the same
-  // gateway-agnostic handleWebhook() Razorpay's path already uses.
-  // ---------------------------------------------------------------------
+  // PayU is the active gateway (Razorpay kept working but dormant). We mint txnid+hash,
+  // the client POSTs to PayU's hosted page, and surl/furl redirect back to handlePayUReturn.
   async initiatePayUOrder(userId: string, dto: InitiatePayUOrderDto) {
     const { txnid, amount, productinfo, firstname, email, user } = await this.resolvePendingPayUAttempt(
       userId,
@@ -197,12 +178,8 @@ export class PaymentsService {
     };
   }
 
-  // Native SDK (payu-non-seam-less-react) checkout — same enrollment/txnid setup as the
-  // WebView flow above, but no pre-computed hash is returned: the SDK requests hashes on
-  // demand via its own generateHash callback (see PayUService.signHash), so the app only
-  // needs the raw fields to build payUPaymentParams. Field names here match the SDK's own
-  // camelCase convention (productInfo/firstName), not the classic flow's lowercase one —
-  // confirmed by reading payu-non-seam-less-react's native source directly.
+  // Native SDK path: no pre-computed hash — the SDK requests hashes on demand.
+  // Field names are the SDK's camelCase, not the classic flow's lowercase.
   async initiatePayUNativeOrder(userId: string, dto: InitiatePayUOrderDto) {
     const { txnid, amount, productinfo, firstname, email, user } = await this.resolvePendingPayUAttempt(
       userId,
@@ -223,10 +200,8 @@ export class PaymentsService {
     };
   }
 
-  // Shared by both the WebView and native PayU initiation paths: ownership/pending-status/
-  // amount validation, minting a fresh unique txnid, persisting it on the enrollment (so
-  // handlePayUReturn/verify-native can look the attempt back up), and sanitizing the
-  // free-text fields PayU's pipe-delimited hash formula is sensitive to.
+  // Shared by both PayU paths: validates ownership/status/amount, mints the txnid, and
+  // strips characters PayU's pipe-delimited hash is sensitive to.
   private async resolvePendingPayUAttempt(userId: string, enrollmentId: string) {
     const enrollment = await this.enrollmentsRepository.findOne({
       where: { id: enrollmentId },
@@ -246,23 +221,14 @@ export class PaymentsService {
     const user = await this.usersRepository.findOne({ where: { id: userId } });
     if (!user) throw new NotFoundException('User not found');
 
-    // PayU requires a fresh, unique txnid per attempt (a user retrying a failed/abandoned
-    // payment must not reuse one PayU has already seen) — enrollment id + a base36 timestamp
-    // keeps it short and alphanumeric-only. The mapping back to this enrollment is stored on
-    // the enrollment itself (payuTxnId) rather than encoded into the txnid string, since
-    // PayU's classic flow has no "fetch order by id" API to round-trip through the way
-    // Razorpay's fetchOrder() does.
-    // The enrollment-id prefix is not cosmetic: resolveEnrollmentForTxnid() decodes it to
-    // recover the booking when a late callback arrives for an attempt this one supersedes.
-    // Changing this format without changing that decoder reintroduces silent payment loss.
+    // Fresh txnid per attempt — PayU rejects a reused one, which would break retry entirely.
+    // resolveEnrollmentForTxnid decodes this format; changing it loses late callbacks.
     const txnid = `${enrollment.id.replace(/-/g, '').slice(0, ENROLLMENT_ID_PREFIX_LENGTH)}${Date.now().toString(36)}`;
+    assertValidPayUTxnId(txnid);
     await this.enrollmentsRepository.update(enrollment.id, { payuTxnId: txnid });
 
-    // PayU's hash uses `|` as the field delimiter — a literal pipe inside a free-text field
-    // (an event titled "VIP | Backstage Pass", or a user's name) would silently shift every
-    // field after it, making the hash structurally diverge from what PayU computes on their
-    // end. Stripped here rather than escaped, since whatever we send is echoed back verbatim
-    // in the reverse-hash callback and must match byte-for-byte either way.
+    // A literal pipe in a free-text field shifts every later field and breaks the hash.
+    // Stripped, not escaped: PayU echoes it back verbatim and it must match byte-for-byte.
     const amount = Number(enrollment.totalAmount);
     const productinfo = sanitizePayUField(enrollment.event.title).slice(0, 100);
     const firstname = sanitizePayUField((user.fullName || 'Guest').split(' ')[0]).slice(0, 60);
@@ -271,25 +237,8 @@ export class PaymentsService {
     return { enrollment, user, txnid, amount, productinfo, firstname, email };
   }
 
-  // Resolves the enrollment a PayU callback belongs to, including for a SUPERSEDED attempt.
-  //
-  // PayU requires a unique txnid per attempt, so every retry mints a new one and overwrites
-  // enrollment.payuTxnId (reusing a txnid PayU has already seen is rejected, which would
-  // break retry entirely — so "just don't overwrite it" is not an available fix). That left
-  // the column holding only the LATEST attempt: if a user abandoned attempt A, retried as B,
-  // and A then completed late — an async UPI collect approved after the fact, a delayed
-  // netbanking return, or PayU retrying surl server-side — the callback for A matched nothing
-  // and the payment was silently lost, with the buyer charged and no booking to show for it.
-  //
-  // No extra column or table is needed to fix it, because the txnid already carries the
-  // answer: it is built as <first 20 hex chars of the enrollment uuid><base36 timestamp>
-  // (see resolvePendingPayUAttempt). Any attempt, current or superseded, therefore names its
-  // own enrollment. The exact-match lookup stays first since it is the indexed common path;
-  // the prefix decode is the fallback.
-  //
-  // This widens only WHICH enrollment is found — every existing check still runs against it
-  // afterwards (reverse-hash, amount, and the caller-ownership check on the native path), so
-  // resolving a superseded attempt is no weaker than resolving the current one.
+  // Resolves the enrollment for a callback, including a SUPERSEDED attempt: each retry
+  // overwrites payuTxnId, so a late callback for an earlier attempt was silently lost.
   private async resolveEnrollmentForTxnid(txnid: string): Promise<Enrollment | null> {
     const exact = await this.enrollmentsRepository.findOne({
       where: { payuTxnId: txnid },
@@ -297,10 +246,10 @@ export class PaymentsService {
     });
     if (exact) return exact;
 
-    // Only a well-formed prefix is ever fed to the LIKE below — the id fragment is hex by
-    // construction, so anything else is not one of our txnids and must not reach the query.
+    // Hex-only prefix, built from the constant — hardcoding this length silently broke
+    // superseded-callback recovery when the prefix shortened, dropping payments.
     const prefix = txnid.slice(0, ENROLLMENT_ID_PREFIX_LENGTH).toLowerCase();
-    if (!/^[0-9a-f]{20}$/.test(prefix)) return null;
+    if (!new RegExp(`^[0-9a-f]{${ENROLLMENT_ID_PREFIX_LENGTH}}$`).test(prefix)) return null;
 
     const matches = await this.enrollmentsRepository
       .createQueryBuilder('enrollment')
@@ -309,7 +258,7 @@ export class PaymentsService {
       .limit(2)
       .getMany();
 
-    // 80 bits of uuid make a collision negligible, but guessing between two bookings would
+    // 68 bits of uuid make a collision negligible, but guessing between two bookings would
     // mean confirming the wrong one — refuse rather than pick.
     if (matches.length !== 1) {
       if (matches.length > 1) {
@@ -325,24 +274,14 @@ export class PaymentsService {
     return matches[0];
   }
 
-  // Called by PaymentsController's /payu/sign-hash route — the native SDK's generateHash
-  // callback hands the app a raw string it needs signed; the salt must never leave the
-  // server, so this is the one seam that crosses that boundary. Generic on purpose: it works
-  // for whatever hash type the SDK ever asks for (see PayUService.signHash's own comment).
+  // The salt must never leave the server, so this is the one seam that crosses it.
+  // Generic on purpose: works for whatever hash type the SDK asks for.
   signPayUHash(hashString: string): string {
     return this.payuService.signHash(hashString);
   }
 
-  // Called by PaymentsController's /payu/return route for both surl and furl — dto.status
-  // distinguishes success from failure. Never allowed to throw past the controller (which
-  // wraps this in its own try/catch): a WebView stuck on a bare JSON error page has no way
-  // to close itself, unlike a normal API error an app can retry.
-  //
-  // callerUserId: when provided (native SDK's /payu/verify-native path, which is JWT-
-  // authenticated), the enrollment's owner must match this id — prevents a user who knows
-  // another user's txnid from confirming a booking they never paid for. Absent for the
-  // unauthenticated browser-redirect path (/payu/return), where the reverse-hash is the
-  // only authentication layer.
+  // Handles both surl and furl, and must never throw past the controller: a WebView stuck
+  // on a JSON error page cannot close itself. callerUserId scopes the authenticated path.
   async handlePayUReturn(dto: PayUReturnDto, callerUserId?: string): Promise<Payment | null> {
     const enrollment = await this.resolveEnrollmentForTxnid(dto.txnid);
     if (!enrollment) {
@@ -380,10 +319,7 @@ export class PaymentsService {
     });
   }
 
-  // ---------------------------------------------------------------------
-  // Fee calculation — standalone endpoint, callable from the Create Event
-  // flow before the event is ever submitted for admin approval.
-  // ---------------------------------------------------------------------
+  // Fee estimate — callable from Create Event before the event is submitted for approval.
   async getFeeEstimate(dto: FeeEstimateDto, requestingUserId: string, requestingUserRoles: string[]): Promise<FeeBreakdown> {
     const organizer = dto.organizerId
       ? await this.organizersRepository.findOne({ where: { id: dto.organizerId } })
@@ -414,18 +350,8 @@ export class PaymentsService {
     return this.feeCalculationService.calculate(dto.ticketPrice, commissionConfig, dto.feePayer ?? FeePayer.ORGANIZER);
   }
 
-  // Buyer-facing checkout preview: the exact amount enroll() will charge, computed by the
-  // same FeeCalculationService call enroll() makes, so the "Pay ₹X" button can never state a
-  // different number from what the gateway is asked for.
-  //
-  // Separate from getFeeEstimate() rather than a relaxation of it, for two reasons:
-  //   - that endpoint lets the caller name an organizer and returns organizerPayout, so it
-  //     stays 403-guarded against commission-rate enumeration. Here the client supplies only
-  //     a ticket tier and the organizer is resolved server-side, so there is nothing to guard.
-  //   - the fee lines returned here are BUYER-visible only. Under feePayer=ORGANIZER the
-  //     buyer pays exactly the ticket price and the organizer's commission is their own
-  //     business, so no fee lines are emitted at all — the same rule getTaxInvoice and
-  //     the emailed receipt already follow.
+  // Uses the same FeeCalculationService call enroll() makes, so the "Pay ₹X" button can
+  // never state a different number from what the gateway is charged. Buyer-visible lines only.
   async getCheckoutEstimate(dto: CheckoutEstimateDto) {
     const ticketType = await this.ticketTypesRepository.findOne({
       where: { id: dto.ticketTypeId },
@@ -448,9 +374,8 @@ export class PaymentsService {
     const isFreeEvent = subtotal <= 0;
     const lines: { label: string; amount: number }[] = [];
 
-    // A free event is its own case: the buyer pays exactly the flat registration fee, with
-    // no ticket, gateway or GST line. calculate() forces feePayer to PARTICIPANT there, so
-    // this is checked first rather than being folded into the branch below.
+    // Free events charge only the flat registration fee, and calculate() forces feePayer to
+    // PARTICIPANT there, so this is checked before the branch below.
     if (isFreeEvent) {
       if (breakdown.buyerPrice > 0) {
         lines.push({ label: 'Platform fee', amount: breakdown.buyerPrice });
@@ -477,9 +402,8 @@ export class PaymentsService {
       quantity: dto.quantity,
       subtotal,
       feePayer,
-      // Lets the app render the "free event, registration fee applies" explanation without
-      // re-deriving it from prices — the buyer is paying something for a ticket priced at 0,
-      // which needs saying plainly rather than looking like a bug.
+      // Lets the app explain why a ticket priced at 0 still costs something, rather than
+      // looking like a bug.
       isFreeEvent,
       currency: ticketType.currency || ticketType.event.currency || 'INR',
       lines,
@@ -493,17 +417,11 @@ export class PaymentsService {
     return Math.round(value * 100) / 100;
   }
 
-  // ---------------------------------------------------------------------
-  // Refund flow: request (participant) -> approve/reject (organizer/admin)
-  // -> gateway refund call -> status update. Forward-only transitions are
-  // enforced by Refund.canTransition().
-  // ---------------------------------------------------------------------
+  // Refund flow: request -> approve/reject -> gateway call -> status update.
+  // Forward-only transitions are enforced by Refund.canTransition().
   async requestRefund(userId: string, dto: RequestRefundDto): Promise<Refund> {
-    // Locks the enrollment row for the duration of the "any open refund already exists?"
-    // check plus the insert — without this, two near-simultaneous requests (double-tap,
-    // client retry) can both pass the existence check before either commits, producing two
-    // REQUESTED rows for one booking that can then each be independently approved and
-    // double-processed (double capacity release, eventually double gateway refunds).
+    // Locks the enrollment for the exists-check plus insert: two near-simultaneous requests
+    // could otherwise both pass and be approved separately, double-refunding the booking.
     const { saved, eventTitle } = await this.dataSource.transaction(async (manager) => {
       const enrollment = await manager
         .createQueryBuilder(Enrollment, 'enrollment')
@@ -529,12 +447,8 @@ export class PaymentsService {
         throw new ConflictException('A refund request is already open for this booking');
       }
 
-      // Settled decision: flat 48h cutoff before event start (see eventrixchanges.md).
-      // Deliberately anchored to event *start*, not end — see loophole.md §3.3: for a
-      // multi-day event this means the refund window closes 48h before Day 1 and stays
-      // closed for the event's full duration. That's intentional product behavior (no
-      // refunds once any part of a multi-day event has begun), not an inconsistency with
-      // the end-anchored payout cron below.
+    // Flat 48h cutoff anchored to event START, not end — for a multi-day event the window
+    // closes 48h before Day 1 and stays closed. Intentional (loophole.md §3.3).
       const windowHours = this.configService.get<number>('refund.windowHoursBeforeStart', 48);
       const cutoff = new Date(getEventStartDateTime(enrollment.event).getTime() - windowHours * 60 * 60 * 1000);
       if (new Date() >= cutoff) {
@@ -554,9 +468,8 @@ export class PaymentsService {
 
     this.logger.log(`Refund ${saved.id} requested for enrollment ${saved.enrollmentId} by user ${userId}`);
     await this.notificationService.notifyRefundStatus(userId, saved.id, RefundStatus.REQUESTED, saved.enrollmentId);
-    // Second half of the same event: the acknowledgement above goes to the participant, this
-    // one puts the request in front of whoever has to decide it. Fire-and-forget — the refund
-    // row is already committed and must not be rolled back over a notification failure.
+    // Puts the request in front of whoever decides it. Fire-and-forget: the refund row is
+    // committed and must not roll back over a notification failure.
     void this.notifyAdminsOfRefundRequest(saved.id, saved.enrollmentId, Number(saved.amount), userId, eventTitle);
     return saved;
   }
@@ -588,11 +501,8 @@ export class PaymentsService {
     const refund = await this.findRefundOrFail(refundId);
     await this.assertCanManageRefund(refund, actorUserId, userRoles);
 
-    // Row-locked transition: without this, two concurrent approve calls (double-click, two
-    // organizer/admin tabs) can both read status REQUESTED, both pass canTransition, and both
-    // proceed to processGatewayRefund — double-decrementing ticket capacity and
-    // double-promoting the waitlist. Mirrors the same pessimistic_write pattern already used
-    // by tryPromote and settleEventPayout for the identical class of race.
+    // Row-locked: two concurrent approvals could both pass canTransition and both refund,
+    // double-decrementing capacity and double-promoting the waitlist.
     const approved = await this.lockAndTransitionRefund(refundId, RefundStatus.APPROVED);
 
     this.logger.log(`Refund ${approved.id} approved by ${actorUserId}`);
@@ -661,10 +571,8 @@ export class PaymentsService {
       .getMany();
   }
 
-  // General-purpose admin listing over every payment (not just pending refunds) — no
-  // listing method existed on paymentsRepository before this; joins through Enrollment for
-  // event/user context using the same field allowlist REFUND_SAFE_ENROLLMENT_SELECT already
-  // guards for refunds, so a payment row never leaks the enrollment user's passwordHash.
+  // Joins through Enrollment using the same allowlist REFUND_SAFE_ENROLLMENT_SELECT uses,
+  // so a payment row never leaks the enrollment user's passwordHash.
   async findAllForAdmin(filters: {
     status?: PaymentStatus;
     page?: number;
@@ -716,14 +624,8 @@ export class PaymentsService {
     return { payouts, total, page, totalPages: Math.ceil(total / limit) };
   }
 
-  // Organizer-facing counterpart to findAllPayoutsForAdmin above. Scoped by the CALLER's
-  // own user id — it resolves the organizer from the session rather than accepting an
-  // organizerId parameter, so there is no way to ask for someone else's settlement history.
-  //
-  // Returns a lean projection instead of the Payout entity: an organizer needs to know what
-  // they were paid, for which event, when, and against which bank reference. Anything else
-  // on the row (the internal `notes` an admin left, the organizer relation) is not theirs to
-  // read and is dropped here rather than relying on a serializer downstream to remember.
+  // Scoped by session user id, not a parameter, so another organizer's history is unaskable.
+  // Lean projection drops admin-only fields rather than trusting a downstream serializer.
   async findMyPayouts(
     userId: string,
     filters: { page?: number; limit?: number } = {},
@@ -731,18 +633,14 @@ export class PaymentsService {
     const { page = 1, limit = 20 } = filters;
 
     const organizer = await this.organizersRepository.findOne({ where: { userId } });
-    // Not an error: a user who has never hosted an event has no organizer row and therefore
-    // no payouts. An empty page is the honest answer, and it lets the screen render its
-    // "no payouts yet" state rather than an error toast.
+    // No organizer row = never hosted; an empty page renders the right empty state
     if (!organizer) return { payouts: [], total: 0, page, totalPages: 0 };
 
     const [payouts, total] = await this.payoutsRepository.findAndCount({
       where: { organizerId: organizer.id },
       relations: ['event'],
       select: { event: { id: true, title: true, eventDate: true, coverImageUrl: true } },
-      // Newest first: the payout an organizer is looking for is nearly always the most
-      // recent one. id as a tiebreaker keeps pagination deterministic when the sweep creates
-      // several rows in the same transaction.
+      // id tiebreaker keeps pagination deterministic when the sweep creates rows together
       order: { createdAt: 'DESC', id: 'DESC' },
       skip: (page - 1) * limit,
       take: limit,
@@ -772,9 +670,8 @@ export class PaymentsService {
 
   private async processGatewayRefund(refund: Refund): Promise<Refund> {
     try {
-      // The real gateway call happens before the transaction opens — a slow/hung external
-      // request shouldn't hold a DB transaction open, and if PayU's API fails/throws, the
-      // outer catch below marks the refund FAILED without ever touching the DB state below.
+      // Gateway call happens before the transaction opens, so a hung request cannot hold one.
+      // If it throws, the outer catch marks the refund FAILED without touching DB state.
       const payment = await this.paymentsRepository.findOne({
         where: { enrollmentId: refund.enrollmentId, status: PaymentStatus.SUCCESS },
         order: { createdAt: 'DESC' },
@@ -787,10 +684,8 @@ export class PaymentsService {
           ? (await this.payuService.refundTransaction({ mihpayid: payment.gatewayPaymentId, amount: Number(refund.amount) })).refundId
           : `mock_refund_${refund.id}`; // Razorpay path is dormant — no real refund call wired for it yet.
 
-      // Refund status, enrollment status, and the ticket-type capacity decrement must
-      // land together — a partial failure here previously could leave an enrollment
-      // marked "refunded" while ticket_types.quantity_sold never freed up (permanently
-      // blocking a slot and starving the waitlist), or the reverse.
+      // Refund status, enrollment status and the capacity decrement must land together —
+      // a partial failure previously left slots permanently blocked, starving the waitlist.
       const { savedRefund, ticketTypeId, eventId } = await this.dataSource.transaction(async (manager) => {
         refund.status = RefundStatus.PROCESSED;
         refund.gatewayRefundId = gatewayRefundId;
@@ -810,14 +705,8 @@ export class PaymentsService {
           );
         }
 
-        // Reversing the fee legs needs the SAME split the payment booked — a reversal is only
-        // a reversal if it cancels leg for leg. Reading the frozen columns is what makes that
-        // exact: it was previously recomputed from live config, so a commission or GST rate
-        // changed between payment and refund produced reversal legs of a different size than
-        // the originals, permanently unbalancing every account they touched.
-        //
-        // Pre-freeze bookings still fall back to recomputation and still carry that caveat;
-        // there is nothing better available for them.
+        // Reversal must use the SAME split the payment booked, so read the frozen columns:
+        // recomputing from live config unbalanced accounts when a rate changed in between.
         const refundOrganizer = enrollment?.event
           ? await manager.findOne(Organizer, { where: { id: enrollment.event.organizerId } })
           : null;
@@ -883,10 +772,8 @@ export class PaymentsService {
     }
   }
 
-  // ---------------------------------------------------------------------
-  // Payment webhook idempotency: dedupe gateway retries on gatewayEventId,
-  // wrap ticket issuance + payment confirmation in one transaction.
-  // ---------------------------------------------------------------------
+  // Webhook idempotency: dedupe gateway retries on gatewayEventId, and wrap ticket
+  // issuance + payment confirmation in one transaction.
   async handleWebhook(dto: PaymentWebhookDto): Promise<Payment> {
     const result = await this.dataSource.transaction(async (manager) => {
       const existing = await manager.findOne(Payment, { where: { gatewayEventId: dto.gatewayEventId } });
@@ -913,12 +800,8 @@ export class PaymentsService {
 
       let savedPayment: Payment;
       try {
-        // Wrapped in a nested manager.transaction() rather than a plain manager.save() —
-        // TypeORM issues a real Postgres SAVEPOINT for a transaction started on an
-        // already-transactional manager (see PostgresQueryRunner's transactionDepth
-        // handling). Without it, a unique-violation here leaves the *outer* transaction
-        // aborted (Postgres error 25P02), so the fallback findOneOrFail below would itself
-        // throw instead of gracefully returning the winner's row.
+        // Nested transaction so TypeORM issues a real SAVEPOINT — otherwise a unique
+        // violation aborts the OUTER transaction and the fallback findOneOrFail throws too.
         savedPayment = await manager.transaction((nested) => nested.save(Payment, payment));
       } catch (err) {
         // Unique-violation race: two concurrent deliveries of the same gateway event both
@@ -931,9 +814,8 @@ export class PaymentsService {
         throw err;
       }
 
-      // A late or duplicate-gateway-retry webhook can arrive after the enrollment has
-      // already been refunded/cancelled through a separate flow. Record the payment for
-      // the audit trail either way, but never let it resurrect a terminal enrollment.
+      // A late or duplicate webhook can arrive after a refund/cancel. Record the payment
+      // for audit, but never resurrect a terminal enrollment.
       let confirmedBooking: {
         userId: string;
         eventId: string;
@@ -946,9 +828,8 @@ export class PaymentsService {
         startTime: string;
         venueName: string;
       } | null = null;
-      // Collected inside the transaction (it needs the breakdown computed below) but sent
-      // only after it commits, same as confirmedBooking — emailing a receipt for a payment
-      // whose transaction then rolls back would be worse than a missing email.
+      // Collected inside the transaction but sent after commit — emailing a receipt for a
+      // payment that then rolls back is worse than a missing email.
       let issuedInvoice: {
         userId: string;
         invoiceNumber: string;
@@ -964,19 +845,8 @@ export class PaymentsService {
           `Webhook ${dto.gatewayEventId} (${dto.status}) received for enrollment ${dto.enrollmentId} which is already "${enrollment.status}"; payment recorded but enrollment left untouched`,
         );
       } else if (dto.status === 'success' && enrollment.paymentStatus === 'paid') {
-        // A SECOND, genuinely different successful payment for a booking that is already
-        // settled — not a duplicate delivery of the same one, which the gatewayEventId
-        // idempotency check above already absorbed.
-        //
-        // Reachable when a user opens two checkout sheets before either resolves: both are
-        // minted while the enrollment is still 'pending', and both can then succeed at PayU
-        // with distinct mihpayids. Re-running the settlement branch would write a second
-        // Commission row and a second full set of ledger entries, double-counting revenue
-        // and the organizer's payable against one ticket.
-        //
-        // The Payment row is still recorded above — it has to be, the money is real — but
-        // nothing downstream is re-booked. This is a genuine duplicate charge that needs
-        // refunding, so it is logged at error rather than swallowed quietly.
+        // A second genuinely different successful payment (two checkout sheets opened before
+        // either resolved). Re-booking would double-count revenue, so log for refund instead.
         this.logger.error(
           `Duplicate successful payment for enrollment ${dto.enrollmentId}: ${dto.gateway} payment ` +
             `${dto.gatewayPaymentId} recorded, but the booking was already paid. The buyer has been ` +
@@ -984,11 +854,8 @@ export class PaymentsService {
         );
       } else if (dto.status === 'success') {
         const organizer = await manager.findOne(Organizer, { where: { id: enrollment.event.organizerId } });
-        // calculateFromChargedAmount, NOT calculate: dto.amount is the amount actually
-        // charged, which under feePayer=PARTICIPANT already includes commission + gateway
-        // fee + GST (enroll() persists breakdown.buyerPrice as totalAmount). Passing it to
-        // calculate() would apply all three a second time, inflating the Commission row and
-        // every ledger entry below it.
+        // calculateFromChargedAmount, not calculate: dto.amount already includes fees under
+        // feePayer=PARTICIPANT, so calculate() would apply them a second time.
         const breakdown = this.feeCalculationService.calculateFromChargedAmount(
           dto.amount,
           toCommissionConfig(organizer),
@@ -1017,9 +884,8 @@ export class PaymentsService {
 
         enrollment.status = 'confirmed';
         enrollment.paymentStatus = 'paid';
-        // Freeze the split onto the booking, in the same transaction that wrote the ledger
-        // legs it must agree with. From here on payout, invoicing and refund reversal read
-        // these columns instead of re-deriving from live config — see resolveBreakdown().
+        // Freeze the split in the same transaction as the ledger legs it must agree with;
+        // payout, invoicing and refund reversal read these instead of live config.
         Object.assign(enrollment, toFrozenFeeColumns(breakdown));
         await manager.save(Enrollment, enrollment);
 
@@ -1057,9 +923,8 @@ export class PaymentsService {
       return { payment: savedPayment, confirmedBooking, issuedInvoice };
     });
 
-    // Fired after the transaction commits — a payment succeeding is exactly the moment a
-    // paid booking becomes actually confirmed-and-paid (see EventsService.enroll(), which
-    // fires the same notification immediately for free bookings instead).
+    // After commit — a payment succeeding is when a paid booking becomes confirmed.
+    // EventsService.enroll() fires the same notification immediately for free bookings.
     if (result.confirmedBooking) {
       const b = result.confirmedBooking;
       void this.notificationService.notifyBookingConfirmed(
@@ -1093,25 +958,15 @@ export class PaymentsService {
     return result.payment;
   }
 
-  // ---------------------------------------------------------------------
-  // Payout cron: T+3 days after event end, batched per event, excluding
-  // enrollments with an open (requested/approved) refund dispute.
-  // ---------------------------------------------------------------------
+  // Payout cron: T+3 after event end, batched per event, excluding enrollments with an
+  // open refund dispute.
   @Cron(CronExpression.EVERY_HOUR)
   async runPayoutSweep(): Promise<{ eventsProcessed: number; payoutsCreated: number }> {
     const delayDays = this.configService.get<number>('payout.delayDaysAfterEventEnd', 3);
     const now = new Date();
 
-    // Eligibility is filtered in SQL, not in JS. Previously this selected EVERY event with
-    // an unpaid confirmed enrollment — no date predicate at all — then issued one findOne per
-    // candidate and discarded the ones not yet due. On an hourly cron that meant the work
-    // grew with the number of open events (including ones months in the future) rather than
-    // with the number actually due.
-    //
-    // The end timestamp is composed the same way getEventEndDateTime() does it: end_time when
-    // present, otherwise start_time, falling back to midnight — kept in one SQL expression so
-    // the join can be a single indexed scan. The JS re-check below remains the authority for
-    // the exact boundary; this predicate only has to be no stricter than it.
+    // Filtered in SQL, not JS: this previously scanned every event with an unpaid booking,
+    // so work grew with open events rather than with events actually due.
     const eligibleEvents = await this.enrollmentsRepository
       .createQueryBuilder('enrollment')
       .select('enrollment.eventId', 'eventId')
@@ -1120,29 +975,12 @@ export class PaymentsService {
       .where('enrollment.status = :status', { status: 'confirmed' })
       .andWhere('enrollment.paymentStatus = :paymentStatus', { paymentStatus: 'paid' })
       .andWhere('enrollment.payoutId IS NULL')
-      // A cancelled event must never be swept. Its enrollments can legitimately still read
-      // status=confirmed/paymentStatus=paid for a window (or permanently, if refunds were
-      // issued out-of-band rather than through processGatewayRefund), so filtering on the
-      // enrollment alone is not enough — the sweep would hand the organizer the full gross
-      // for an event whose attendees have already been given their money back, and the
-      // platform eats both sides.
-      //
-      // Re-checked authoritatively inside settleEventPayout's transaction; this predicate is
-      // the cheap pre-filter.
+      // A cancelled event must never be swept — its enrollments can still read confirmed/paid,
+      // so the organizer would get gross for attendees who were already refunded.
       .andWhere('event.status != :cancelledEvent', { cancelledEvent: EventStatus.CANCELLED })
       .andWhere(
-        // Must mirror getEventEndDateTime() exactly, or this pre-filter silently disagrees
-        // with the authoritative JS check below:
-        //   - COALESCE(event_end_date, event_date): a multi-day event ends on its LAST day.
-        //     Using event_date alone made this looser than the JS check (harmless, just
-        //     wasted work), but it is wrong and would bite the moment the order of the two
-        //     checks changed.
-        //   - AT TIME ZONE 'Asia/Kolkata': event_date/start_time are civil IST wall-clock
-        //     values with no stored offset (see event-dates.util.ts). Comparing them as if
-        //     they were UTC made this filter 5.5 HOURS STRICTER than the JS check, which
-        //     delayed every single-day event's payout by that much — the dangerous
-        //     direction, since a pre-filter that excludes a due event means it is simply
-        //     never paid on time.
+        // Must mirror getEventEndDateTime() exactly. COALESCE picks a multi-day event's LAST
+        // day; the IST cast avoids a 5.5h-stricter filter that delayed every payout.
         `((COALESCE(event.event_end_date, event.event_date)::timestamp
              + COALESCE(event.end_time, event.start_time, '00:00')::interval
           ) AT TIME ZONE 'Asia/Kolkata')
@@ -1157,9 +995,8 @@ export class PaymentsService {
       const event = await this.eventsRepository.findOne({ where: { id: eventId } });
       if (!event) continue;
 
-      // Re-checked in JS against the same helper the rest of the codebase uses, so the SQL
-      // predicate above is a pre-filter rather than a second, subtly-different definition of
-      // "due" that could drift from getEventEndDateTime().
+      // Re-checked in JS via the shared helper so the SQL above stays a pre-filter, not a
+      // second definition of "due" that could drift from getEventEndDateTime().
       const eligibleAt = new Date(getEventEndDateTime(event).getTime() + delayDays * 24 * 60 * 60 * 1000);
       if (now < eligibleAt) continue;
 
@@ -1188,19 +1025,8 @@ export class PaymentsService {
     return { eventsProcessed: eligibleEvents.length, payoutsCreated };
   }
 
-  // THE reader for "how was this booking split". Every path that needs a settled booking's
-  // fee breakdown — payout, invoice, refund reversal — must come through here rather than
-  // calling the calculator directly.
-  //
-  // Frozen columns win when present. They are the record of what actually happened: the
-  // amounts the buyer was billed, the ledger recorded, and the invoice was issued against.
-  // Recomputation is a FALLBACK for pre-freeze bookings only, and it is lossy — it inverts
-  // today's commission/gateway/GST config, so a rate changed since the payment yields a
-  // different answer than the buyer was charged.
-  //
-  // The fallback is kept (rather than throwing) because rows booked before the freeze
-  // shipped are real, payable, and invoiceable; refusing to split them would strand them.
-  // It is logged at debug so the shrinking population of unfrozen rows stays visible.
+  // THE reader for how a booking was split — payout, invoice and refund reversal all use it.
+  // Frozen columns win; recomputation is a lossy fallback for pre-freeze rows only.
   private resolveBreakdown(
     enrollment: Enrollment,
     event: Pick<Event, 'feePayer' | 'isPaid'>,
@@ -1220,23 +1046,12 @@ export class PaymentsService {
     );
   }
 
-  // Compares the payout derived from bookings against the one derived from the ledger.
-  //
-  // Reconciles PER BOOKING rather than only on the grand total, because two equal-and-
-  // opposite per-booking errors sum to a matching total while both bookings are individually
-  // wrong — and the per-booking detail is what makes a divergence diagnosable at all.
-  //
-  // Bookings with no ledger entries are pre-ledger rows (see AddLedgerEntries). They are
-  // excluded from both sides of the comparison and reported separately: treating a missing
-  // ledger as a ledger balance of 0 would block payout on every legacy booking forever.
+  // Reconciles PER BOOKING, not just the total: two equal-and-opposite errors sum to a
+  // matching total. Pre-ledger rows are excluded, since 0 would block them forever.
   private async reconcilePayoutAgainstLedger(
     manager: EntityManager,
-    // Already-resolved per-booking payouts, NOT the enrollments to re-resolve. Re-deriving
-    // them here would compare the ledger against a second, subtly different computation:
-    // the fallback path for pre-freeze bookings depends on the organizer's commission
-    // config, so a reconciler that resolved them independently would disagree with the
-    // payout for every organizer on a negotiated rate — blocking legitimate payouts and
-    // reporting a divergence that exists only between two lines of this file.
+    // Takes already-resolved payouts, not enrollments: re-deriving them would compare the
+    // ledger against a second computation and diverge for every negotiated commission rate.
     expectedByEnrollment: { enrollmentId: string; expected: number }[],
     bookingTotal: number,
   ): Promise<{
@@ -1265,9 +1080,8 @@ export class PaymentsService {
 
       const actual = ledgerByEnrollment.get(enrollmentId)!;
       ledgerTotal = round2(ledgerTotal + actual);
-      // Exact equality in paise. These are two computations of the same rupee figure, both
-      // already rounded to 2dp — a tolerance here would just be a place for real divergences
-      // to hide.
+      // Exact equality in paise — both sides are the same rupee figure rounded to 2dp, so a
+      // tolerance would only hide real divergences.
       if (Math.round(expected * 100) !== Math.round(actual * 100)) {
         divergences.push({ enrollmentId, expected, actual });
       }
@@ -1290,10 +1104,8 @@ export class PaymentsService {
 
   private async settleEventPayout(event: Event): Promise<SettledPayout | null> {
     return this.dataSource.transaction(async (manager) => {
-      // Re-read the event's status INSIDE the transaction rather than trusting the copy the
-      // sweep loaded. The SQL pre-filter and the JS eligibility check both ran before this
-      // point; an organizer cancelling in that window would otherwise still be paid, and a
-      // cancellation is exactly the moment a payout must not happen.
+      // Re-read status INSIDE the transaction: an organizer cancelling after the pre-filter
+      // ran would otherwise still be paid.
       const currentStatus = await manager.findOne(Event, {
         where: { id: event.id },
         select: { id: true, status: true },
@@ -1305,9 +1117,8 @@ export class PaymentsService {
         return null;
       }
 
-      // Row-lock candidate enrollments so a concurrent sweep run can't double-pay. A
-      // NOT EXISTS subquery (rather than a LEFT JOIN) keeps this a lockable single-table
-      // scan — Postgres refuses FOR UPDATE across the nullable side of an outer join.
+      // Row-lock so a concurrent sweep can't double-pay. NOT EXISTS rather than LEFT JOIN
+      // because Postgres refuses FOR UPDATE across the nullable side of an outer join.
       const enrollments = await manager
         .createQueryBuilder(Enrollment, 'enrollment')
         .setLock('pessimistic_write')
@@ -1323,12 +1134,8 @@ export class PaymentsService {
 
       if (!enrollments.length) return null;
 
-      // Explicit re-check rather than trusting the NOT EXISTS subquery above to still hold
-      // once the FOR UPDATE locks are actually granted — requestRefund() takes its own
-      // pessimistic_write lock on the same enrollment row (see its own comment), so a
-      // refund request racing this sweep either fully commits before this point or blocks
-      // until this transaction ends. Re-querying now, with the locks already held, is what
-      // actually closes that window rather than relying on lock-wait timing alone.
+      // Re-checked with the locks held: requestRefund() takes its own lock on the same row,
+      // so this closes the race rather than relying on lock-wait timing.
       const enrollmentIds = enrollments.map((e) => e.id);
       const openRefundEnrollmentIds = new Set(
         (
@@ -1350,18 +1157,13 @@ export class PaymentsService {
 
       const commissionConfig: OrganizerCommissionConfig = toCommissionConfig(organizer);
 
-      // Totals are accumulated per-fee (not just the payout) so the organizer's settlement
-      // email can show the same breakdown the payout was actually derived from, rather than
-      // recomputing it from a rounded aggregate afterwards. The per-booking payouts are kept
-      // alongside them so the reconciliation below compares against THESE figures rather than
-      // resolving each breakdown a second time.
+      // Accumulated per-fee so the settlement email shows the breakdown the payout came from,
+      // and so reconciliation compares against these figures rather than re-resolving.
       const totals = { payout: 0, gross: 0, platformFee: 0, gatewayFee: 0 };
       const expectedByEnrollment: { enrollmentId: string; expected: number }[] = [];
       for (const enrollment of payableEnrollments) {
-        // Frozen-first. The organizer is paid what was computed AT PAYMENT TIME, so an admin
-        // editing their commission rate between booking and T+3 cannot change the amount owed
-        // for tickets already sold. Falls back to inverting the charged amount for pre-freeze
-        // bookings — see resolveBreakdown().
+        // Frozen-first: the organizer is paid what was computed AT PAYMENT TIME, so a rate
+        // edited before T+3 cannot change what is owed for tickets already sold.
         const breakdown = this.resolveBreakdown(enrollment, event, commissionConfig);
         totals.payout += breakdown.organizerPayout;
         totals.gross += breakdown.buyerPrice;
@@ -1371,17 +1173,8 @@ export class PaymentsService {
       }
       const totalPayout = round2(totals.payout);
 
-      // Dual reconciliation: the ledger must independently agree on what is owed before any
-      // money is declared payable. The figure above comes from the bookings; the figure below
-      // comes from the double-entry records written when each payment settled. They are two
-      // separate accounts of the same event, and until this check existed nothing compared
-      // them — the ledger was written on every payment and never read, so a divergence could
-      // persist indefinitely and only surface at audit as an unexplained balance.
-      //
-      // A mismatch means one of the two is wrong and there is no way to tell which from here.
-      // Aborting is the only safe response: a payout is irreversible once transferred, an
-      // unpaid payout is not. The event stays eligible and will be retried by the next sweep,
-      // so a fixed divergence heals without intervention.
+      // The ledger must independently agree before money is payable. On a mismatch neither
+      // side can be trusted, so abort — the next sweep retries once the divergence is fixed.
       const reconciliation = await this.reconcilePayoutAgainstLedger(manager, expectedByEnrollment, totalPayout);
       if (!reconciliation.matches) {
         this.logger.error(
@@ -1452,17 +1245,10 @@ export class PaymentsService {
     });
   }
 
-  // The ONLY thing permitted to move a payout to PAID. Every disbursement path must come
-  // through here on a CONFIRMED transfer — an admin confirming a manual bank transfer today,
-  // a PayU Payouts / RazorpayX webhook later — because this is the moment `paid_at` becomes
-  // true, and it must not become true a moment earlier.
-  //
-  // Idempotent: an already-PAID payout is returned untouched rather than re-stamped, so a
-  // duplicate provider webhook cannot rewrite the settlement timestamp or re-notify the
-  // organizer.
+  // The only path to PAID — call only on a CONFIRMED transfer, since this sets paid_at.
+  // Idempotent so a duplicate provider webhook cannot re-stamp or re-notify.
   async markPayoutPaid(payoutId: string, transferReference?: string, notes?: string): Promise<Payout> {
-    // Relations loaded for the notification below — the organizer's user id is what a
-    // notification addresses, and the event title is what makes the email legible.
+    // Relations loaded for the notification below
     const payout = await this.payoutsRepository.findOne({
       where: { id: payoutId },
       relations: ['organizer', 'event'],
@@ -1482,14 +1268,10 @@ export class PaymentsService {
       `Payout ${payoutId} marked PAID${transferReference ? ` (transfer ${transferReference})` : ''}`,
     );
 
-    // Fire-and-forget, and after the write: a failing notification must not roll back or
-    // throw out of a settlement that has already happened at the bank. Same posture as the
-    // sweep's own post-commit notify.
+    // After the write: a failed notification must not roll back a real settlement
     if (payout.organizer?.userId) {
-      // try/catch, not a bare .catch() on the promise: a synchronous throw inside the
-      // notifier would escape a .catch() entirely and propagate out of a settlement that has
-      // already been written and already happened at the bank. Same guard as the refund
-      // notify path above.
+      // try/catch, not .catch(): a sync throw would escape and unwind a settlement
+      // that already happened at the bank.
       try {
         await this.notificationService.notifyPayoutPaid(payout.organizer.userId, {
           payoutId: saved.id,
@@ -1510,19 +1292,12 @@ export class PaymentsService {
     return saved;
   }
 
-  // The single invoice view: a flat, GST-invoice-shaped projection of a settled booking.
-  // Consumed by both invoice UIs (the Tax Invoice sheet on BookingsScreen and
-  // InvoiceDetailScreen) — there was briefly a second, nested shape on its own route, which
-  // meant two endpoints returning the same data in two formats for no benefit.
-  //
-  // Every buyer-facing amount follows the same rule as the emailed receipt: under feePayer=ORGANIZER the buyer paid exactly the ticket price, so the fee and
-  // tax lines are reported as 0 rather than disclosing what the organizer was charged. They
-  // are not "missing" — the buyer genuinely was not billed them.
+  // Flat GST-invoice projection of a settled booking, shared by both invoice UIs.
+  // Under feePayer=ORGANIZER the buyer paid only the ticket price, so fee lines report 0.
   async getTaxInvoice(userId: string, enrollmentId: string) {
     const { enrollment, payment, breakdown } = await this.loadInvoiceContext(userId, enrollmentId);
-    // Same rule as getCheckoutEstimate: a free booking's platform fee is an organizer
-    // receivable, never something the buyer was charged, so it must not appear on their
-    // invoice — buyerPrice is 0 there even though platformCommissionAmount is not.
+    // A free booking's platform fee is an organizer receivable, never a buyer charge, so it
+    // must not appear on their invoice.
     const buyerPaidFees = breakdown.feePayer === FeePayer.PARTICIPANT && breakdown.buyerPrice > 0;
     const quantity = enrollment.quantity || 1;
 
@@ -1556,9 +1331,8 @@ export class PaymentsService {
     };
   }
 
-  // Shared loader for both invoice shapes — ownership, paid-status and the fee split are
-  // identical concerns, and duplicating them risks the two views disagreeing about who may
-  // see what.
+  // Shared loader for both invoice shapes — duplicating ownership and paid-status checks
+  // risks the two views disagreeing about who may see what.
   private async loadInvoiceContext(userId: string, enrollmentId: string) {
     const enrollment = await this.enrollmentsRepository.findOne({
       where: { id: enrollmentId },
@@ -1576,9 +1350,7 @@ export class PaymentsService {
       where: { enrollmentId: enrollment.id, status: PaymentStatus.SUCCESS },
     });
 
-    // Frozen-first: an invoice must reproduce the numbers the buyer was billed, forever. A
-    // commission change after the fact used to silently reissue this document with different
-    // figures than the payment it describes.
+    // Frozen-first: an invoice must reproduce the numbers the buyer was billed, forever.
     const breakdown = this.resolveBreakdown(
       enrollment,
       enrollment.event,
@@ -1623,15 +1395,8 @@ export interface OrganizerPayoutView {
   estimatedArrivalDate?: Date;
 }
 
-// An ESTIMATE, and only ever offered for a payout that has actually been sent — the point
-// at which a bank transfer starts moving. Deliberately not produced for a PENDING payout:
-// nothing has been submitted to a bank, so any date shown there would be a guess about when
-// a human or a not-yet-built disbursement job gets to it, and an organizer would reasonably
-// read it as a promise.
-//
-// Two working days is the slow end of the NEFT window. Weekends are skipped because banks
-// do not settle on them; public holidays are not modelled, which is why this is an estimate
-// and is labelled as one everywhere it is displayed.
+// Only for sent payouts — a date on a PENDING one would read as a promise.
+// Two working days is the slow end of NEFT; holidays are not modelled, hence "estimate".
 function estimateArrivalDate(paidAt?: Date): Date | undefined {
   if (!paidAt) return undefined;
   const date = new Date(paidAt);
@@ -1644,23 +1409,8 @@ function estimateArrivalDate(paidAt?: Date): Date | undefined {
   return date;
 }
 
-// PayU's SDK requires exactly 10 digits and rejects anything else with "Phone number should
-// be of 10 digits" — an error raised inside the native SDK, so it surfaces as an opaque
-// popup on the checkout screen with nothing in our logs pointing at the cause.
-//
-// Both PayU paths used to send `user.phoneNumber || ''`. User.phoneNumber is nullable and is
-// never collected at signup, so for any account that has not filled in Edit Profile that sent
-// an empty string — a guaranteed rejection, at the last possible moment, after the enrollment
-// row had already been created.
-//
-// Normalising rather than passing the column through verbatim matters just as much: Edit
-// Profile applies no format validation, so "+91 98765 43210", "098765 43210" and
-// "98765-43210" are all real stored values that fail PayU's check while looking perfectly
-// valid to the person who typed them.
-//
-// Safe to rewrite: phone is NOT part of PayU's request hash
-// (key|txnid|amount|productinfo|firstname|email|…|salt — see PayUService.generateRequestHash),
-// so changing it cannot invalidate the signature.
+// PayU rejects anything but 10 digits, from native code, so the cause never reaches our logs.
+// Normalised because Edit Profile stores unvalidated input; phone is not part of the hash.
 export function toPayuPhone(raw: string | null | undefined): string {
   const digits = (raw ?? '').replace(/\D/g, '');
   // Trailing 10 covers the country code and trunk-prefix forms above (+91…, 0091…, 0…)
@@ -1679,10 +1429,8 @@ function round2(value: number): number {
   return Math.round(value * 100) / 100;
 }
 
-// Printable invoice lines for the emailed receipt. Mirrors the identical rule in
-// Frontend's InvoiceDetailScreen: fee lines are shown ONLY when the participant actually
-// paid them. Under feePayer=ORGANIZER the buyer was charged exactly the ticket price, and
-// itemising platform/gateway/GST there would state charges they never incurred.
+// Fee lines appear ONLY when the participant actually paid them. Under feePayer=ORGANIZER
+// itemising platform/gateway/GST would state charges the buyer never incurred.
 function buildInvoiceEmailLines(breakdown: FeeBreakdown): InvoiceEmailLine[] {
   const lines: InvoiceEmailLine[] = [{ label: 'Ticket price', amount: breakdown.ticketPrice }];
   // buyerPrice > 0 excludes free bookings, whose platform fee is billed to the organizer.
@@ -1706,11 +1454,24 @@ function buildInvoiceEmailLines(breakdown: FeeBreakdown): InvoiceEmailLine[] {
   return lines;
 }
 
-// How many leading hex characters of the enrollment uuid every PayU txnid carries, so a
-// callback for any attempt — current or superseded — can be traced back to its booking.
-// Read by both the minting side (resolvePendingPayUAttempt) and the decoding side
-// (resolveEnrollmentForTxnid); they must agree.
-const ENROLLMENT_ID_PREFIX_LENGTH = 20;
+// From PayuUtils.isValidTxnId (decompiled, undocumented): non-blank, <=25 chars, alphanumeric.
+// Violations are rejected on-device as "InValid transactionId" with no server-side signal.
+const PAYU_MAX_TXNID_LENGTH = 25;
+
+// Leading hex chars of the enrollment uuid carried by every txnid, so any attempt traces
+// back to its booking. The minting and decoding sides must agree on this.
+const ENROLLMENT_ID_PREFIX_LENGTH = 17;
+
+// Fails at mint time: PayU's check runs on-device and leaves no server-side trace,
+// so a format change would otherwise silently stop bookings being payable.
+export function assertValidPayUTxnId(txnid: string): void {
+  if (txnid.length > PAYU_MAX_TXNID_LENGTH || !/^[a-zA-Z0-9]+$/.test(txnid)) {
+    throw new Error(
+      `Generated PayU txnid "${txnid}" (${txnid.length} chars) violates PayU's rule ` +
+        `(max ${PAYU_MAX_TXNID_LENGTH} chars, alphanumeric only). Checkout would fail on the device.`,
+    );
+  }
+}
 
 // PayU's hash format is pipe-delimited — see the comment at initiatePayUOrder's call site.
 function sanitizePayUField(value: string): string {
