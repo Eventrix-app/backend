@@ -6,6 +6,7 @@ import {
   JoinColumn,
   Index,
 } from 'typeorm';
+import { numericTransformer } from '../common/database/numeric.transformer';
 import { Enrollment } from './enrollment.entity';
 
 export enum RefundStatus {
@@ -54,7 +55,7 @@ export class Refund {
   })
   status!: RefundStatus;
 
-  @Column({ type: 'decimal', precision: 10, scale: 2 })
+  @Column({ type: 'decimal', precision: 10, scale: 2, transformer: numericTransformer })
   amount!: number;
 
   @Column({ name: 'gateway_refund_id', type: 'varchar', length: 255, nullable: true })

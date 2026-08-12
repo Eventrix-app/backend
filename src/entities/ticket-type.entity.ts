@@ -8,6 +8,7 @@ import {
   JoinColumn,
   Index,
 } from 'typeorm';
+import { numericTransformer } from '../common/database/numeric.transformer';
 import { Event } from './event.entity';
 
 // Fixed vocabulary organizers pick from rather than typing their own tier name — the whole
@@ -68,7 +69,7 @@ export class TicketType {
   @Column({ type: 'text', array: true, nullable: true })
   benefits?: string[];
 
-  @Column({ type: 'decimal', precision: 10, scale: 2, default: 0 })
+  @Column({ type: 'decimal', precision: 10, scale: 2, default: 0, transformer: numericTransformer })
   price!: number;
 
   @Column({ type: 'varchar', length: 10, default: 'INR' })

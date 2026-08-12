@@ -6,6 +6,7 @@ import {
   OneToOne,
   JoinColumn,
 } from 'typeorm';
+import { numericTransformer } from '../common/database/numeric.transformer';
 import { Payment } from './payment.entity';
 
 @Entity('commissions')
@@ -20,10 +21,10 @@ export class Commission {
   @JoinColumn({ name: 'payment_id' })
   payment!: Payment;
 
-  @Column({ name: 'platform_commission_amount', type: 'decimal', precision: 10, scale: 2, default: 0 })
+  @Column({ name: 'platform_commission_amount', type: 'decimal', precision: 10, scale: 2, default: 0, transformer: numericTransformer })
   platformCommissionAmount!: number;
 
-  @Column({ name: 'gateway_fee_amount', type: 'decimal', precision: 10, scale: 2, default: 0 })
+  @Column({ name: 'gateway_fee_amount', type: 'decimal', precision: 10, scale: 2, default: 0, transformer: numericTransformer })
   gatewayFeeAmount!: number;
 
   @CreateDateColumn({ name: 'created_at' })

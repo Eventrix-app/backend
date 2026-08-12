@@ -5,6 +5,7 @@ import {
   CreateDateColumn,
   Index,
 } from 'typeorm';
+import { numericTransformer } from '../common/database/numeric.transformer';
 
 export enum LedgerAccount {
   BUYER_ESCROW = 'buyer_escrow',
@@ -47,7 +48,7 @@ export class LedgerEntry {
   @Column({ name: 'credit_account', type: 'varchar' })
   creditAccount!: LedgerAccount;
 
-  @Column({ name: 'amount', type: 'decimal', precision: 12, scale: 2 })
+  @Column({ name: 'amount', type: 'decimal', precision: 12, scale: 2, transformer: numericTransformer })
   amount!: number;
 
   @Column({ name: 'currency', type: 'varchar', default: 'INR' })

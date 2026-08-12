@@ -9,6 +9,7 @@ import {
   OneToMany,
   JoinColumn,
 } from 'typeorm';
+import { numericTransformer } from '../common/database/numeric.transformer';
 import { Event } from './event.entity';
 import { User } from './user.entity';
 
@@ -116,10 +117,10 @@ export class Organizer {
   // rather than `default: 0`: with a non-null default, "never configured" and "negotiated at
   // zero" are the same value and a platform default can never be applied to the former
   // without also overriding the latter.
-  @Column({ name: 'commission_rate', type: 'decimal', precision: 5, scale: 2, nullable: true })
+  @Column({ name: 'commission_rate', type: 'decimal', precision: 5, scale: 2, nullable: true, transformer: numericTransformer })
   commissionRate?: number | null;
 
-  @Column({ name: 'commission_flat_fee', type: 'decimal', precision: 10, scale: 2, nullable: true })
+  @Column({ name: 'commission_flat_fee', type: 'decimal', precision: 10, scale: 2, nullable: true, transformer: numericTransformer })
   commissionFlatFee?: number | null;
 
   @CreateDateColumn({ name: 'created_at' })

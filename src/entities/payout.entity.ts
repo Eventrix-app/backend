@@ -7,6 +7,7 @@ import {
   JoinColumn,
   Index,
 } from 'typeorm';
+import { numericTransformer } from '../common/database/numeric.transformer';
 import { Organizer } from './organizer.entity';
 import { Event } from './event.entity';
 
@@ -41,7 +42,7 @@ export class Payout {
   @Column({ name: 'ticket_count', type: 'int' })
   ticketCount!: number;
 
-  @Column({ type: 'decimal', precision: 12, scale: 2 })
+  @Column({ type: 'decimal', precision: 12, scale: 2, transformer: numericTransformer })
   amount!: number;
 
   @Column({ type: 'varchar', length: 10, default: 'INR' })
@@ -72,20 +73,12 @@ export class Payout {
   @Column({ name: 'paid_at', type: 'timestamp', nullable: true })
   paidAt?: Date;
 
-  // The bank/gateway reference for the transfer that settled this payout — a UTR for an
-  // NEFT/IMPS transfer, or the disbursement provider's own payout id. Written by
-  // markPayoutPaid() alongside paidAt.
-  //
-  // This is the organizer's only proof of payment and the thing they will quote when a
-  // transfer is disputed or reconciled against a bank statement, so it is persisted rather
-  // than merely logged: markPayoutPaid() accepted a reference from the start but only wrote
-  // it to the application log, where it is unqueryable and expires with log retention.
+  // UTR or provider payout id — the organizer's only proof of payment, so persisted
+  // rather than logged. Set with paidAt by markPayoutPaid().
   @Column({ name: 'transfer_reference', type: 'varchar', length: 128, nullable: true })
   transferReference?: string;
 
-  // Free-text context from whoever confirmed the transfer ("paid manually, PayU payout API
-  // returned 502 twice"). Operational history for the admin who has to explain this payout
-  // six months from now; never shown to the organizer.
+  // Admin-only context on why/how this was settled. Never shown to the organizer.
   @Column({ name: 'notes', type: 'text', nullable: true })
   notes?: string;
 

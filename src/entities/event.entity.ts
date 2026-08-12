@@ -14,6 +14,7 @@ import {
   BeforeUpdate,
   Index,
 } from 'typeorm';
+import { numericTransformer } from '../common/database/numeric.transformer';
 import { Organizer } from './organizer.entity';
 import { User } from './user.entity';
 import { EventCategory } from './category.entity';
@@ -105,10 +106,10 @@ export class Event {
   @Column({ name: 'venue_address', type: 'text' })
   venueAddress!: string;
 
-  @Column({ type: 'decimal', precision: 10, scale: 8, nullable: true })
+  @Column({ type: 'decimal', precision: 10, scale: 8, nullable: true, transformer: numericTransformer })
   latitude!: number;
 
-  @Column({ type: 'decimal', precision: 11, scale: 8, nullable: true })
+  @Column({ type: 'decimal', precision: 11, scale: 8, nullable: true, transformer: numericTransformer })
   longitude!: number;
 
   @Column({ name: 'event_date', type: 'date' })
@@ -135,6 +136,7 @@ export class Event {
     scale: 2,
     nullable: true,
     default: 0,
+    transformer: numericTransformer,
   })
   pricePerTicket!: number;
 

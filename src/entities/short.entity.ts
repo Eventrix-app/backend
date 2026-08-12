@@ -9,6 +9,7 @@ import {
   JoinColumn,
   Index,
 } from 'typeorm';
+import { numericTransformer } from '../common/database/numeric.transformer';
 import { User } from './user.entity';
 import { Event } from './event.entity';
 
@@ -89,10 +90,10 @@ export class Short {
   locationName?: string;
 
   // Same precision/scale as Event.latitude/longitude so the two are directly comparable.
-  @Column({ type: 'decimal', precision: 10, scale: 8, nullable: true })
+  @Column({ type: 'decimal', precision: 10, scale: 8, nullable: true, transformer: numericTransformer })
   latitude?: number;
 
-  @Column({ type: 'decimal', precision: 11, scale: 8, nullable: true })
+  @Column({ type: 'decimal', precision: 11, scale: 8, nullable: true, transformer: numericTransformer })
   longitude?: number;
 
   @Column({

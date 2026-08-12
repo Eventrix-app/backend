@@ -9,6 +9,7 @@ import {
   ManyToMany,
   JoinTable,
 } from 'typeorm';
+import { numericTransformer } from '../common/database/numeric.transformer';
 import { Organizer } from './organizer.entity';
 import { Enrollment } from './enrollment.entity';
 import { AuthIdentity } from './auth-identity.entity';
@@ -54,10 +55,10 @@ export class User {
   @Column({ type: 'varchar', nullable: true })
   location!: string;
 
-  @Column({ type: 'decimal', precision: 11, scale: 8, nullable: true })
+  @Column({ type: 'decimal', precision: 11, scale: 8, nullable: true, transformer: numericTransformer })
   latitude!: number;
 
-  @Column({ type: 'decimal', precision: 11, scale: 8, nullable: true })
+  @Column({ type: 'decimal', precision: 11, scale: 8, nullable: true, transformer: numericTransformer })
   longitude!: number;
 
   @Column({ name: 'date_of_birth', type: 'date', nullable: true })

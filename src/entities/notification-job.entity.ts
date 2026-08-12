@@ -29,10 +29,8 @@ export enum NotificationType {
   // adding values needs no migration.
   INVOICE_ISSUED = 'invoice_issued',
   PAYOUT_PROCESSED = 'payout_processed',
-  // Distinct from PAYOUT_PROCESSED, which fires when the T+3 sweep computes what is OWED.
-  // This one fires when a transfer has actually confirmed and carries the bank reference.
-  // Collapsing the two would tell an organizer money had arrived at the moment it was merely
-  // calculated — the same conflation Payout.status/paidAt exist to prevent.
+  // Fires when a transfer confirms. PAYOUT_PROCESSED fires when the sweep computes
+  // what is owed — collapsing them would claim money arrived when it was only calculated.
   PAYOUT_PAID = 'payout_paid',
 }
 

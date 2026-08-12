@@ -8,6 +8,7 @@ import {
   JoinColumn,
   Index,
 } from 'typeorm';
+import { numericTransformer } from '../common/database/numeric.transformer';
 import { User } from './user.entity';
 import { Event } from './event.entity';
 import { TicketType } from './ticket-type.entity';
@@ -52,7 +53,7 @@ export class Enrollment {
   @Column({ name: 'quantity_tickets', type: 'int', default: 1 })
   quantity!: number;
 
-  @Column({ name: 'total_price', type: 'decimal', precision: 10, scale: 2, default: 0 })
+  @Column({ name: 'total_price', type: 'decimal', precision: 10, scale: 2, default: 0, transformer: numericTransformer })
   totalAmount!: number;
 
   // --- Frozen fee split, stamped once by handleWebhook() when the payment succeeds ---
@@ -77,30 +78,30 @@ export class Enrollment {
 
   // The commission inputs in force at settlement, kept alongside the resulting amounts so a
   // dispute can be answered with "you were on 5% + ₹0 on that date", not just a total.
-  @Column({ name: 'commission_rate_applied', type: 'decimal', precision: 5, scale: 2, nullable: true })
+  @Column({ name: 'commission_rate_applied', type: 'decimal', precision: 5, scale: 2, nullable: true, transformer: numericTransformer })
   commissionRateApplied?: number | null;
 
-  @Column({ name: 'commission_flat_fee_applied', type: 'decimal', precision: 10, scale: 2, nullable: true })
+  @Column({ name: 'commission_flat_fee_applied', type: 'decimal', precision: 10, scale: 2, nullable: true, transformer: numericTransformer })
   commissionFlatFeeApplied?: number | null;
 
   // The base the split was computed from, across the whole order. Under feePayer=PARTICIPANT
   // this is strictly less than totalAmount (which carries the fees on top); under ORGANIZER
   // the two are equal; for a free event it is 0 while totalAmount is the ₹12.50 fee.
-  @Column({ name: 'ticket_base_amount', type: 'decimal', precision: 10, scale: 2, nullable: true })
+  @Column({ name: 'ticket_base_amount', type: 'decimal', precision: 10, scale: 2, nullable: true, transformer: numericTransformer })
   ticketBaseAmount?: number | null;
 
-  @Column({ name: 'platform_fee_amount', type: 'decimal', precision: 10, scale: 2, nullable: true })
+  @Column({ name: 'platform_fee_amount', type: 'decimal', precision: 10, scale: 2, nullable: true, transformer: numericTransformer })
   platformFeeAmount?: number | null;
 
-  @Column({ name: 'gateway_fee_amount', type: 'decimal', precision: 10, scale: 2, nullable: true })
+  @Column({ name: 'gateway_fee_amount', type: 'decimal', precision: 10, scale: 2, nullable: true, transformer: numericTransformer })
   gatewayFeeAmount?: number | null;
 
-  @Column({ name: 'gst_amount', type: 'decimal', precision: 10, scale: 2, nullable: true })
+  @Column({ name: 'gst_amount', type: 'decimal', precision: 10, scale: 2, nullable: true, transformer: numericTransformer })
   gstAmount?: number | null;
 
   // What the organizer is owed for this booking. THE figure the payout sweep sums — no
   // longer recomputed from live config at sweep time.
-  @Column({ name: 'organizer_payout_amount', type: 'decimal', precision: 10, scale: 2, nullable: true })
+  @Column({ name: 'organizer_payout_amount', type: 'decimal', precision: 10, scale: 2, nullable: true, transformer: numericTransformer })
   organizerPayoutAmount?: number | null;
 
   // Set together with the columns above. Distinguishes "frozen, and every amount happened to
