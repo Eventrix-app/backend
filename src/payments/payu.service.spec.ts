@@ -96,9 +96,12 @@ describe('PayUService', () => {
         expect(() => service.signHash(`${MERCHANT_KEY}|  cancel_refund_transaction  |x|`)).toThrow(BadRequestException);
       });
 
-      it('rejects a string that does not begin with the merchant key', () => {
+      // Position is not asserted: a real refund hash puts the command at index 1, but the
+      // guard must not depend on that, since legitimate SDK strings vary in shape.
+      it('rejects a privileged command wherever it appears', () => {
         expect(() => service.signHash('someoneelseskey|cancel_refund_transaction|x|')).toThrow(BadRequestException);
-        expect(() => service.signHash('arbitrary attacker chosen text')).toThrow(BadRequestException);
+        expect(() => service.signHash(`${MERCHANT_KEY}|x|y|refund_transaction|z|`)).toThrow(BadRequestException);
+        expect(() => service.signHash('cancel_refund_transaction|x|')).toThrow(BadRequestException);
       });
 
       it('rejects an oversized string rather than hashing unbounded input', () => {
@@ -134,25 +137,17 @@ describe('PayUService', () => {
       });
     });
 
-    // A key configured with stray whitespace produced a 400 on every hash the SDK asked for,
-    // which surfaced only as a checkout that never opened.
-    describe('merchant key normalisation', () => {
-      it.each([`${MERCHANT_KEY} `, ` ${MERCHANT_KEY}`, `${MERCHANT_KEY}\n`])(
-        'signs normally when the configured key is %j',
-        (configuredKey) => {
-          mockConfigService.get.mockImplementation((k: string) => {
-            if (k === 'payu.merchantKey') return configuredKey;
-            if (k === 'payu.merchantSalt') return MERCHANT_SALT;
-            return undefined;
-          });
-
-          const hashString = `${MERCHANT_KEY}|get_checkout_details|{}|`;
-          expect(() => service.signHash(hashString)).not.toThrow();
-        },
-      );
-
-      it('still rejects a genuinely different key', () => {
-        expect(() => service.signHash('someoneelseskey|get_checkout_details|{}|')).toThrow(BadRequestException);
+    // Every hash one real Android checkout asked for, in order. Requiring the merchant-key
+    // prefix rejected the last two, stranding checkout on a spinner.
+    describe('a real device checkout sequence', () => {
+      it.each([
+        ['get_checkout_details', `${MERCHANT_KEY}|get_checkout_details|{"requestId":"ea03e501bd6e44ee","isSITxn":false}|`],
+        ['get_sdk_configuration', `${MERCHANT_KEY}|get_sdk_configuration|default|`],
+        ['get_all_offer_details', 'get_all_offer_details|ea03e501bd6e44ee|'],
+        ['quickPayEvent', 'quickPayEvent|ea03e501bd6e44ee|'],
+      ])('signs %s', (_hashName, hashString) => {
+        const expected = crypto.createHash('sha512').update(`${hashString}${MERCHANT_SALT}`).digest('hex');
+        expect(service.signHash(hashString)).toBe(expected);
       });
     });
   });

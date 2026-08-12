@@ -146,34 +146,32 @@ export class PayUService {
   // Guarded with a denylist rather than an allowlist on purpose: the SDK requests hash types
   // that vary by payment method and cannot be enumerated from its source alone (they come
   // from PayU's compiled checkoutpro binary), so an allowlist would risk silently breaking a
-  // real payment method that has never been exercised on a device here. A denylist of the
-  // money-moving commands is narrow, complete for the known-dangerous set, and cannot break a
-  // legitimate checkout hash — none of these commands appear in one.
+  // real payment method that has never been exercised on a device here.
   //
-  // Requiring the merchant-key prefix is the second half: every genuine PayU hash string
-  // begins with it, so this rejects entirely free-form input without constraining the SDK.
+  // The shape cannot be constrained either. A previous version also required the string to
+  // START with the merchant key, on the assumption every genuine one does. A device run
+  // disproved it: get_checkout_details and get_sdk_configuration do, while
+  // get_all_offer_details and quickPayEvent do not, so real checkouts died on a 400 with the
+  // SDK stuck waiting for a hash. Hence the command match scans every field rather than
+  // anchoring on position, and nothing is asserted about the format.
   signHash(hashStringWithoutSalt: string): string {
-    const { key, salt } = this.getCredentials();
+    const { salt } = this.getCredentials();
 
     if (hashStringWithoutSalt.length > MAX_HASH_STRING_LENGTH) {
       throw new BadRequestException('Hash string is too long');
     }
 
-    const parts = hashStringWithoutSalt.split('|');
-    // Trimmed: a stray space in the configured key rejects every real hash, because PayU's
-    // SDK normalises the key before echoing it back at the head of the string.
-    if ((parts[0] ?? '').trim() !== key.trim()) {
-      // Both values are public — initiate-native hands the key to the client — so logging
-      // them is what separates a misconfigured env var from an actual attack.
-      this.logger.warn(`Rejected sign-hash: first field "${parts[0]}" != merchant key "${key}"`);
-      throw new BadRequestException('Unsupported hash string');
-    }
+    // Anywhere, not just index 1: the postservice construction puts the command there, but
+    // position is exactly the assumption that broke checkout above.
+    const denied = hashStringWithoutSalt
+      .split('|')
+      .map((field) => field.trim().toLowerCase())
+      .find((field) => DENIED_HASH_COMMANDS.has(field));
 
-    const command = (parts[1] ?? '').trim().toLowerCase();
-    if (DENIED_HASH_COMMANDS.has(command)) {
+    if (denied) {
       // Nothing legitimate reaches here — a client has asked us to authenticate a
       // money-moving postservice call. Logged at error so it surfaces as an incident.
-      this.logger.error(`Rejected sign-hash request for privileged PayU command "${command}"`);
+      this.logger.error(`Rejected sign-hash request for privileged PayU command "${denied}"`);
       throw new BadRequestException('Unsupported hash string');
     }
 
