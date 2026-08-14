@@ -431,7 +431,9 @@ describe('UsersService', () => {
   // ─── exportMyData service method ───────────────────────────────────────────
 
   describe('exportMyData', () => {
-    it('emails a JSON export containing the account profile to the user\'s own address', async () => {
+    // The data rides in attachments now, not the body — a raw JSON dump in an email is
+    // unreadable to anyone who does not already read JSON.
+    it('emails a readable PDF and a machine-readable JSON to the user\'s own address', async () => {
       const user = makeUser({ email: 'export-me@example.com', interests: [CAT_A] });
       mockUserRepo.findOne.mockResolvedValue(user);
       mockOrganizerRepo.find.mockResolvedValue([]);
@@ -440,10 +442,19 @@ describe('UsersService', () => {
       await service.exportMyData('user-uuid');
 
       expect(mockEmailService.send).toHaveBeenCalledTimes(1);
-      const [to, , html] = mockEmailService.send.mock.calls[0];
+      const [to, , html, attachments] = mockEmailService.send.mock.calls[0];
       expect(to).toBe('export-me@example.com');
-      expect(html).toContain('export-me@example.com');
-      expect(html).toContain(CAT_A.id);
+      // The body must not carry the payload itself any more.
+      expect(html).not.toContain(CAT_A.id);
+
+      const pdf = attachments.find((a: any) => a.contentType === 'application/pdf');
+      expect(pdf.filename).toBe('eventrix-data-export.pdf');
+      expect(pdf.content.subarray(0, 5).toString()).toBe('%PDF-');
+
+      const json = attachments.find((a: any) => a.contentType === 'application/json');
+      const parsed = JSON.parse(json.content.toString('utf8'));
+      expect(parsed.account.email).toBe('export-me@example.com');
+      expect(parsed.interests).toEqual([{ id: CAT_A.id, name: CAT_A.name }]);
     });
 
     it('throws NotFoundException when user does not exist', async () => {

@@ -30,6 +30,7 @@ import {
   waitlistPromotedEmail,
 } from '../email/templates';
 import type { InvoiceEmailLine } from '../email/templates';
+import { renderTicketPdf } from '../common/pdf/ticket.pdf';
 
 export interface NotificationRecord {
   id: string;
@@ -113,11 +114,25 @@ export class NotificationService {
     const ticketCode = payload['ticketCode'] ? String(payload['ticketCode']) : undefined;
     if (!ticketCode) return undefined;
     try {
-      const content = await QRCode.toBuffer(ticketCode, { type: 'png', margin: 1, width: 300 });
-      // cid must match the `cid:ticket-qr` reference in bookingConfirmedEmail()'s <img> tag.
-      return [{ filename: 'ticket-qr.png', content, cid: 'ticket-qr', contentType: 'image/png' }];
+      const qrPng = await QRCode.toBuffer(ticketCode, { type: 'png', margin: 1, width: 300 });
+      // A PDF rather than a loose QR image: it saves to the device as one file carrying the
+      // event, seat count and reference, which a bare .png does not.
+      const ticketPdf = await renderTicketPdf({
+        eventTitle: String(payload['eventTitle'] ?? 'Your event'),
+        bookingReference: String(payload['bookingReference'] ?? ''),
+        ticketCode,
+        quantity: Number(payload['quantity'] ?? 1),
+        eventDate: payload['eventDate'] ? String(payload['eventDate']) : undefined,
+        startTime: payload['startTime'] ? String(payload['startTime']) : undefined,
+        venueName: payload['venueName'] ? String(payload['venueName']) : undefined,
+        qrPng,
+      });
+
+      return [
+        { filename: 'eventrix-ticket.pdf', content: ticketPdf, contentType: 'application/pdf' },
+      ];
     } catch (err) {
-      this.logger.warn(`Failed to generate ticket QR code: ${err instanceof Error ? err.message : String(err)}`);
+      this.logger.warn(`Failed to build ticket attachment: ${err instanceof Error ? err.message : String(err)}`);
       return undefined;
     }
   }

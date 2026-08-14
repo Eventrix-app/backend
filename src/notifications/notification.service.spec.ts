@@ -38,6 +38,39 @@ describe('NotificationService — event approval/rejection', () => {
     );
   });
 
+  // Attached as a PDF rather than a loose QR image so it saves to the device as one file
+  // carrying the event, ticket count and reference — a bare .png carries none of that.
+  it('attaches a ticket PDF to a booking confirmation', async () => {
+    await service.notifyBookingConfirmed(
+      'organizer-user-1',
+      'event-1',
+      'enr-1',
+      'Summer Fest',
+      'EVX-12345',
+      2,
+      'TICKET-ABC-123',
+      '2026-09-01',
+      '18:30',
+      'Phoenix Arena',
+    );
+
+    const attachments = mockEmailService.send.mock.calls[0][3];
+    expect(attachments).toHaveLength(1);
+    expect(attachments[0].filename).toBe('eventrix-ticket.pdf');
+    expect(attachments[0].contentType).toBe('application/pdf');
+    expect(attachments[0].content.subarray(0, 5).toString()).toBe('%PDF-');
+    // cid would make some clients treat it as inline and hide it from the attachment list.
+    expect(attachments[0].cid).toBeUndefined();
+    // Generous because pdfkit loads its font metrics on the first render; measured at ~890ms
+    // cold and ~250ms after, and ts-jest adds the module compile on top.
+  }, 30000);
+
+  it('sends no ticket attachment when the booking has no ticket code', async () => {
+    await service.notifyBookingConfirmed('organizer-user-1', 'event-1', 'enr-1', 'Summer Fest', 'EVX-12345', 1);
+
+    expect(mockEmailService.send.mock.calls[0][3]).toBeUndefined();
+  });
+
   it('enqueues an EVENT_REJECTED job and emails the organizer with the rejection reason', async () => {
     await service.notifyEventRejected('organizer-user-1', 'event-1', 'Summer Fest', 'Missing venue details');
 

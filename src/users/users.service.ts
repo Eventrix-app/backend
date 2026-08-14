@@ -25,6 +25,7 @@ import { dataExportEmail } from '../email/templates';
 import { AuditLogService } from '../common/audit-log/audit-log.service';
 import { AuthService } from '../auth/auth.service';
 import { userMeCacheKey } from './user-cache-keys';
+import { renderDataExportPdf } from '../common/pdf/data-export.pdf';
 export { userMeCacheKey };
 
 const USER_ME_CACHE_TTL_SECONDS = 60;
@@ -488,9 +489,23 @@ export class UsersService {
       note: 'This export covers your account profile, interests, organizer profile (if any), and follows. For booking, payment, or refund records tied to your account, contact support.',
     };
 
-    const jsonPretty = JSON.stringify(exportPayload, null, 2);
-    const email = dataExportEmail(jsonPretty);
-    await this.emailService.send(user.email, email.subject, email.html);
+    const email = dataExportEmail();
+    // JSON rides along beside the PDF: the PDF is what a person reads, but data portability
+    // means handing over something another service can actually ingest.
+    const attachments = [
+      {
+        filename: 'eventrix-data-export.pdf',
+        content: await renderDataExportPdf(exportPayload),
+        contentType: 'application/pdf',
+      },
+      {
+        filename: 'eventrix-data-export.json',
+        content: Buffer.from(JSON.stringify(exportPayload, null, 2), 'utf8'),
+        contentType: 'application/json',
+      },
+    ];
+
+    await this.emailService.send(user.email, email.subject, email.html, attachments);
     this.logger.log(`Data export emailed to ${user.email}`);
   }
 }

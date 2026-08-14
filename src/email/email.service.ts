@@ -9,7 +9,9 @@ import * as nodemailer from 'nodemailer';
 export interface EmailAttachment {
   filename: string;
   content: Buffer;
-  cid: string;
+  // Only for images referenced inline as `cid:...` in the HTML. A file meant to be saved
+  // (ticket PDF, data export) must omit it, or some clients hide it from the attachment list.
+  cid?: string;
   contentType?: string;
 }
 

@@ -317,11 +317,10 @@ export function bookingConfirmedEmail(
   eventDate?: string,
   startTime?: string,
   venueName?: string,
-  // True once a ticket-QR attachment has actually been embedded alongside this email
-  // (see NotificationService.buildEmailAttachments) — controls whether the QR <img> tag
-  // is rendered here, since referencing a cid: that isn't actually attached would just
-  // show a broken image.
-  hasQrAttachment?: boolean,
+  // True once the ticket PDF has actually been attached (see
+  // NotificationService.buildEmailAttachments) — promising an attachment that failed to
+  // build would send someone looking for a file that is not there.
+  hasTicketAttachment?: boolean,
 ): RenderedEmail {
   const safeTitle = escapeHtml(eventTitle);
   const safeReference = escapeHtml(bookingReference);
@@ -332,8 +331,11 @@ export function bookingConfirmedEmail(
     startTime ? calloutBox('Time', escapeHtml(startTime)) : '',
     venueName ? calloutBox('Location', escapeHtml(venueName)) : '',
   ].join('');
-  const qrHtml = hasQrAttachment
-    ? `<div style="margin:20px 0;text-align:center;"><img src="cid:ticket-qr" alt="Ticket QR code" width="180" height="180" style="border-radius:12px;" /></div>`
+  const ticketHtml = hasTicketAttachment
+    ? `<p style="margin:20px 0;padding:16px;background-color:#F7F7FA;border-radius:8px;font-size:14px;line-height:22px;color:${TEXT_PRIMARY};">
+         Your ticket is attached as <strong>eventrix-ticket.pdf</strong> — save it to your device
+         and show the QR code inside at the entrance.
+       </p>`
     : '';
   return {
     subject: `Booking confirmed: ${subjectSafe(eventTitle)}`,
@@ -343,7 +345,7 @@ export function bookingConfirmedEmail(
       <p>You're confirmed for <strong>${safeTitle}</strong> (${quantity} ${ticketWord}).</p>
       ${calloutBox('Booking reference', safeReference)}
       ${detailsHtml}
-      ${qrHtml}
+      ${ticketHtml}
       ${link ? ctaButton('View Your Ticket', link) : `<p>Open the ${COMPANY_NAME} app and go to My Bookings to view your ticket and QR code anytime.</p>`}
       `,
       `You're confirmed for ${eventTitle} — ${quantity} ${ticketWord}.`,
@@ -645,14 +647,20 @@ export function userReportedEmail(reporterName: string, targetType: string, reas
 // JSON.stringify output, not user-entered text, but escaped anyway on the same
 // defense-in-depth basis as everything else in this file — cheap, and it's the values
 // nested inside (names, bios) that really are user-controlled.
-export function dataExportEmail(jsonPretty: string): RenderedEmail {
+// Attachments carry the data now, so nothing is dumped into the body. The previous version
+// inlined the raw JSON, which is unreadable to anyone who does not already read JSON.
+export function dataExportEmail(): RenderedEmail {
   return {
     subject: `Your ${COMPANY_NAME} data export`,
     html: wrapEmail(
       'Your data export is ready',
       `
-      <p>As requested, here is a copy of your ${COMPANY_NAME} account data.</p>
-      <pre style="margin:16px 0;padding:16px;background-color:#F7F7FA;border-radius:8px;font-size:12px;line-height:18px;color:${TEXT_PRIMARY};white-space:pre-wrap;word-break:break-word;font-family:'SF Mono',Consolas,Menlo,monospace;">${escapeHtml(jsonPretty)}</pre>
+      <p>As requested, a copy of your ${COMPANY_NAME} account data is attached to this email.</p>
+      <p style="margin:16px 0;padding:16px;background-color:#F7F7FA;border-radius:8px;font-size:14px;line-height:22px;color:${TEXT_PRIMARY};">
+        <strong>eventrix-data-export.pdf</strong> — your data laid out to read.<br />
+        <strong>eventrix-data-export.json</strong> — the same data in a machine-readable format, for
+        moving it to another service.
+      </p>
       <p>If you didn't request this, please contact us immediately at <a href="mailto:${SUPPORT_EMAIL}" style="color:${BRAND_COLOR};">${SUPPORT_EMAIL}</a>.</p>
       `,
       `Your requested ${COMPANY_NAME} data export.`,
