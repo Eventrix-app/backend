@@ -32,6 +32,7 @@ import { EventContentModule } from './event-content/event-content.module';
 import { GeocodeModule } from './geocode/geocode.module';
 import { ShortsModule } from './shorts/shorts.module';
 import { ModerationModule } from './moderation/moderation.module';
+import { HealthModule } from './health/health.module';
 
 @Module({
   imports: [
@@ -82,6 +83,7 @@ import { ModerationModule } from './moderation/moderation.module';
     GeocodeModule,
     ShortsModule,
     ModerationModule,
+    HealthModule,
   ],
   controllers: [AppController],
   providers: [

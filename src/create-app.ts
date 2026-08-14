@@ -3,6 +3,7 @@ import { NestExpressApplication } from '@nestjs/platform-express';
 import { ValidationPipe } from '@nestjs/common';
 import { join } from 'path';
 import helmet from 'helmet';
+import compression from 'compression';
 import { AppModule } from './app.module';
 import { HttpExceptionFilter } from './common/filters/http-exception.filter';
 import { setupSwagger } from './crud/swagger-helper';
@@ -44,6 +45,10 @@ export async function createApp(): Promise<NestExpressApplication> {
   // that helmet's default CSP blocks — enabling it would require hand-tuning a policy for
   // a page this app doesn't treat as security-sensitive today.
   app.use(helmet({ contentSecurityPolicy: false }));
+
+  // Event and enrollment lists are the large JSON responses, and they go to phones on Indian
+  // mobile networks — gzip is the cheapest win available on a cross-region round trip.
+  app.use(compression());
 
   app.useGlobalPipes(
     new ValidationPipe({
