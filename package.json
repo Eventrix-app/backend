@@ -118,5 +118,8 @@
     "setupFiles": [
       "<rootDir>/test-setup.ts"
     ]
+  },
+  "overrides": {
+    "js-yaml": "^5.2.3"
   }
 }
