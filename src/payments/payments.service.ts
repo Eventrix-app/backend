@@ -38,6 +38,7 @@ import { PayUReturnDto } from './dto/payu-return.dto';
 import { getEventStartDateTime, getEventEndDateTime } from '../events/utils/event-dates.util';
 import { invalidateEventCaches } from '../events/utils/event-cache.util';
 import { CacheService } from '../common/cache/cache.service';
+import { toTenDigitMobile } from '../common/phone.util';
 
 // Enrollment.user is the full User entity (passwordHash included), so the refund queue
 // must scope its select. Event/user context eager-loaded for the approval screen.
@@ -1412,12 +1413,9 @@ function estimateArrivalDate(paidAt?: Date): Date | undefined {
 // PayU rejects anything but 10 digits, from native code, so the cause never reaches our logs.
 // Normalised because Edit Profile stores unvalidated input; phone is not part of the hash.
 export function toPayuPhone(raw: string | null | undefined): string {
-  const digits = (raw ?? '').replace(/\D/g, '');
-  // Trailing 10 covers the country code and trunk-prefix forms above (+91…, 0091…, 0…)
-  // without hardcoding a country: PayU wants the subscriber number either way.
-  const subscriber = digits.length > 10 ? digits.slice(-10) : digits;
+  const subscriber = toTenDigitMobile(raw);
 
-  if (subscriber.length !== 10) {
+  if (!subscriber) {
     throw new BadRequestException(
       'A 10-digit mobile number is required to pay. Add one to your profile and try again.',
     );

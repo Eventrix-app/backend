@@ -20,7 +20,10 @@ export class BankAccountController {
 
   // --- Organizer self-service ---
 
-  @Roles('organizer', 'admin')
+  // Open to any authenticated caller, not just the 'organizer' role: that role is granted
+  // only on approval, so an applicant could not set up payouts until after review.
+  // resolveOrganizerForUser still 404s anyone without an organizer profile of their own.
+  @Roles('user', 'organizer', 'admin')
   @Get('me')
   async getMine(@Request() req: Request & { user: JwtPayload }) {
     return await this.bankAccountService.getMine(req.user.id);
@@ -30,7 +33,7 @@ export class BankAccountController {
   // second one, and it is idempotent in the sense that matters — the end state is "this is
   // my account", however many times it is called.
   @AuditAction('organizer.bank-account.submit', 'organizer')
-  @Roles('organizer', 'admin')
+  @Roles('user', 'organizer', 'admin')
   @Put('me')
   async submit(@Body() dto: SubmitBankAccountDto, @Request() req: Request & { user: JwtPayload }) {
     return await this.bankAccountService.submit(req.user.id, dto);

@@ -22,6 +22,7 @@ import { PasswordResetOtp } from '../entities/password-reset-otp.entity';
 import { EmailVerificationOtp } from '../entities/email-verification-otp.entity';
 import { UserSession } from '../entities/user-session.entity';
 import { CacheService } from '../common/cache/cache.service';
+import { toTenDigitMobile } from '../common/phone.util';
 import { userMeCacheKey } from '../users/user-cache-keys';
 import { EmailService } from '../email/email.service';
 import {
@@ -195,9 +196,17 @@ export class AuthService {
 
     const username = dto.username || dto.email.split('@')[0];
 
+    // Stored normalised, not as typed: the DTO accepts the spacing and +91 forms people
+    // actually enter, while checkout needs the bare subscriber number it will send to PayU.
+    const phoneNumber = toTenDigitMobile(dto.phoneNumber);
+    if (!phoneNumber) {
+      throw new BadRequestException('Enter a valid 10-digit mobile number');
+    }
+
     const user = this.usersRepository.create({
       email: dto.email,
       fullName,
+      phoneNumber,
       passwordHash,
       passwordHashVersion,
       dateOfBirth: dto.dateOfBirth,

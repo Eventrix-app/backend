@@ -1,4 +1,5 @@
 import { Test, TestingModule } from '@nestjs/testing';
+import { BadRequestException } from '@nestjs/common';
 import { getRepositoryToken } from '@nestjs/typeorm';
 import { JwtService } from '@nestjs/jwt';
 import { ConfigService } from '@nestjs/config';
@@ -66,6 +67,7 @@ describe('AuthService — hasCompletedOnboarding', () => {
         password: 'password123',
         firstName: 'New',
         lastName: 'User',
+        phoneNumber: '9876543210',
       } as any);
 
       expect(mockUserRepo.create).toHaveBeenCalledWith(
@@ -82,6 +84,7 @@ describe('AuthService — hasCompletedOnboarding', () => {
         password: 'password123',
         firstName: 'New',
         lastName: 'User',
+        phoneNumber: '9876543210',
       } as any);
 
       expect(mockEmailService.send).toHaveBeenCalledWith(
@@ -89,6 +92,42 @@ describe('AuthService — hasCompletedOnboarding', () => {
         expect.stringContaining('Welcome'),
         expect.any(String),
       );
+    });
+
+    // The point of collecting a number at signup is that checkout never has to ask, which
+    // only holds if what is stored is what PayU will accept.
+    it.each([
+      ['+91 98765 43210', '9876543210'],
+      ['098765-43210', '9876543210'],
+      ['9876543210', '9876543210'],
+    ])('stores %s normalised as %s', async (input, expected) => {
+      mockUserRepo.findOne.mockResolvedValue(null);
+
+      await service.register({
+        email: 'new@example.com',
+        password: 'password123',
+        firstName: 'New',
+        lastName: 'User',
+        phoneNumber: input,
+      } as any);
+
+      expect(mockUserRepo.create).toHaveBeenCalledWith(
+        expect.objectContaining({ phoneNumber: expected }),
+      );
+    });
+
+    it('refuses a number that cannot be a 10-digit subscriber number', async () => {
+      mockUserRepo.findOne.mockResolvedValue(null);
+
+      await expect(
+        service.register({
+          email: 'new@example.com',
+          password: 'password123',
+          firstName: 'New',
+          lastName: 'User',
+          phoneNumber: '12345',
+        } as any),
+      ).rejects.toThrow(BadRequestException);
     });
   });
 
