@@ -1,5 +1,7 @@
 import 'dotenv/config';
+import type { TlsOptions } from 'tls';
 import { DataSource } from 'typeorm';
+import { buildSslOptions } from './config/database.config';
 import { User } from './entities/user.entity';
 import { Event } from './entities/event.entity';
 import { Organizer } from './entities/organizer.entity';
@@ -80,11 +82,14 @@ const migrationDatabaseUrl = process.env.MIGRATION_DATABASE_URL || process.env.D
 // previous check read the wrong variable the moment MIGRATION_DATABASE_URL was set, which
 // would have silently disabled TLS against a remote database. Any non-local host gets SSL,
 // matching config/database.config.ts.
-function requiresSsl(url: string | undefined): boolean {
+// Delegates to the app's own builder rather than repeating the rule: migrations run against
+// the same database, so a weaker setting here would be the hole the app no longer has.
+function resolveSsl(url: string | undefined): TlsOptions | false {
   if (!url) return false;
   try {
     const { hostname } = new URL(url);
-    return !!hostname && !['localhost', '127.0.0.1'].includes(hostname);
+    if (!hostname || ['localhost', '127.0.0.1'].includes(hostname)) return false;
+    return buildSslOptions(hostname);
   } catch {
     return false;
   }
@@ -95,7 +100,7 @@ export const AppDataSource = new DataSource({
   url: migrationDatabaseUrl,
   entities,
   synchronize: false,
-  ssl: requiresSsl(migrationDatabaseUrl) ? { rejectUnauthorized: false } : false,
+  ssl: resolveSsl(migrationDatabaseUrl),
   // Both extensions: .ts when driven by ts-node locally, .js when run from dist/ on a
   // deploy. __dirname resolves to src/ or dist/ accordingly, so one glob covers both.
   migrations: [

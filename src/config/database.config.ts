@@ -1,5 +1,7 @@
 import { ConfigService } from '@nestjs/config';
+import type { TlsOptions } from 'tls';
 import { DataSourceOptions } from 'typeorm';
+import { SUPABASE_ROOT_CA } from './supabase-ca';
 import { User } from '../entities/user.entity';
 import { Event } from '../entities/event.entity';
 import { Organizer } from '../entities/organizer.entity';
@@ -70,6 +72,27 @@ const entities = [
   OrganizerBankAccount,
 ];
 
+const LOCAL_HOSTS = ['localhost', '127.0.0.1'];
+
+// Verification is on for every remote host. It previously accepted any certificate, which
+// left the connection encrypted but unauthenticated — no defence against interception.
+// Exported so the migration data source cannot drift from what the app connects with.
+export function buildSslOptions(hostname: string): TlsOptions {
+  // Escape hatch for a different provider or a rotated root, so neither needs a code change.
+  const configuredCa = process.env.DATABASE_CA_CERT?.trim();
+  if (configuredCa) {
+    return { rejectUnauthorized: true, ca: configuredCa.replace(/\\n/g, '\n') };
+  }
+
+  // Supabase signs its Postgres endpoints with its own root, which no public CA store has;
+  // strict verification against the system store fails with SELF_SIGNED_CERT_IN_CHAIN.
+  if (hostname.endsWith('.supabase.com') || hostname.endsWith('.supabase.co')) {
+    return { rejectUnauthorized: true, ca: SUPABASE_ROOT_CA };
+  }
+
+  return { rejectUnauthorized: true };
+}
+
 export const getDatabaseConfig = (
   configService: ConfigService,
 ): DataSourceOptions => {
@@ -80,12 +103,12 @@ export const getDatabaseConfig = (
     configService.get<string>('DATABASE_URL_POOLER');
 
   if (databaseUrl) {
-    let ssl: true | false | { rejectUnauthorized: boolean } = false;
+    let ssl: TlsOptions | false = false;
     try {
       const parsed = new URL(databaseUrl);
       const hostname = parsed.hostname;
-      if (hostname && !['localhost', '127.0.0.1'].includes(hostname)) {
-        ssl = { rejectUnauthorized: false };
+      if (hostname && !LOCAL_HOSTS.includes(hostname)) {
+        ssl = buildSslOptions(hostname);
       }
     } catch {
       ssl = false;
