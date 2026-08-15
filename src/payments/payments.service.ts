@@ -426,7 +426,10 @@ export class PaymentsService {
     const { saved, eventTitle } = await this.dataSource.transaction(async (manager) => {
       const enrollment = await manager
         .createQueryBuilder(Enrollment, 'enrollment')
-        .setLock('pessimistic_write')
+        // Locked BY NAME: a bare FOR UPDATE covers every table in the FROM, and Postgres
+        // rejects that outright against the left-joined event ("FOR UPDATE cannot be applied
+        // to the nullable side of an outer join"), failing every refund request with a 500.
+        .setLock('pessimistic_write', undefined, ['enrollment'])
         .leftJoinAndSelect('enrollment.event', 'event')
         .where('enrollment.id = :id', { id: dto.enrollmentId })
         .getOne();

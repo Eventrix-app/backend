@@ -183,7 +183,10 @@ describe('PaymentsService — paymentStatus enforcement', () => {
 
       await service.requestRefund('user-1', { enrollmentId: 'enr-1', reason: 'test' } as any);
 
-      expect(manager.qb.setLock).toHaveBeenCalledWith('pessimistic_write');
+      // The table list is not optional here: the query left-joins event, and a bare
+      // FOR UPDATE spans every table in the FROM, which Postgres refuses on an outer
+      // join's nullable side. Asserting only the mode let that 500 ship once already.
+      expect(manager.qb.setLock).toHaveBeenCalledWith('pessimistic_write', undefined, ['enrollment']);
     });
 
     it('allows a refund request once the enrollment is actually paid, and emails a "request received" notice', async () => {
