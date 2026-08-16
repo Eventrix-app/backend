@@ -44,8 +44,15 @@ export class Refund {
   @Column({ name: 'requested_by', type: 'uuid' })
   requestedBy!: string;
 
+  // What the participant wrote when asking for the refund.
   @Column({ type: 'text', nullable: true })
   reason?: string;
+
+  // What whoever decided it wrote back when refusing. Kept apart from `reason` above so the
+  // request and the decision are both recoverable — the participant is shown this one on
+  // their booking, and it is repeated in the rejection email.
+  @Column({ name: 'rejection_reason', type: 'text', nullable: true })
+  rejectionReason?: string;
 
   @Column({
     type: 'varchar',

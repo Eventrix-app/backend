@@ -229,7 +229,7 @@ export function waitlistPromotedEmail(enrollmentId?: string): RenderedEmail {
   };
 }
 
-export function refundStatusEmail(status: string, enrollmentId?: string): RenderedEmail {
+export function refundStatusEmail(status: string, enrollmentId?: string, reason?: string): RenderedEmail {
   const link = enrollmentId ? appLink(`booking/${encodeURIComponent(enrollmentId)}`) : undefined;
   if (status === 'requested') {
     return {
@@ -241,6 +241,25 @@ export function refundStatusEmail(status: string, enrollmentId?: string): Render
         <p>You'll get another email as soon as there's an update — no action is needed from you right now.</p>
         `,
         'We\'ve received your refund request and it\'s under review.',
+      ),
+    };
+  }
+  // A rejection gets its own body: "your refund status is now rejected" leaves the reader
+  // with the one question the email exists to answer, so the decision reason is stated
+  // outright rather than being left in the app.
+  if (status === 'rejected') {
+    const safeReason = reason ? escapeHtml(reason) : '';
+    return {
+      subject: 'Your refund request was declined',
+      html: wrapEmail(
+        'Refund request declined',
+        `
+        <p>Your refund request has been reviewed and was not approved.</p>
+        ${safeReason ? calloutBox('Reason given', safeReason) : ''}
+        <p>If you think this is a mistake, reply to this email or reach us from Help Center in the app.</p>
+        ${link ? ctaButton('View Booking', link) : `<p>Open the ${COMPANY_NAME} app and check My Bookings for the full details.</p>`}
+        `,
+        reason ? `Your refund request was declined. Reason: ${reason}` : 'Your refund request was declined.',
       ),
     };
   }

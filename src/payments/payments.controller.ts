@@ -192,6 +192,13 @@ export class PaymentsController {
     return await this.paymentsService.findPendingRefundsForOrganizer(req.user.id, req.user.roles);
   }
 
+  // The participant's own side of the same records. Static path, declared before any
+  // ':id' refund route, so there is no route-ordering concern.
+  @Get('refunds/mine')
+  async findMyRefunds(@Request() req: Request & { user: JwtPayload }) {
+    return await this.paymentsService.findMyRefunds(req.user.id);
+  }
+
   // General-purpose admin transaction listing (not just pending refunds).
   @Roles('admin')
   @Get('admin')

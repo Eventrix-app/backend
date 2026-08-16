@@ -519,11 +519,38 @@ export class PaymentsService {
     const refund = await this.findRefundOrFail(refundId);
     await this.assertCanManageRefund(refund, actorUserId, userRoles);
 
-    const rejected = await this.lockAndTransitionRefund(refundId, RefundStatus.REJECTED, { processedAt: new Date() });
+    // The reason is persisted, not just logged: the participant is shown it on their booking
+    // and it is repeated in the rejection email, so a log line is not a durable enough home
+    // for it.
+    const rejected = await this.lockAndTransitionRefund(refundId, RefundStatus.REJECTED, {
+      processedAt: new Date(),
+      rejectionReason: reason,
+    });
 
     this.logger.log(`Refund ${rejected.id} rejected by ${actorUserId}: ${reason}`);
-    await this.notificationService.notifyRefundStatus(rejected.requestedBy, rejected.id, RefundStatus.REJECTED, rejected.enrollmentId);
+    await this.notificationService.notifyRefundStatus(
+      rejected.requestedBy,
+      rejected.id,
+      RefundStatus.REJECTED,
+      rejected.enrollmentId,
+      reason,
+    );
     return rejected;
+  }
+
+  /**
+   * Every refund the caller has requested, newest first.
+   *
+   * Scoped to the session's own user id — there is no userId parameter, so it cannot be
+   * pointed at someone else's refunds. Backs the refund line (and the rejection reason) on
+   * the participant's own bookings list, which previously had no way to read refund state at
+   * all: the only refund reads were the organizer's pending queue.
+   */
+  async findMyRefunds(userId: string): Promise<Refund[]> {
+    return this.refundsRepository.find({
+      where: { requestedBy: userId },
+      order: { requestedAt: 'DESC' },
+    });
   }
 
   // Locks the refund row for the duration of the status check + write so two concurrent

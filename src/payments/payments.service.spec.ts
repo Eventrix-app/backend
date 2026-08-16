@@ -213,6 +213,102 @@ describe('PaymentsService — paymentStatus enforcement', () => {
     });
   });
 
+  // The reason an organizer types when refusing a refund used to exist only as a log line:
+  // the participant was told their request was declined and nothing else. It is now written
+  // to the refund row and carried into the notification, which is what lets the app show it
+  // on the booking and the email repeat it.
+  describe('rejectRefund', () => {
+    const rejectionReason = 'Ticket was already used at the gate';
+
+    beforeEach(() => {
+      mockRefundsRepo.findOne.mockResolvedValue({
+        id: 'refund-1',
+        enrollmentId: 'enr-1',
+        requestedBy: 'user-1',
+        status: RefundStatus.REQUESTED,
+      });
+    });
+
+    // Mirrors lockAndTransitionRefund's manager: a locked read followed by a save of the
+    // mutated row.
+    function mockRejectionTransaction() {
+      const locked = {
+        id: 'refund-1',
+        enrollmentId: 'enr-1',
+        requestedBy: 'user-1',
+        status: RefundStatus.REQUESTED,
+      };
+      const manager = {
+        createQueryBuilder: jest.fn(() => ({
+          setLock: jest.fn().mockReturnThis(),
+          where: jest.fn().mockReturnThis(),
+          getOne: jest.fn().mockResolvedValue(locked),
+        })),
+        save: jest.fn((_entity: any, row: any) => Promise.resolve(row)),
+      };
+      mockDataSource.transaction.mockImplementation((cb: any) => cb(manager));
+      return manager;
+    }
+
+    it('persists the rejection reason on the refund rather than only logging it', async () => {
+      const manager = mockRejectionTransaction();
+
+      const rejected = await service.rejectRefund('refund-1', rejectionReason, 'admin-1', ['admin']);
+
+      expect(rejected.status).toBe(RefundStatus.REJECTED);
+      expect(rejected.rejectionReason).toBe(rejectionReason);
+      expect(manager.save).toHaveBeenCalledWith(
+        expect.anything(),
+        expect.objectContaining({ rejectionReason, status: RefundStatus.REJECTED }),
+      );
+    });
+
+    it('leaves the requester\'s own reason intact — the request and the decision are separate facts', async () => {
+      mockRefundsRepo.findOne.mockResolvedValue({
+        id: 'refund-1',
+        enrollmentId: 'enr-1',
+        requestedBy: 'user-1',
+        reason: 'I can no longer attend',
+        status: RefundStatus.REQUESTED,
+      });
+      mockDataSource.transaction.mockImplementation((cb: any) =>
+        cb({
+          createQueryBuilder: jest.fn(() => ({
+            setLock: jest.fn().mockReturnThis(),
+            where: jest.fn().mockReturnThis(),
+            getOne: jest.fn().mockResolvedValue({
+              id: 'refund-1',
+              enrollmentId: 'enr-1',
+              requestedBy: 'user-1',
+              reason: 'I can no longer attend',
+              status: RefundStatus.REQUESTED,
+            }),
+          })),
+          save: jest.fn((_entity: any, row: any) => Promise.resolve(row)),
+        }),
+      );
+
+      const rejected = await service.rejectRefund('refund-1', rejectionReason, 'admin-1', ['admin']);
+
+      expect(rejected.reason).toBe('I can no longer attend');
+      expect(rejected.rejectionReason).toBe(rejectionReason);
+    });
+
+    it('passes the reason to the notification so the push and the email can repeat it', async () => {
+      mockRejectionTransaction();
+
+      await service.rejectRefund('refund-1', rejectionReason, 'admin-1', ['admin']);
+
+      expect(mockNotificationService.notifyRefundStatus).toHaveBeenCalledWith(
+        'user-1',
+        'refund-1',
+        RefundStatus.REJECTED,
+        'enr-1',
+        rejectionReason,
+      );
+    });
+  });
+
   describe('createOrder', () => {
     it('rejects creating an order for another user\'s enrollment', async () => {
       mockEnrollmentsRepo.findOne.mockResolvedValue({

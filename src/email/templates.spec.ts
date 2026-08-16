@@ -98,6 +98,25 @@ describe('email templates — deep links', () => {
     expect(html).not.toContain('eventrix://');
   });
 
+  it('refundStatusEmail states the rejection reason in the body — the one thing a decline email has to answer', () => {
+    const { html, subject } = refundStatusEmail('rejected', 'enr-ghi-789', 'Event already took place');
+    expect(subject).toBe('Your refund request was declined');
+    expect(html).toContain('Event already took place');
+    expect(html).toContain('eventrix://booking/enr-ghi-789');
+  });
+
+  it('refundStatusEmail escapes a rejection reason rather than injecting it as markup', () => {
+    const { html } = refundStatusEmail('rejected', 'enr-1', '<script>alert(1)</script>');
+    expect(html).not.toContain('<script>');
+    expect(html).toContain('&lt;script&gt;');
+  });
+
+  it('refundStatusEmail still renders a decline with no reason recorded', () => {
+    const { html } = refundStatusEmail('rejected', 'enr-1');
+    expect(html).toContain('was not approved');
+    expect(html).not.toContain('Reason given');
+  });
+
   it('eventChangedEmail renders an event deep link when eventId is provided', () => {
     const { html } = eventChangedEmail('evt-jkl-321');
     expect(html).toContain('eventrix://event/evt-jkl-321');

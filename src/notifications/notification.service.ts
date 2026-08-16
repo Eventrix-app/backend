@@ -184,8 +184,17 @@ export class NotificationService {
 
   // enrollmentId rides along so a push tap can deep-link to TicketDetails, which needs it
   // rather than a refundId.
-  async notifyRefundStatus(userId: string, refundId: string, status: string, enrollmentId: string): Promise<void> {
-    await this.enqueue(userId, NotificationType.REFUND_STATUS, { refundId, status, enrollmentId });
+  // `reason` is only ever set on a rejection — it is the decision the organizer/admin wrote
+  // back, and it rides in the payload so the push, the in-app row and the email can all
+  // repeat it rather than telling the user only that they were refused.
+  async notifyRefundStatus(
+    userId: string,
+    refundId: string,
+    status: string,
+    enrollmentId: string,
+    reason?: string,
+  ): Promise<void> {
+    await this.enqueue(userId, NotificationType.REFUND_STATUS, { refundId, status, enrollmentId, reason });
   }
 
   async notifyAnnouncement(userIds: string[], eventId: string, announcementId: string, title: string): Promise<void> {
@@ -463,6 +472,10 @@ export class NotificationService {
             body: "We've received your refund request and will review it shortly.",
           };
         }
+        if (status === 'rejected') {
+          const reason = payload['reason'] ? ` Reason: ${sanitize(String(payload['reason']))}` : '';
+          return { title: 'Refund request declined', body: `Your refund request was not approved.${reason}` };
+        }
         return { title: 'Refund update', body: `Your refund is now "${status}".` };
       }
       case NotificationType.ANNOUNCEMENT: {
@@ -599,6 +612,7 @@ export class NotificationService {
         return refundStatusEmail(
           String(payload['status'] ?? 'updated'),
           payload['enrollmentId'] ? String(payload['enrollmentId']) : undefined,
+          payload['reason'] ? String(payload['reason']) : undefined,
         );
       case NotificationType.ANNOUNCEMENT:
         return announcementEmail(
