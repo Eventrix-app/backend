@@ -1102,7 +1102,11 @@ describe('EventsService - Fixed Issues', () => {
         event: { organizerId: 'org-1' },
       };
       mockEnrollmentRepo.findOne.mockResolvedValue(enrollment);
-      mockEnrollmentRepo.query.mockResolvedValue([{ used_date: new Date() }]);
+      // Mocked as [rows, rowCount] — the real shape TypeORM's postgres driver returns
+      // for UPDATE/DELETE. The old mocks returned a bare rows array, which is what let
+      // the always-truthy `claim.length` check ship green while every ticket stayed
+      // reusable in production.
+      mockEnrollmentRepo.query.mockResolvedValue([[{ used_date: new Date() }], 1]);
 
       const result = await service.checkIn('token', 'admin-1', ['admin']);
 
@@ -1125,7 +1129,35 @@ describe('EventsService - Fixed Issues', () => {
         event: { organizerId: 'org-1' },
       };
       mockEnrollmentRepo.findOne.mockResolvedValue(enrollment);
-      mockEnrollmentRepo.query.mockResolvedValue([]);
+      mockEnrollmentRepo.query.mockResolvedValue([[], 0]);
+
+      await expect(service.checkIn('token', 'admin-1', ['admin'])).rejects.toThrow(ConflictException);
+    });
+
+    // The bug this pins down shipped because every mock here returned a bare rows array,
+    // while TypeORM's postgres driver actually returns [rows, rowCount] for an UPDATE. The
+    // service read the result as rows, so `claim.length` was 2 — truthy — no matter how
+    // many rows the WHERE matched. Every scan took the "claim won" branch, and a ticket
+    // could be checked in an unlimited number of times.
+    //
+    // Asserted against the driver's real shape, with a used_date already stamped, so a
+    // regression cannot pass by changing the mock to something convenient.
+    it('refuses a plain rescan of an already-used ticket (claim matched no rows)', async () => {
+      mockJwtService.verify.mockReturnValue({ enrollmentId: 'enr-1', eventId: 'event-1' });
+      mockEnrollmentRepo.findOne.mockResolvedValue({
+        id: 'enr-1',
+        eventId: 'event-1',
+        paymentStatus: 'paid',
+        checkedInAt: null,
+        event: { organizerId: 'org-1' },
+      });
+      mockEnrollmentRepo.query
+        // UPDATE ... WHERE used_date IS NULL matched nothing: rows empty, rowCount 0.
+        .mockResolvedValueOnce([[], 0])
+        // SELECT of the winning scan — a different one, with no idempotency key of ours.
+        .mockResolvedValueOnce([
+          { used_date: new Date(), check_in_key: 'someone-elses-scan', checked_in_by: 'organizer-1' },
+        ]);
 
       await expect(service.checkIn('token', 'admin-1', ['admin'])).rejects.toThrow(ConflictException);
     });
@@ -1146,7 +1178,9 @@ describe('EventsService - Fixed Issues', () => {
         event: { organizerId: 'org-1' },
       });
       mockEnrollmentRepo.query
-        .mockResolvedValueOnce([]) // claim lost — already checked in
+        // UPDATE -> [rows, rowCount]; zero rows means the claim was lost.
+        .mockResolvedValueOnce([[], 0])
+        // The follow-up is a SELECT, which returns a bare rows array.
         .mockResolvedValueOnce([
           { used_date: claimedAt, check_in_key: 'scan-abc', checked_in_by: 'admin-1' },
         ]);
@@ -1171,7 +1205,7 @@ describe('EventsService - Fixed Issues', () => {
         event: { organizerId: 'org-1' },
       });
       mockEnrollmentRepo.query
-        .mockResolvedValueOnce([])
+        .mockResolvedValueOnce([[], 0])
         .mockResolvedValueOnce([
           { used_date: firstScanAt, check_in_key: 'scan-from-gate-1', checked_in_by: 'organizer-1' },
         ]);

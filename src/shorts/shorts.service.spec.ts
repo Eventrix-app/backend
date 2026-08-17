@@ -70,7 +70,7 @@ describe('ShortsService', () => {
     beforeEach(() => {
       mockShortsRepo.findOne.mockResolvedValue({ id: 'short-1', uploaderUserId: 'owner-1', likeCount: 3 });
       mockShortLikesRepo.insert.mockResolvedValue(undefined);
-      mockShortsRepo.query.mockResolvedValue([{ like_count: 4 }]);
+      mockShortsRepo.query.mockResolvedValue([[{ like_count: 4 }], 1]);
     });
 
     it('notifies the uploader when someone else likes their reel', async () => {
@@ -103,7 +103,7 @@ describe('ShortsService', () => {
     beforeEach(() => {
       mockShortsRepo.findOne.mockResolvedValue({ id: 'short-1', viewCount: 7 });
       mockShortViewsRepo.insert.mockResolvedValue(undefined);
-      mockShortsRepo.query.mockResolvedValue([{ view_count: 8 }]);
+      mockShortsRepo.query.mockResolvedValue([[{ view_count: 8 }], 1]);
     });
 
     it('counts a first-time viewer', async () => {
@@ -134,7 +134,7 @@ describe('ShortsService', () => {
 
     it('counts two different accounts separately', async () => {
       await service.recordView('short-1', 'viewer-1');
-      mockShortsRepo.query.mockResolvedValue([{ view_count: 9 }]);
+      mockShortsRepo.query.mockResolvedValue([[{ view_count: 9 }], 1]);
       const second = await service.recordView('short-1', 'viewer-2');
 
       expect(second).toEqual({ viewCount: 9 });
@@ -330,7 +330,7 @@ describe('ShortsService', () => {
     it('inserts a like and atomically increments like_count', async () => {
       mockShortsRepo.findOne.mockResolvedValue({ id: 'short-1', likeCount: 3 });
       mockShortLikesRepo.insert.mockResolvedValue({});
-      mockShortsRepo.query.mockResolvedValue([{ like_count: 4 }]);
+      mockShortsRepo.query.mockResolvedValue([[{ like_count: 4 }], 1]);
 
       const result = await service.like('short-1', 'user-1');
 
@@ -353,7 +353,7 @@ describe('ShortsService', () => {
     it('deletes the like and atomically decrements like_count', async () => {
       mockShortsRepo.findOne.mockResolvedValue({ id: 'short-1', likeCount: 4 });
       mockShortLikesRepo.delete.mockResolvedValue({ affected: 1 });
-      mockShortsRepo.query.mockResolvedValue([{ like_count: 3 }]);
+      mockShortsRepo.query.mockResolvedValue([[{ like_count: 3 }], 1]);
 
       const result = await service.unlike('short-1', 'user-1');
 

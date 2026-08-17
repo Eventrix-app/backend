@@ -201,7 +201,12 @@ export class ShortsService {
       throw err;
     }
 
-    const claim = await this.shortsRepository.query(
+    // Destructured, because TypeORM's postgres driver returns [rows, rowCount] for UPDATE
+    // and DELETE (plain rows for everything else — see PostgresQueryRunner.query). Reading
+    // the result as if it were the rows array made `claim[0]` the array itself, so
+    // `.like_count` was undefined and this endpoint answered every like with
+    // `likeCount: undefined` — which the app rendered as 0.
+    const [likeRows] = await this.shortsRepository.query(
       `UPDATE shorts SET like_count = like_count + 1 WHERE id = $1 RETURNING like_count`,
       [id],
     );
@@ -213,7 +218,7 @@ export class ShortsService {
       void this.notificationService.notifyShortLiked(short.uploaderUserId, id, likerName ?? 'Someone');
     }
 
-    return { liked: true, likeCount: claim[0].like_count };
+    return { liked: true, likeCount: likeRows[0].like_count };
   }
 
   /**
@@ -247,12 +252,15 @@ export class ShortsService {
       throw err;
     }
 
-    const claim = await this.shortsRepository.query(
+    // [rows, rowCount] for an UPDATE — see the note in like() above. The old read made
+    // `claim.length` always 2, so the not-found guard below could never fire and the count
+    // returned was undefined.
+    const [viewRows] = await this.shortsRepository.query(
       `UPDATE shorts SET view_count = view_count + 1 WHERE id = $1 AND deleted_at IS NULL RETURNING view_count`,
       [id],
     );
-    if (!claim.length) throw new NotFoundException(`Short ${id} not found`);
-    return { viewCount: claim[0].view_count };
+    if (!viewRows?.length) throw new NotFoundException(`Short ${id} not found`);
+    return { viewCount: viewRows[0].view_count };
   }
 
   // Only decrements when a like row was actually deleted — a repeat unlike call (double
@@ -264,11 +272,12 @@ export class ShortsService {
       return { liked: false, likeCount: short.likeCount };
     }
 
-    const claim = await this.shortsRepository.query(
+    // [rows, rowCount] for an UPDATE — see the note in like() above.
+    const [unlikeRows] = await this.shortsRepository.query(
       `UPDATE shorts SET like_count = GREATEST(like_count - 1, 0) WHERE id = $1 RETURNING like_count`,
       [id],
     );
-    return { liked: false, likeCount: claim[0].like_count };
+    return { liked: false, likeCount: unlikeRows[0].like_count };
   }
 
   // Backs the "which hearts are filled" state for a feed the client fetched separately —

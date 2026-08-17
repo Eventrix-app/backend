@@ -1402,15 +1402,22 @@ export class EventsService {
 
     // Atomic claim: a read-then-write would honor the same ticket twice when scanned
     // concurrently. Stamping which scan won is what lets the branch below spot a retry.
-    const claim = await this.enrollmentRepository.query(
+    //
+    // Destructured, because TypeORM's postgres driver returns [rows, rowCount] for UPDATE
+    // and DELETE, and plain rows only for SELECT/INSERT (see PostgresQueryRunner.query).
+    // Reading the result directly as the rows array made `.length` always 2 — truthy even
+    // when the WHERE matched nothing — so the "claim won" branch was taken on EVERY scan.
+    // A ticket already stamped used_date still reported a successful check-in, which made
+    // every ticket reusable without limit: the one thing this atomic claim exists to stop.
+    const [claimedRows] = await this.enrollmentRepository.query(
       `UPDATE event_bookings SET used_date = now(), check_in_key = $2, checked_in_by = $3
        WHERE id = $1 AND used_date IS NULL
        RETURNING used_date`,
       [enrollment.id, idempotencyKey ?? null, userId],
     );
 
-    if (claim?.length) {
-      enrollment.checkedInAt = claim[0].used_date;
+    if (claimedRows?.length) {
+      enrollment.checkedInAt = claimedRows[0].used_date;
       enrollment.checkInKey = idempotencyKey;
       enrollment.checkedInBy = userId;
       return enrollment;
