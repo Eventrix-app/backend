@@ -48,7 +48,18 @@ export type CurrentUserResponse = {
   authProviders: string[];
   bio: string | null;
   location: string | null;
+  // Self-editable profile fields, returned so Edit Profile can prefill them. gender and
+  // dateOfBirth are real columns; the address set is decoded out of the `bio` meta blob
+  // (see parseMeta). These have to be readable here because PATCH /participants/:id treats
+  // an explicitly-sent '' as "clear this field" — a client that cannot read a field back
+  // would prefill it as '' and wipe it on the next save.
+  gender: string;
+  dateOfBirth: string;
+  addressLine: string;
   city: string;
+  state: string;
+  country: string;
+  pincode: string;
   latitude: number | null;
   longitude: number | null;
   notificationPrefs: UpdateNotificationPrefsDto | null;
@@ -175,7 +186,13 @@ export class UsersService {
       authProviders: authIdentities.map((identity) => identity.provider),
       bio: user.bio ?? null,
       location: user.location ?? null,
+      gender: user.gender || '',
+      dateOfBirth: user.dateOfBirth || '',
+      addressLine: meta['addressLine'] || '',
       city: meta['city'] || '',
+      state: meta['state'] || '',
+      country: meta['country'] || '',
+      pincode: meta['pincode'] || '',
       latitude: user.latitude ?? null,
       longitude: user.longitude ?? null,
       notificationPrefs: user.notificationPrefs ?? null,
