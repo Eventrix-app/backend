@@ -107,21 +107,35 @@ export class LoggingInterceptor implements NestInterceptor {
     if (!data) return data;
     if (typeof data !== 'object') return data;
 
-    const sensitiveFields = [
+    // Matched as case-insensitive *substrings*, not exact keys. The previous exact-match list
+    // held 'password' but not 'currentPassword' or 'newPassword', and both are real fields on
+    // DTOs this interceptor logs (UpdateParticipantDto, the change-password and erase-my-data
+    // routes) — so plaintext passwords were being written to the request log. Same gap let
+    // 'otp' through on password reset, and 'accountNumber'/'ifscCode' through on payout setup,
+    // which is a full bank account number in a log line the UI is not even allowed to render.
+    //
+    // Substring matching over-masks rather than under-masks by design: masking one extra
+    // field costs a log line some detail, missing one leaks a credential.
+    const sensitivePatterns = [
       'password',
-      'password_hash',
-      'passwordHash',
-      'accessToken',
-      'token',
       'secret',
-      'clientSecret',
+      'token',
+      'otp',
+      'accountnumber',
+      'accountholder',
+      'ifsc',
+      'cvv',
+      'authorization',
+      'apikey',
+      'api_key',
     ];
 
     // Perform deep copy for safety, avoiding mutation of actual request/response payload reference
     const masked = Array.isArray(data) ? [...data] : { ...data };
 
     for (const key of Object.keys(masked)) {
-      if (sensitiveFields.includes(key)) {
+      const normalized = key.toLowerCase();
+      if (sensitivePatterns.some((pattern) => normalized.includes(pattern))) {
         masked[key] = '********';
       } else if (typeof masked[key] === 'object' && masked[key] !== null) {
         masked[key] = this.maskSensitiveData(masked[key]);

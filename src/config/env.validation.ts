@@ -26,6 +26,10 @@ export const validateEnv = (config: Record<string, unknown>) => {
     // Opt-in only: allows any localhost origin through CORS for Expo's web dev server.
     // Fail-closed when unset, same as ALLOW_DEV_OTP_BYPASS.
     ALLOW_LOCALHOST_CORS: Joi.string().optional(),
+
+    // Publishes Swagger UI and the OpenAPI spec at /api/docs. Fail-closed when unset, same
+    // as the two flags above — these docs enumerate every route and DTO for anyone who asks.
+    ENABLE_API_DOCS: Joi.string().optional(),
     FRONTEND_URL: Joi.string().optional(),
     // Optional — until these are set, RazorpayService fails fast with a 503 rather than
     // the SDK erroring on the actual gateway calls. keyId is the public half of the pair.
