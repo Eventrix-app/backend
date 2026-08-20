@@ -1,6 +1,6 @@
 import { BadRequestException, Injectable, Logger, NotFoundException } from '@nestjs/common';
 import { InjectRepository } from '@nestjs/typeorm';
-import { Repository } from 'typeorm';
+import { In, Repository } from 'typeorm';
 import { Report, ReportStatus, ReportTargetType } from '../entities/report.entity';
 import { User } from '../entities/user.entity';
 import { ChatMessage } from '../entities/chat-message.entity';
@@ -19,6 +19,17 @@ export interface ReportRecord {
   reviewedBy?: string | null;
   reviewedAt?: Date | null;
   createdAt: Date;
+  // Resolved from targetId for the admin queue. targetId alone answers none of the
+  // questions a reviewer actually has: for a chat_message or review it is the content's
+  // id, so it identifies neither the person being reported nor what they said. Both are
+  // looked up here rather than denormalised onto the row, so a later rename or edit is
+  // reflected instead of frozen at report time.
+  reportedUser?: { id: string; fullName: string; email: string };
+  // The reported content itself — the chat message body, or the review text. Undefined for
+  // targetType 'user', where the report is about the account rather than one thing said.
+  targetContent?: string;
+  // When the reported content was posted, which is not the same as when it was reported.
+  targetCreatedAt?: Date;
 }
 
 @Injectable()
@@ -126,11 +137,67 @@ export class ReportsService {
       take: limit,
     });
     return {
-      reports: reports.map((r) => this.mapToRecord(r)),
+      reports: await this.enrichTargets(reports.map((r) => this.mapToRecord(r))),
       total,
       page,
       totalPages: Math.ceil(total / limit),
     };
+  }
+
+  /**
+   * Resolves each report's target into the person and the content it refers to.
+   *
+   * Batched per target type rather than per report: an admin queue of 50 rows would
+   * otherwise issue 100+ round trips, and reports arrive in bursts when one account
+   * misbehaves, so the same message and the same user repeat across rows.
+   *
+   * A target that no longer exists is left unresolved rather than failing the whole list —
+   * content gets deleted, including by the action() path below, and a report about deleted
+   * content is still a record an admin needs to see.
+   */
+  private async enrichTargets(records: ReportRecord[]): Promise<ReportRecord[]> {
+    const idsBy = (type: ReportTargetType) =>
+      [...new Set(records.filter((r) => r.targetType === type).map((r) => r.targetId))];
+
+    const [messages, reviews, users] = await Promise.all([
+      this.loadBy(this.chatMessagesRepository, idsBy(ReportTargetType.CHAT_MESSAGE)),
+      this.loadBy(this.reviewsRepository, idsBy(ReportTargetType.REVIEW)),
+      this.loadBy(this.usersRepository, idsBy(ReportTargetType.USER)),
+    ]);
+
+    const asPerson = (u?: User) =>
+      u ? { id: u.id, fullName: u.fullName, email: u.email } : undefined;
+
+    return records.map((r) => {
+      if (r.targetType === ReportTargetType.CHAT_MESSAGE) {
+        const m = messages.get(r.targetId);
+        return m
+          ? { ...r, reportedUser: asPerson(m.user), targetContent: m.message, targetCreatedAt: m.createdAt }
+          : r;
+      }
+      if (r.targetType === ReportTargetType.REVIEW) {
+        const v = reviews.get(r.targetId);
+        return v
+          ? { ...r, reportedUser: asPerson(v.user), targetContent: v.text ?? '', targetCreatedAt: v.createdAt }
+          : r;
+      }
+      const u = users.get(r.targetId);
+      return u ? { ...r, reportedUser: asPerson(u) } : r;
+    });
+  }
+
+  // `user` is joined for content targets so the reported author comes back with it; for a
+  // USER target the row *is* the person, so the relation list is empty.
+  private async loadBy<T extends { id: string }>(
+    repo: Repository<T>,
+    ids: string[],
+  ): Promise<Map<string, T>> {
+    if (ids.length === 0) return new Map();
+    const rows = await repo.find({
+      where: { id: In(ids) } as never,
+      relations: repo.metadata.relations.some((rel) => rel.propertyName === 'user') ? ['user'] : [],
+    });
+    return new Map(rows.map((row) => [row.id, row]));
   }
 
   async dismiss(id: string, adminId: string): Promise<ReportRecord> {
