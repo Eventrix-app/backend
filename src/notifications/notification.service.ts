@@ -39,6 +39,10 @@ export interface NotificationRecord {
   body: string;
   createdAt: Date;
   readAt: Date | null;
+  // The same payload the push carries, so tapping a row in the in-app list can deep-link
+  // to exactly what the push would have. Without it the list can only mark-as-read: title
+  // and body are prose and carry no ids to route on.
+  payload: Record<string, unknown>;
 }
 
 // Notification types deliberately never sent by email — see sendEmailForJob below.
@@ -438,6 +442,7 @@ export class NotificationService {
       body,
       createdAt: job.createdAt,
       readAt: job.readAt ?? null,
+      payload: job.payload ?? {},
     };
   }
 
