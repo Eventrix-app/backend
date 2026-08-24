@@ -8,6 +8,7 @@ import { ShortComment } from '../entities/short-comment.entity';
 import { ShortView } from '../entities/short-view.entity';
 import { Event } from '../entities/event.entity';
 import { NotificationService } from '../notifications/notification.service';
+import { CacheService } from '../common/cache/cache.service';
 
 describe('ShortsService', () => {
   let service: ShortsService;
@@ -17,6 +18,7 @@ describe('ShortsService', () => {
   let mockNotificationService: any;
   let mockShortCommentsRepo: any;
   let mockShortViewsRepo: any;
+  let mockCache: any;
 
   beforeEach(async () => {
     mockShortsRepo = {
@@ -41,6 +43,15 @@ describe('ShortsService', () => {
       notifyShortCommented: jest.fn().mockResolvedValue(undefined),
     };
     mockShortViewsRepo = { insert: jest.fn() };
+    // Mirrors CacheService's no-Redis behaviour: get always misses, writes are no-ops. Keeps
+    // these tests exercising the real query paths rather than a cached shortcut.
+    mockCache = {
+      get: jest.fn().mockResolvedValue(null),
+      set: jest.fn().mockResolvedValue(undefined),
+      del: jest.fn().mockResolvedValue(undefined),
+      getVersion: jest.fn().mockResolvedValue(1),
+      bumpVersion: jest.fn().mockResolvedValue(undefined),
+    };
     mockShortCommentsRepo = {
       create: jest.fn((d: any) => d),
       save: jest.fn((d: any) => Promise.resolve({ id: 'comment-1', ...d })),
@@ -58,6 +69,7 @@ describe('ShortsService', () => {
         { provide: getRepositoryToken(ShortView), useValue: mockShortViewsRepo },
         { provide: getRepositoryToken(Event), useValue: mockEventsRepo },
         { provide: NotificationService, useValue: mockNotificationService },
+        { provide: CacheService, useValue: mockCache },
       ],
     }).compile();
 

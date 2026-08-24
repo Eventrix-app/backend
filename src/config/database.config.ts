@@ -120,6 +120,24 @@ export const getDatabaseConfig = (
       entities,
       synchronize: false,
       ssl,
+      extra: {
+        // node-postgres defaults this to 10 (pg-pool: `max = max || poolSize || 10`), which
+        // is sized for a long-lived server handling many requests at once. This runs as a
+        // Vercel function that serves one request at a time, so nine of those ten connections
+        // are reserved and idle — and the cost is paid per instance, multiplied by however
+        // many Vercel spins up. Fifty warm instances would hold 500 pooler client slots to do
+        // fifty requests of work, exhausting Supabase's limit long before the platform stops
+        // scaling out. A small ceiling with headroom for a transaction plus a health check
+        // raises the concurrency the deployment can actually reach.
+        max: Number(process.env.DATABASE_POOL_MAX) || 3,
+        // Reclaim idle connections quickly rather than holding them for a container that may
+        // never be invoked again.
+        idleTimeoutMillis: 10_000,
+        // Fail fast when the pooler is saturated: without this the request hangs until the
+        // function times out, turning a transient shortage into a request that consumes its
+        // whole duration budget and still returns nothing.
+        connectionTimeoutMillis: 10_000,
+      },
     };
   }
 

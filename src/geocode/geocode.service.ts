@@ -1,8 +1,24 @@
 import { Injectable, Logger, ServiceUnavailableException } from '@nestjs/common';
 import { ConfigService } from '@nestjs/config';
+import { CacheService } from '../common/cache/cache.service';
 
 export interface ReverseGeocodeResult {
   address: string | null;
+}
+
+// A coordinate's street address does not meaningfully change, so this is cached for a week
+// rather than minutes. The ceiling on staleness is Google re-mapping a building, which is not
+// a correctness concern for prefilling a venue field.
+const GEOCODE_CACHE_TTL_SECONDS = 7 * 24 * 60 * 60;
+
+// Coordinates are cached rounded to 4 decimal places (~11m). Raw GPS fixes and map-drag
+// coordinates carry far more precision than that and effectively never repeat, so keying on
+// them verbatim would produce a cache that never hits. 11m is finer than any address this is
+// used to resolve, so rounding cannot return a neighbouring building's address.
+const GEOCODE_PRECISION = 4;
+
+function geocodeCacheKey(lat: number, lng: number): string {
+  return `geocode:rev:${lat.toFixed(GEOCODE_PRECISION)},${lng.toFixed(GEOCODE_PRECISION)}`;
 }
 
 // Proxies Google's Geocoding API server-side so the key never ships in the app bundle —
@@ -13,7 +29,10 @@ export class GeocodeService {
   private readonly logger = new Logger(GeocodeService.name);
   private readonly apiKey?: string;
 
-  constructor(configService: ConfigService) {
+  constructor(
+    configService: ConfigService,
+    private readonly cache: CacheService,
+  ) {
     this.apiKey = configService.get<string>('googleMaps.apiKey');
   }
 
@@ -28,6 +47,13 @@ export class GeocodeService {
       // up, not silently get back a blank address forever.
       throw new ServiceUnavailableException('Geocoding is not configured');
     }
+
+    // Checked before the network call because every miss here is a billed Google request,
+    // not just a slow one — the same handful of coordinates recur constantly (each app
+    // foreground, each return to the same map position).
+    const cacheKey = geocodeCacheKey(lat, lng);
+    const cached = await this.cache.get<ReverseGeocodeResult>(cacheKey);
+    if (cached) return cached;
 
     const url = `https://maps.googleapis.com/maps/api/geocode/json?latlng=${lat},${lng}&key=${this.apiKey}`;
     try {
@@ -50,9 +76,18 @@ export class GeocodeService {
         if (data.status !== 'ZERO_RESULTS') {
           this.logger.warn(`Google Geocoding API returned status=${data.status} for ${lat},${lng}`);
         }
-        return { address: null };
+        // ZERO_RESULTS is cached; a transient failure (REQUEST_DENIED, OVER_QUERY_LIMIT) is
+        // not. Both return the same empty shape to the caller, but caching a key or quota
+        // problem would keep serving a blank address long after it was fixed.
+        const empty: ReverseGeocodeResult = { address: null };
+        if (data.status === 'ZERO_RESULTS') {
+          await this.cache.set(cacheKey, empty, GEOCODE_CACHE_TTL_SECONDS);
+        }
+        return empty;
       }
-      return { address: data.results[0].formatted_address ?? null };
+      const result: ReverseGeocodeResult = { address: data.results[0].formatted_address ?? null };
+      await this.cache.set(cacheKey, result, GEOCODE_CACHE_TTL_SECONDS);
+      return result;
     } catch (err) {
       this.logger.error(`Reverse geocode failed for ${lat},${lng}: ${err instanceof Error ? err.message : String(err)}`);
       return { address: null };

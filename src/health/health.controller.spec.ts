@@ -3,6 +3,7 @@ import { HealthController } from './health.controller';
 describe('HealthController', () => {
   let health: { check: jest.Mock };
   let db: { pingCheck: jest.Mock };
+  let cache: { isEnabled: boolean };
   let controller: HealthController;
   const originalTimeout = process.env.HEALTH_DB_TIMEOUT_MS;
 
@@ -10,7 +11,8 @@ describe('HealthController', () => {
     delete process.env.HEALTH_DB_TIMEOUT_MS;
     health = { check: jest.fn().mockResolvedValue({ status: 'ok' }) };
     db = { pingCheck: jest.fn().mockResolvedValue({ database: { status: 'up' } }) };
-    controller = new HealthController(health as any, db as any);
+    cache = { isEnabled: true };
+    controller = new HealthController(health as any, db as any, cache as any);
   });
 
   afterEach(() => {

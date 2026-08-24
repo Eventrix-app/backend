@@ -18,6 +18,26 @@ export class CacheService {
     const url = configService.get<string>('UPSTASH_REDIS_REST_URL');
     const token = configService.get<string>('UPSTASH_REDIS_REST_TOKEN');
     this.redis = url && token ? new Redis({ url, token }) : null;
+
+    // Said out loud at boot because the failure mode is silence. Both env vars are optional
+    // (config/env.validation.ts), so a deployment missing them starts cleanly, serves every
+    // request from the database, and reports nothing — the throttler degrades the same way,
+    // losing its shared counters across serverless containers. Neither shows up as an error;
+    // the only symptom is load. A one-line log makes "is the cache on?" answerable from the
+    // deployment log instead of by inference.
+    if (this.redis) {
+      this.logger.log('Redis cache enabled (Upstash REST)');
+    } else {
+      this.logger.warn(
+        'Redis cache DISABLED — UPSTASH_REDIS_REST_URL/TOKEN not set. ' +
+          'All reads fall through to the database and rate limiting is per-container only.',
+      );
+    }
+  }
+
+  /** Whether a Redis backend is configured. Surfaced by the health endpoint. */
+  get isEnabled(): boolean {
+    return this.redis !== null;
   }
 
   async get<T>(key: string): Promise<T | null> {

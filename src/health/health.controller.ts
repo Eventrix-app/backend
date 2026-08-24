@@ -3,6 +3,7 @@ import { ApiTags } from '@nestjs/swagger';
 import { HealthCheck, HealthCheckService, TypeOrmHealthIndicator } from '@nestjs/terminus';
 import { Throttle } from '@nestjs/throttler';
 import { Public } from '../common/decorators/public.decorator';
+import { CacheService } from '../common/cache/cache.service';
 
 // Uptime monitors and Vercel cannot authenticate, so this has to be public. It reports only
 // whether a dependency answered — never a version, a hostname, or an error body.
@@ -12,6 +13,7 @@ export class HealthController {
   constructor(
     private readonly health: HealthCheckService,
     private readonly db: TypeOrmHealthIndicator,
+    private readonly cache: CacheService,
   ) {}
 
   // Liveness: is the process up. Deliberately touches nothing else, so a database blip can
@@ -32,6 +34,14 @@ export class HealthController {
   @HealthCheck()
   ready() {
     const timeout = Number(process.env.HEALTH_DB_TIMEOUT_MS) || 5000;
-    return this.health.check([() => this.db.pingCheck('database', { timeout })]);
+    return this.health.check([
+      () => this.db.pingCheck('database', { timeout }),
+      // Reported, never failed on: the app is fully functional without Redis, just slower, so
+      // a cache outage must not take the deployment out of rotation — hence status is always
+      // 'up' and the real answer is in `backend`. This exists because an absent cache is
+      // otherwise invisible: 'redis' vs 'none' is the difference between "caching is working"
+      // and "every request is hitting Postgres".
+      () => ({ cache: { status: 'up' as const, backend: this.cache.isEnabled ? 'redis' : 'none' } }),
+    ]);
   }
 }

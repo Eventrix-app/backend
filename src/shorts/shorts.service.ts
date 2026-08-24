@@ -9,10 +9,24 @@ import { Event } from '../entities/event.entity';
 import { CreateShortDto } from './dto/create-short.dto';
 import { CreateShortCommentDto } from './dto/create-short-comment.dto';
 import { NotificationService } from '../notifications/notification.service';
+import { CacheService } from '../common/cache/cache.service';
 
 const SAFE_UPLOADER_SELECT = {
   uploader: { id: true, fullName: true, email: true, profilePictureUrl: true },
 } as const;
+
+// The public feed is identical for every viewer -- no personalisation, no per-user filter --
+// so one cached page serves everyone who asks for it. It is also the most requested endpoint
+// in the app: every swipe pages it, and findAndCount issues two queries (the page plus a
+// COUNT across every published reel) with two joins each.
+//
+// Versioned rather than deleted, for the same reason as the events list: a page/limit pair
+// produces many separate keys and there is no way to enumerate them without SCAN. Bumping the
+// version orphans all of them at once and they expire on their own TTL.
+const SHORTS_FEED_VERSION_KEY = 'shorts:feed:version';
+// Short, because rows carry likeCount/commentCount/viewCount and those are NOT invalidated --
+// see invalidateFeed below.
+const SHORTS_FEED_TTL_SECONDS = 30;
 
 @Injectable()
 export class ShortsService {
@@ -28,7 +42,20 @@ export class ShortsService {
     @InjectRepository(Event)
     private readonly eventsRepository: Repository<Event>,
     private readonly notificationService: NotificationService,
+    private readonly cache: CacheService,
   ) {}
+
+  // Bumped when a reel enters or leaves the feed -- create, own-delete, admin approve/remove.
+  //
+  // Deliberately NOT called from like/unlike/recordView/addComment. Those change counts the
+  // feed displays, but they fire orders of magnitude more often than membership changes --
+  // recordView runs on every watch -- so invalidating on them would keep the cache empty and
+  // give back nothing. The trade is that another viewer can see a count up to
+  // SHORTS_FEED_TTL_SECONDS stale; the acting user does not, because the client patches their
+  // own like optimistically.
+  private async invalidateFeed(): Promise<void> {
+    await this.cache.bumpVersion(SHORTS_FEED_VERSION_KEY);
+  }
 
   async findAllForAdmin(filters: {
     moderationStatus?: ShortModerationStatus;
@@ -75,6 +102,16 @@ export class ShortsService {
     // Capped so a client cannot ask for the entire table in one request.
     const limit = Math.min(50, Math.max(1, filters.limit ?? 10));
 
+    const version = await this.cache.getVersion(SHORTS_FEED_VERSION_KEY);
+    const cacheKey = `shorts:feed:v${version}:p${page}:l${limit}`;
+    const cached = await this.cache.get<{
+      shorts: Short[];
+      total: number;
+      page: number;
+      totalPages: number;
+    }>(cacheKey);
+    if (cached) return cached;
+
     const [shorts, total] = await this.shortsRepository.findAndCount({
       where: { moderationStatus: ShortModerationStatus.PUBLISHED },
       relations: ['uploader', 'event'],
@@ -90,7 +127,9 @@ export class ShortsService {
       take: limit,
     });
 
-    return { shorts, total, page, totalPages: Math.ceil(total / limit) };
+    const result = { shorts, total, page, totalPages: Math.ceil(total / limit) };
+    await this.cache.set(cacheKey, result, SHORTS_FEED_TTL_SECONDS);
+    return result;
   }
 
   // Published reels by one uploader, newest first — backs the public profile screen.
@@ -127,14 +166,18 @@ export class ShortsService {
     const short = await this.findOrFail(id);
     short.moderationStatus = ShortModerationStatus.PUBLISHED;
     short.flagReason = undefined;
-    return this.shortsRepository.save(short);
+    const saved = await this.shortsRepository.save(short);
+    await this.invalidateFeed();
+    return saved;
   }
 
   async remove(id: string, reason?: string): Promise<Short> {
     const short = await this.findOrFail(id);
     short.moderationStatus = ShortModerationStatus.REMOVED;
     short.flagReason = reason;
-    return this.shortsRepository.save(short);
+    const saved = await this.shortsRepository.save(short);
+    await this.invalidateFeed();
+    return saved;
   }
 
   // Creator-facing: uploads always launch from an event context (see the Reel Upload
@@ -159,7 +202,9 @@ export class ShortsService {
       overlay: dto.overlay,
       moderationStatus: ShortModerationStatus.PUBLISHED,
     });
-    return this.shortsRepository.save(short);
+    const saved = await this.shortsRepository.save(short);
+    await this.invalidateFeed();
+    return saved;
   }
 
   async findMine(userId: string): Promise<Short[]> {
@@ -182,6 +227,7 @@ export class ShortsService {
       throw new ForbiddenException('You can only delete your own reels');
     }
     await this.shortsRepository.remove(short);
+    await this.invalidateFeed();
   }
 
   // Race-tolerant: a duplicate like (double-tap, two devices) hits the unique
