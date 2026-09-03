@@ -237,6 +237,14 @@ export class EventsService {
           organizerName,
         );
       }
+
+      // Creation was the one mutating path that never invalidated the list cache — update,
+      // cancel, delete, approve, reject and enrol all did. A free event auto-approves and is
+      // public the instant it commits, so without this it stayed missing from the feed for
+      // the cache's full TTL and read as "my event wasn't created".
+      if (savedEvent.approvalStatus === EventApprovalStatus.APPROVED) {
+        await invalidateEventCaches(this.cache, savedEvent.id);
+      }
       return savedEvent;
     });
   }
@@ -357,12 +365,18 @@ export class EventsService {
     }
 
     const skip = (page - 1) * limit;
-    // Cancelling flips status, not approvalStatus, so without this a cancelled event stayed
-    // visible in every public listing.
+    // Public browse now returns every approved event whatever its state — upcoming, ongoing,
+    // finished or cancelled — and the client labels each one (see the status badge in
+    // EventInterestCard). Previously this excluded cancelled events and floored eventDate at
+    // today, which meant a catalogue of past events rendered as an empty app while the admin
+    // dashboard showed them all.
+    //
+    // Still excluded, and deliberately: soft-deleted rows, and anything not APPROVED —
+    // a pending or rejected event is not public at all, which is a different question from
+    // whether it has already happened.
     const base: any = {
       deletedAt: null as any,
       approvalStatus: EventApprovalStatus.APPROVED,
-      status: Not(EventStatus.CANCELLED),
     };
 
     if (categoryId) base.categoryId = categoryId;
@@ -372,11 +386,12 @@ export class EventsService {
     else if (priceMin !== undefined) base.pricePerTicket = MoreThanOrEqual(priceMin);
     else if (priceMax !== undefined) base.pricePerTicket = LessThanOrEqual(priceMax);
 
-    // Floored at today (IST) so a caller's dateFrom can only push later, never earlier —
-    // public browse must never surface a past event.
-    const todayKey = todayIstDateKey();
-    const effectiveDateFrom = dateFrom && dateFrom > todayKey ? dateFrom : todayKey;
-    base.eventDate = dateTo ? Between(effectiveDateFrom, dateTo) : MoreThanOrEqual(effectiveDateFrom);
+    // An explicit range from the caller is honoured exactly. There is no longer an implicit
+    // floor at today: a caller that wants only future events asks for them with dateFrom,
+    // rather than the listing deciding on their behalf.
+    if (dateFrom && dateTo) base.eventDate = Between(dateFrom, dateTo);
+    else if (dateFrom) base.eventDate = MoreThanOrEqual(dateFrom);
+    else if (dateTo) base.eventDate = LessThanOrEqual(dateTo);
 
     // Matched server-side before pagination — filtering only the current page meant a
     // bookable event several pages deep could never surface.
