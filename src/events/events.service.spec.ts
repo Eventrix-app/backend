@@ -1377,4 +1377,69 @@ describe('EventsService - Fixed Issues', () => {
       expect(event.isApproved()).toBe(true);
     });
   });
+
+  // The chain these guard against: a free event auto-approves on create, the app then uploads
+  // its cover and PATCHes coverImageUrl, the content-change rule sent it back to review, and
+  // findPending's isPaid filter hid it from the only screen that could approve it again.
+  describe('free events stay approved through content edits', () => {
+    const approvedFreeEvent = () => ({
+      id: 'event-1',
+      organizerId: 'org-1',
+      isPaid: false,
+      title: 'Free meetup',
+      coverImageUrl: null,
+      approvalStatus: EventApprovalStatus.APPROVED,
+      approvalMethod: 'auto',
+      approvedAt: new Date('2026-01-01'),
+      approvedBy: null,
+    });
+
+    it('a cover image added after creation does not send a free event back for review', async () => {
+      mockEventRepo.findOne.mockResolvedValue(approvedFreeEvent());
+      mockEventRepo.save.mockImplementation((e: any) => Promise.resolve(e));
+
+      const updated = await service.update(
+        'event-1',
+        { coverImageUrl: 'https://cdn.example.com/cover.jpg' } as any,
+        'admin-1',
+        ['admin'],
+      );
+
+      expect(updated.approvalStatus).toBe(EventApprovalStatus.APPROVED);
+    });
+
+    it('the same edit on a paid event does send it back for review', async () => {
+      mockEventRepo.findOne.mockResolvedValue({ ...approvedFreeEvent(), isPaid: true });
+      mockEventRepo.save.mockImplementation((e: any) => Promise.resolve(e));
+
+      const updated = await service.update(
+        'event-1',
+        { coverImageUrl: 'https://cdn.example.com/cover.jpg' } as any,
+        'admin-1',
+        ['admin'],
+      );
+
+      expect(updated.approvalStatus).toBe(EventApprovalStatus.PENDING_APPROVAL);
+    });
+
+    it('turning a free event paid still sends it back for review', async () => {
+      mockEventRepo.findOne.mockResolvedValue(approvedFreeEvent());
+      mockEventRepo.save.mockImplementation((e: any) => Promise.resolve(e));
+
+      const updated = await service.update('event-1', { pricePerTicket: 500 } as any, 'admin-1', ['admin']);
+
+      expect(updated.approvalStatus).toBe(EventApprovalStatus.PENDING_APPROVAL);
+      expect(updated.isPaid).toBe(true);
+    });
+
+    it('findPending surfaces a pending event whether or not it is paid', async () => {
+      mockEventRepo.findAndCount.mockResolvedValue([[], 0]);
+
+      await service.findPending(1, 20);
+
+      const where = mockEventRepo.findAndCount.mock.calls[0][0].where;
+      expect(where.approvalStatus).toBe(EventApprovalStatus.PENDING_APPROVAL);
+      expect(where).not.toHaveProperty('isPaid');
+    });
+  });
 });

@@ -557,7 +557,17 @@ export class EventsService {
     const contentChanged = CONTENT_FIELDS.some(
       (field) => updateEventDto[field] !== undefined && updateEventDto[field] !== event[field],
     );
-    if (wasApproved && (switchingToPaid || contentChanged)) {
+    // Free events are auto-approved at creation and must stay that way: only paid events
+    // ever sit in the admin queue. Without the willBePaid guard, a free event was approved on
+    // create and then un-approved seconds later by its own cover-image upload — the app
+    // uploads media after the event row exists, and coverImageUrl is a content field. That
+    // left it PENDING_APPROVAL, invisible in the app, and (because findPending filtered on
+    // isPaid) absent from the queue an admin would have to use to fix it.
+    const willBePaid =
+      updateEventDto.pricePerTicket !== undefined
+        ? Number(updateEventDto.pricePerTicket) > 0
+        : event.isPaid;
+    if (wasApproved && (switchingToPaid || (contentChanged && willBePaid))) {
       updateEventDto.approvalStatus = EventApprovalStatus.PENDING_APPROVAL;
       (updateEventDto as any).approvalMethod = null;
       (updateEventDto as any).approvedAt = null;
@@ -1310,9 +1320,13 @@ export class EventsService {
     const skip = (page - 1) * limit;
 
     const [events, total] = await this.eventsRepository.findAndCount({
+      // No isPaid filter. Only paid events are supposed to reach this queue, but that is
+      // enforced where approval is decided — filtering it here as well meant any free event
+      // that did become pending was invisible to the only screen that could approve it, so it
+      // stayed unapproved and unreachable forever. The queue must show everything awaiting
+      // review, not a subset it assumes is the only possibility.
       where: {
         approvalStatus: EventApprovalStatus.PENDING_APPROVAL,
-        isPaid: true,
         deletedAt: null as any,
       },
       relations: ['organizer', 'organizer.user', 'category'],
