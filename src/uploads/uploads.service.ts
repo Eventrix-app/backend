@@ -60,6 +60,9 @@ const PURPOSE_CONFIG: Record<UploadPurpose, PurposeConfig> = {
   // Reuses event-images (already public, already allows video). allowedRoles is null since
   // reel uploaders are attendees, not organizers.
   [UploadPurpose.REEL_VIDEO]: { bucket: 'event-images', pathPrefix: 'reels', allowedRoles: null },
+  // A frame extracted from the reel client-side — same allowedRoles as REEL_VIDEO, imageOnly
+  // since there's never a reason for this purpose to receive video bytes.
+  [UploadPurpose.REEL_THUMBNAIL]: { bucket: 'event-images', pathPrefix: 'reel-thumbnails', allowedRoles: null, imageOnly: true },
   // Reuses event-images too — a category icon is just another admin-managed image, not
   // worth its own bucket.
   [UploadPurpose.CATEGORY_ICON]: { bucket: 'event-images', pathPrefix: 'category-icons', allowedRoles: ['admin'], imageOnly: true, maxBytes: CATEGORY_ICON_MAX_BYTES },

@@ -18,6 +18,9 @@ export enum UploadPurpose {
   // this one (see UploadsService.PURPOSE_CONFIG's allowedRoles: null), not just
   // organizers/admins, since reel uploaders are attendees.
   REEL_VIDEO = 'reel-video',
+  // A client-generated frame from the reel's own video — same allowedRoles as REEL_VIDEO,
+  // since it's issued to the same uploader for the same reel.
+  REEL_THUMBNAIL = 'reel-thumbnail',
   CATEGORY_ICON = 'category-icon',
 }
 
